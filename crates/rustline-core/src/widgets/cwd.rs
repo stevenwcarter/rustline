@@ -35,7 +35,14 @@ impl Widget for Cwd {
 /// `/home/steve2` starts with `/home/steve` without actually being under
 /// that directory, so the stripped remainder must be empty or start with
 /// `/` for the abbreviation to apply.
+///
+/// `home` is normalized by trimming a trailing `/` first, so a
+/// trailing-slash `$HOME` (e.g. `/home/steve/`) still matches genuine
+/// subdirectories. Trimming a bare `/` yields an empty string, which falls
+/// through to the empty-home guard below and leaves `path` unchanged rather
+/// than abbreviating the root.
 fn abbreviate_home(path: &str, home: &str) -> String {
+    let home = home.trim_end_matches('/');
     if home.is_empty() {
         return path.to_string();
     }
@@ -89,5 +96,24 @@ mod tests {
             ..ctx()
         };
         assert_eq!(Cwd::default().render(&c)[0].text, "/etc");
+    }
+
+    #[test]
+    fn cwd_unchanged_for_sibling_prefix() {
+        let c = Context {
+            pane_current_path: "/home/steve2/foo".into(),
+            ..ctx()
+        };
+        assert_eq!(Cwd::default().render(&c)[0].text, "/home/steve2/foo");
+    }
+
+    #[test]
+    fn cwd_abbreviates_with_trailing_slash_home() {
+        let c = Context {
+            home: "/home/steve/".into(),
+            pane_current_path: "/home/steve/src".into(),
+            ..ctx()
+        };
+        assert_eq!(Cwd::default().render(&c)[0].text, "~/src");
     }
 }
