@@ -55,6 +55,10 @@ pub struct RegionArgs {
     pub pane: Option<String>,
     #[arg(long)]
     pub pane_path: Option<String>,
+    /// Print the rendered region in ANSI colour (for manual terminal preview)
+    /// instead of raw tmux markup.
+    #[arg(long)]
+    pub preview: bool,
 }
 
 /// Arguments for rendering one window's segment in the window list, sourced
@@ -78,4 +82,8 @@ pub struct WindowArgs {
     /// The window's flags (tmux `#{window_flags}`); may be empty.
     #[arg(long, default_value = "")]
     pub flags: String,
+    /// Print the rendered segment in ANSI colour (for manual terminal preview)
+    /// instead of raw tmux markup.
+    #[arg(long)]
+    pub preview: bool,
 }

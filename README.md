@@ -75,6 +75,26 @@ format = "%H:%M"
 Run `rustline print-config` to print the fully-resolved effective
 configuration (your overrides layered onto the defaults) as TOML.
 
+## Previewing on the command line
+
+Every render command accepts `--preview`, which prints the region in ANSI colour
+instead of raw tmux markup — handy for eyeballing the bar without wiring it into
+tmux:
+
+```bash
+rustline render left --preview --session=0 --window=1 --pane=0 --pane-path="$PWD"
+```
+
+A [`just`](https://just.systems) recipe previews the whole bar (left region,
+window list, right region) at once — using your live tmux context when run
+inside tmux, and sample values otherwise:
+
+```bash
+just preview
+```
+
+Other recipes: `just build`, `just test`, `just lint`.
+
 ## Roadmap: WASM plugins
 
 Third-party widgets via WASM plugins are **planned but not yet implemented**.

@@ -1,4 +1,5 @@
 //! rustline-core: pure, front-end-agnostic status line rendering.
+pub mod ansi;
 pub mod assemble;
 pub mod config;
 pub mod context;
@@ -7,6 +8,7 @@ pub mod segment;
 pub mod widget;
 pub mod widgets;
 
+pub use ansi::tmux_to_ansi;
 pub use assemble::{assign_palette, render_named_region, render_window};
 pub use config::Config;
 pub use context::{Context, WindowCtx};
