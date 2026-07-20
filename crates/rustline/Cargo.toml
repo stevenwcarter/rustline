@@ -1,0 +1,19 @@
+[package]
+name = "rustline"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rustline"
+path = "src/main.rs"
+
+[dependencies]
+rustline-core = { path = "../rustline-core" }
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+libc = "0.2"
+gethostname = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
