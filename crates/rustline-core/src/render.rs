@@ -1,0 +1,266 @@
+//! Powerline rendering: turn a slice of [`Segment`]s into tmux status-line
+//! markup with hard/soft powerline separators and blended outer edges.
+
+use std::fmt::Write;
+
+use crate::{Color, Segment};
+
+/// Which side of the status bar a region is anchored to. This decides the
+/// powerline glyph orientation and how separator colors are mirrored: `Left`
+/// arrows point rightwards (into the bar), `Right` arrows point leftwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+}
+
+/// Visual theme for a rendered region: the color palette, default foreground,
+/// bar background, and the four powerline separator glyphs (hard/soft for each
+/// direction) plus the color used to draw soft separators.
+#[derive(Clone, Debug)]
+pub struct Theme {
+    pub palette: Vec<Color>,
+    pub fg: Color,
+    pub bar_bg: Color,
+    pub hard_left: String,
+    pub hard_right: String,
+    pub soft_left: String,
+    pub soft_right: String,
+    pub soft_fg: Color,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            palette: vec![Color::Indexed(31), Color::Indexed(238)],
+            fg: Color::Indexed(255),
+            bar_bg: Color::Indexed(234),
+            hard_left: "\u{e0b0}".into(),
+            hard_right: "\u{e0b2}".into(),
+            soft_left: "\u{e0b1}".into(),
+            soft_right: "\u{e0b3}".into(),
+            soft_fg: Color::Indexed(240),
+        }
+    }
+}
+
+impl Theme {
+    /// The hard (background-changing) separator glyph for `dir`.
+    fn hard(&self, dir: Direction) -> &str {
+        match dir {
+            Direction::Left => &self.hard_left,
+            Direction::Right => &self.hard_right,
+        }
+    }
+
+    /// The soft (same-background) separator glyph for `dir`.
+    fn soft(&self, dir: Direction) -> &str {
+        match dir {
+            Direction::Left => &self.soft_left,
+            Direction::Right => &self.soft_right,
+        }
+    }
+}
+
+/// The effective foreground for a segment: its own `fg`, or the theme default.
+fn eff_fg<'a>(s: &'a Segment, theme: &'a Theme) -> &'a Color {
+    s.style.fg.as_ref().unwrap_or(&theme.fg)
+}
+
+/// The effective background for a segment: its own `bg`, or the bar background.
+fn eff_bg<'a>(s: &'a Segment, theme: &'a Theme) -> &'a Color {
+    s.style.bg.as_ref().unwrap_or(&theme.bar_bg)
+}
+
+/// Write a hard powerline glyph at a boundary between a `left` and a `right`
+/// background color. For [`Direction::Left`] the arrow is colored
+/// `fg=left,bg=right`; for [`Direction::Right`] the roles mirror
+/// (`fg=right,bg=left`) so the glyph points outward. This single rule drives
+/// both between-segment separators and the outer region edges.
+fn write_hard(out: &mut String, theme: &Theme, dir: Direction, left: &Color, right: &Color) {
+    let (fg, bg) = match dir {
+        Direction::Left => (left, right),
+        Direction::Right => (right, left),
+    };
+    let _ = write!(
+        out,
+        "#[fg={},bg={}]{}",
+        fg.to_tmux(),
+        bg.to_tmux(),
+        theme.hard(dir),
+    );
+}
+
+/// Render `segments` into tmux status-line markup for the given `dir`.
+///
+/// Each segment becomes `#[fg=<F>,bg=<B>] text ` where `F`/`B` are the
+/// segment's effective foreground/background. Adjacent segments are joined by a
+/// hard glyph when their backgrounds differ, or a soft glyph when they match.
+/// The region blends into the bar at both outer edges (a hard glyph to/from
+/// `theme.bar_bg`), except where a bordering segment's background already equals
+/// `bar_bg`. The string always ends with `#[default]`; empty input renders `""`.
+pub fn render_region(dir: Direction, segments: &[Segment], theme: &Theme) -> String {
+    let (Some(first), Some(last)) = (segments.first(), segments.last()) else {
+        return String::new();
+    };
+
+    let mut out = String::new();
+
+    // Leading (outer) edge: blend the bar background into the first segment when
+    // their backgrounds differ. For a Right region this is the left-hand edge.
+    let first_bg = eff_bg(first, theme);
+    if first_bg != &theme.bar_bg {
+        write_hard(&mut out, theme, dir, &theme.bar_bg, first_bg);
+    }
+
+    let mut prev_bg: Option<&Color> = None;
+    for s in segments {
+        let cur_bg = eff_bg(s, theme);
+        if let Some(prev_bg) = prev_bg {
+            if prev_bg != cur_bg {
+                write_hard(&mut out, theme, dir, prev_bg, cur_bg);
+            } else {
+                let _ = write!(
+                    out,
+                    "#[fg={},bg={}]{}",
+                    theme.soft_fg.to_tmux(),
+                    cur_bg.to_tmux(),
+                    theme.soft(dir),
+                );
+            }
+        }
+        let bold = if s.style.bold { ",bold" } else { "" };
+        let _ = write!(
+            out,
+            "#[fg={},bg={}{bold}] {} ",
+            eff_fg(s, theme).to_tmux(),
+            cur_bg.to_tmux(),
+            s.text,
+        );
+        prev_bg = Some(cur_bg);
+    }
+
+    // Trailing (outer) edge: blend the last segment back into the bar when their
+    // backgrounds differ. For a Right region this is the far right-hand edge.
+    let last_bg = eff_bg(last, theme);
+    if last_bg != &theme.bar_bg {
+        write_hard(&mut out, theme, dir, last_bg, &theme.bar_bg);
+    }
+
+    out.push_str("#[default]");
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Color, Segment, Style};
+
+    fn theme() -> Theme {
+        Theme {
+            palette: vec![Color::Indexed(31), Color::Indexed(238)],
+            fg: Color::Indexed(255),
+            bar_bg: Color::Indexed(234),
+            hard_left: "\u{e0b0}".into(),
+            hard_right: "\u{e0b2}".into(),
+            soft_left: "\u{e0b1}".into(),
+            soft_right: "\u{e0b3}".into(),
+            soft_fg: Color::Indexed(240),
+        }
+    }
+
+    fn seg(text: &str, bg: u8) -> Segment {
+        Segment::styled(
+            text,
+            Style {
+                fg: None,
+                bg: Some(Color::Indexed(bg)),
+                bold: false,
+            },
+        )
+    }
+
+    #[test]
+    fn empty_is_empty() {
+        assert_eq!(render_region(Direction::Left, &[], &theme()), "");
+    }
+
+    #[test]
+    fn single_segment_has_text_and_default_reset() {
+        let out = render_region(Direction::Left, &[seg("hi", 31)], &theme());
+        assert!(out.contains("hi"), "text present: {out}");
+        assert!(out.contains("bg=colour31"), "seg bg: {out}");
+        assert!(out.ends_with("#[default]"), "reset: {out}");
+        // seg bg (31) != bar_bg (234) => trailing edge arrow to bar bg
+        assert!(out.contains("\u{e0b0}"), "edge glyph: {out}");
+    }
+
+    #[test]
+    fn different_bg_uses_hard_separator() {
+        let out = render_region(Direction::Left, &[seg("a", 31), seg("b", 238)], &theme());
+        // hard separator between them, fg=prev.bg bg=next.bg
+        assert!(
+            out.contains("#[fg=colour31,bg=colour238]\u{e0b0}"),
+            "hard sep: {out}"
+        );
+    }
+
+    #[test]
+    fn same_bg_uses_soft_separator() {
+        let out = render_region(Direction::Left, &[seg("a", 31), seg("b", 31)], &theme());
+        assert!(
+            out.contains("#[fg=colour240,bg=colour31]\u{e0b1}"),
+            "soft sep: {out}"
+        );
+    }
+
+    #[test]
+    fn right_direction_uses_right_glyphs() {
+        let out = render_region(Direction::Right, &[seg("a", 31), seg("b", 238)], &theme());
+        assert!(out.contains("\u{e0b2}"), "right hard glyph: {out}");
+    }
+
+    #[test]
+    fn bg_equal_bar_bg_has_no_edge_glyph() {
+        let s = seg("plain", 234); // == bar_bg
+        let out = render_region(Direction::Left, &[s], &theme());
+        assert!(
+            !out.contains("\u{e0b0}"),
+            "no edge glyph when bg==bar_bg: {out}"
+        );
+        assert!(out.contains("plain"));
+    }
+
+    #[test]
+    fn right_leading_edge_blends_bar_bg_into_first_segment() {
+        // A Right region's outer edge is on its LEFT: a right-facing hard glyph
+        // (U+E0B2) transitioning bar_bg -> first-segment.bg. With the Right
+        // fg/bg mirror the glyph is colored fg=first.bg, bg=bar_bg, and it is
+        // the very first thing emitted (the leading edge).
+        let out = render_region(Direction::Right, &[seg("a", 31)], &theme());
+        assert!(
+            out.starts_with("#[fg=colour31,bg=colour234]\u{e0b2}"),
+            "right leading edge (bar_bg -> first.bg): {out}"
+        );
+        // A bg matching bar_bg must still produce no leading edge glyph.
+        let plain = render_region(Direction::Right, &[seg("p", 234)], &theme());
+        assert!(
+            !plain.contains("\u{e0b2}"),
+            "no right edge glyph when bg==bar_bg: {plain}"
+        );
+    }
+
+    #[test]
+    fn right_multi_segment_trailing_edge_blends_last_into_bar() {
+        // A Right region with two segments (bg 31 then 238): the far-right
+        // trailing edge is a right-facing hard glyph (U+E0B2) from the LAST
+        // segment's bg (238) back into bar_bg (234). With the Right fg/bg mirror
+        // it is colored fg=bar_bg(234), bg=last(238), and it is the final thing
+        // emitted before the `#[default]` reset.
+        let out = render_region(Direction::Right, &[seg("a", 31), seg("b", 238)], &theme());
+        assert!(
+            out.ends_with("#[fg=colour234,bg=colour238]\u{e0b2}#[default]"),
+            "right trailing edge (last.bg -> bar_bg): {out}"
+        );
+    }
+}
