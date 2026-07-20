@@ -9,8 +9,21 @@ use std::path::PathBuf;
 use build_context::{build_region_context, build_window_context};
 use clap::Parser;
 use cli::{Cli, Command, Render};
-use rustline_core::{Config, Direction, Registry, render_named_region, render_window};
+use rustline_core::{
+    Config, Direction, Registry, render_named_region, render_window, tmux_to_ansi,
+};
 use tracing_subscriber::{EnvFilter, fmt};
+
+/// Print a rendered region to stdout: as ANSI-coloured text (with a trailing
+/// reset and newline, for terminal preview) when `preview` is set, otherwise as
+/// the raw tmux markup tmux itself consumes.
+fn emit(markup: &str, preview: bool) {
+    if preview {
+        println!("{}\x1b[0m", tmux_to_ansi(markup));
+    } else {
+        print!("{markup}");
+    }
+}
 
 /// Resolve the config file path: `$XDG_CONFIG_HOME/rustline/config.toml`,
 /// falling back to `$HOME/.config/rustline/config.toml` when unset.
@@ -37,17 +50,17 @@ fn main() {
             let ctx = build_region_context(&args);
             let out =
                 render_named_region(Direction::Left, &cfg.layout.left, &ctx, &registry, &theme);
-            print!("{out}");
+            emit(&out, args.preview);
         }
         Command::Render(Render::Right(args)) => {
             let ctx = build_region_context(&args);
             let out =
                 render_named_region(Direction::Right, &cfg.layout.right, &ctx, &registry, &theme);
-            print!("{out}");
+            emit(&out, args.preview);
         }
         Command::Render(Render::Window(args)) => {
             let ctx = build_window_context(&args);
-            print!("{}", render_window(&ctx, &registry, &theme));
+            emit(&render_window(&ctx, &registry, &theme), args.preview);
         }
         Command::Init => print!(
             "{}",
