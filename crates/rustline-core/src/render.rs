@@ -249,4 +249,18 @@ mod tests {
             "no right edge glyph when bg==bar_bg: {plain}"
         );
     }
+
+    #[test]
+    fn right_multi_segment_trailing_edge_blends_last_into_bar() {
+        // A Right region with two segments (bg 31 then 238): the far-right
+        // trailing edge is a right-facing hard glyph (U+E0B2) from the LAST
+        // segment's bg (238) back into bar_bg (234). With the Right fg/bg mirror
+        // it is colored fg=bar_bg(234), bg=last(238), and it is the final thing
+        // emitted before the `#[default]` reset.
+        let out = render_region(Direction::Right, &[seg("a", 31), seg("b", 238)], &theme());
+        assert!(
+            out.ends_with("#[fg=colour234,bg=colour238]\u{e0b2}#[default]"),
+            "right trailing edge (last.bg -> bar_bg): {out}"
+        );
+    }
 }

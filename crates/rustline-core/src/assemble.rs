@@ -125,6 +125,32 @@ mod tests {
     }
 
     #[test]
+    fn assign_palette_skips_explicit_bg_and_fills_neighbors() {
+        use crate::{Color, Style};
+        let theme = crate::Theme::default(); // palette len 2: [31, 238]
+        let mut segs = vec![
+            crate::Segment::new("a"), // no bg -> palette[0]
+            crate::Segment::styled(
+                "b",
+                Style {
+                    fg: None,
+                    bg: Some(Color::Indexed(99)), // explicit -> must be left untouched
+                    bold: false,
+                },
+            ),
+            crate::Segment::new("c"), // no bg -> palette[2 % 2] = palette[0]
+        ];
+        assign_palette(&mut segs, &theme);
+        assert_eq!(segs[0].style.bg, Some(theme.palette[0].clone()));
+        assert_eq!(
+            segs[1].style.bg,
+            Some(Color::Indexed(99)),
+            "explicit bg preserved"
+        );
+        assert_eq!(segs[2].style.bg, Some(theme.palette[0].clone()));
+    }
+
+    #[test]
     fn panicking_widget_does_not_break_region() {
         use crate::{Segment, Widget};
         struct Boom;

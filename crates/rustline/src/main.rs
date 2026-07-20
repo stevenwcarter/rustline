@@ -49,10 +49,16 @@ fn main() {
             let ctx = build_window_context(&args);
             print!("{}", render_window(&ctx, &registry, &theme));
         }
-        Command::Init => print!("{}", tmux_conf::init_block()),
+        Command::Init => print!(
+            "{}",
+            tmux_conf::init_block(&theme.bar_bg.to_tmux(), &theme.fg.to_tmux())
+        ),
         Command::PrintConfig => match toml::to_string_pretty(&cfg) {
             Ok(s) => print!("{s}"),
-            Err(error) => eprintln!("failed to serialize config: {error}"),
+            Err(error) => {
+                eprintln!("failed to serialize config: {error}");
+                std::process::exit(1);
+            }
         },
     }
 }

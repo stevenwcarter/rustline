@@ -3,8 +3,8 @@
 //!
 //! `render` is a subcommand *group* (not a flat set of flags) so that
 //! `rustline render left`, `rustline render right`, and
-//! `rustline render window [--current] <index> <name> <flags>` all parse as
-//! `rustline render <region-or-window> ...`.
+//! `rustline render window [--current] --index <i> --name <n> --flags <f>` all
+//! parse as `rustline render <region-or-window> ...`.
 
 use clap::{Args, Parser, Subcommand};
 
@@ -57,13 +57,25 @@ pub struct RegionArgs {
     pub pane_path: Option<String>,
 }
 
-/// Arguments for rendering one window's segment in the window list.
+/// Arguments for rendering one window's segment in the window list, sourced
+/// from tmux format variables by the config `init` produces.
+///
+/// These are named (`--index`/`--name`/`--flags`) rather than positional so the
+/// tmux config can pass each value in injection-safe `--flag=#{q:...}` form —
+/// see [`crate::tmux_conf::init_block`]. `--name`/`--flags` default to empty so
+/// an unnamed or unflagged window still parses as a present, empty value.
 #[derive(Args)]
 pub struct WindowArgs {
     /// Whether this is the currently active window.
     #[arg(long)]
     pub current: bool,
+    /// The window's index (tmux `#{window_index}`).
+    #[arg(long)]
     pub index: String,
+    /// The window's name (tmux `#{window_name}`); may be empty.
+    #[arg(long, default_value = "")]
     pub name: String,
+    /// The window's flags (tmux `#{window_flags}`); may be empty.
+    #[arg(long, default_value = "")]
     pub flags: String,
 }

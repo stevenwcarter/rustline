@@ -217,4 +217,24 @@ key = "value"
         let c: Config = toml::from_str(toml).unwrap();
         assert!(c.plugins.contains_key("owner/repo"));
     }
+
+    #[test]
+    fn config_toml_roundtrip_preserves_plugin_entry() {
+        let src = r#"
+[plugins."owner/repo"]
+key = "value"
+"#;
+        let c: Config = toml::from_str(src).unwrap();
+        // Serialize the full Config back out and reparse: the plugin table (kept
+        // as raw TOML `Value`) must survive the round-trip intact, key and all.
+        let serialized = toml::to_string(&c).unwrap();
+        let back: Config = toml::from_str(&serialized).unwrap();
+        assert!(back.plugins.contains_key("owner/repo"));
+        assert_eq!(
+            back.plugins["owner/repo"]
+                .get("key")
+                .and_then(Value::as_str),
+            Some("value")
+        );
+    }
 }
