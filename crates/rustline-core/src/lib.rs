@@ -3,6 +3,7 @@ pub mod context;
 pub mod render;
 pub mod segment;
 pub mod widget;
+pub mod widgets;
 
 pub use context::{Context, WindowCtx};
 pub use render::{Direction, Theme, render_region};
