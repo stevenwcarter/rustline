@@ -1,16 +1,20 @@
 pub mod cwd;
 pub mod datetime;
 pub mod hostname;
+pub mod lan_ip;
 pub mod loadavg;
 mod net;
 pub mod pane_id;
+pub mod tailscale_ip;
 pub mod windows;
 
 pub use cwd::Cwd;
 pub use datetime::DateTime;
 pub use hostname::Hostname;
+pub use lan_ip::LanIp;
 pub use loadavg::LoadAvg;
 pub use pane_id::PaneId;
+pub use tailscale_ip::TailscaleIp;
 pub use windows::Windows;
 
 use crate::Config;

@@ -2,11 +2,8 @@
 //! "the LAN", which is Tailscale, and how an address (or its absence) renders.
 //! No I/O — operates entirely on the `Context.interfaces` snapshot.
 //!
-//! These `pub(crate)` helpers aren't called by production code yet — the
-//! `LanIp`/`TailscaleIp` widgets that wire them in land in the very next task
-//! of this feature's SDD sequence. Until then they're reachable only from
-//! `tests`, which rustc's dead_code analysis doesn't count as "live".
-#![allow(dead_code)]
+//! Called by the `lan_ip`/`tailscale_ip` widgets, which are the production
+//! callers; this module stays private (`mod net;`) with `pub(crate)` helpers.
 
 use std::net::Ipv4Addr;
 
