@@ -36,6 +36,9 @@ mod tests {
                 .unwrap(),
             window: None,
             interfaces: ifaces,
+            battery: None,
+            os: String::new(),
+            arch: String::new(),
         }
     }
 

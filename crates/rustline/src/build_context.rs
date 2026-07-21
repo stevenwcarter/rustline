@@ -61,6 +61,9 @@ pub fn build_region_context(args: &RegionArgs) -> Context {
         now: chrono::Local::now(),
         window: None,
         interfaces: read_interfaces(),
+        battery: None, // Task 2 replaces this with crate::battery::read_battery()
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
     }
 }
 

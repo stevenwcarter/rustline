@@ -23,6 +23,29 @@ pub struct NetIface {
     pub ipv4: Ipv4Addr,
 }
 
+/// Charge state of the host battery. A small typed domain — not a stringly
+/// value — mapped from the Linux sysfs `status` file and macOS `pmset` state
+/// words at Context-build time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatteryState {
+    Charging,
+    Discharging,
+    Full,
+    Unknown,
+}
+
+/// A battery snapshot captured at Context-build time. `percent` is `0..=100`.
+///
+/// `Context::battery` is `None` on hosts without a battery, on unsupported
+/// platforms, or when the read failed — never a fabricated `0%` (invariant #6),
+/// mirroring `loadavg`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Battery {
+    pub percent: u8,
+    pub state: BatteryState,
+}
+
 /// Everything the renderer needs to know about the current tmux session,
 /// pane, and host in order to produce a status line.
 ///
@@ -43,6 +66,13 @@ pub struct Context {
     /// Non-loopback IPv4 interfaces read once at build time; the IP widgets
     /// select from this rather than touching the OS mid-render.
     pub interfaces: Vec<NetIface>,
+    /// Battery snapshot read once at build time; `None` when absent/unsupported.
+    pub battery: Option<Battery>,
+    /// Host OS (`std::env::consts::OS`, e.g. `"linux"`, `"macos"`). Additive
+    /// platform metadata for WASM guests.
+    pub os: String,
+    /// Host CPU arch (`std::env::consts::ARCH`, e.g. `"x86_64"`, `"aarch64"`).
+    pub arch: String,
 }
 
 #[cfg(test)]
@@ -68,6 +98,12 @@ mod tests {
                 name: "eth0".into(),
                 ipv4: "192.168.1.20".parse().unwrap(),
             }],
+            battery: Some(Battery {
+                percent: 73,
+                state: BatteryState::Discharging,
+            }),
+            os: "linux".into(),
+            arch: "x86_64".into(),
         }
     }
 
@@ -91,6 +127,28 @@ mod tests {
         assert_eq!(
             back.interfaces[0].ipv4,
             "192.168.1.20".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn context_battery_os_arch_survive_serde() {
+        let ctx = sample();
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: Context = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.battery, ctx.battery);
+        assert_eq!(back.os, "linux");
+        assert_eq!(back.arch, "x86_64");
+    }
+
+    #[test]
+    fn battery_state_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&BatteryState::Discharging).unwrap(),
+            "\"discharging\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BatteryState::Full).unwrap(),
+            "\"full\""
         );
     }
 }
