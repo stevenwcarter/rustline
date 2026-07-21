@@ -102,13 +102,15 @@ pub fn build_plugin(wasm: &[u8], ctx: CapabilityCtx) -> Result<extism::Plugin, e
 pub struct WasmWidget {
     plugin: Arc<Mutex<extism::Plugin>>,
     options: Arc<serde_json::Value>,
+    name: Arc<str>,
 }
 
 impl WasmWidget {
-    pub fn new(plugin: extism::Plugin, options: serde_json::Value) -> Self {
+    pub fn new(plugin: extism::Plugin, options: serde_json::Value, name: &str) -> Self {
         Self {
             plugin: Arc::new(Mutex::new(plugin)),
             options: Arc::new(options),
+            name: Arc::from(name),
         }
     }
 }
@@ -138,12 +140,63 @@ impl Widget for WasmWidget {
             }
         }
     }
+
+    fn range_name(&self) -> Option<&str> {
+        // A plugin is clickable when its name fits tmux's 15-byte user-range
+        // limit; the guest decides whether to honor `context.toggled`.
+        (self.name.len() <= 15).then_some(&*self.name)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::abi::parse_render_output;
-    use rustline_core::{Config, Registry};
+    use rustline_core::{Config, Context, Registry};
+
+    use crate::abi::{RenderInput, parse_render_output};
+
+    /// A minimal `Context` with `toggled` set to `{name}`, for pinning the
+    /// host→guest seam that carries click-toggle state across the wasm
+    /// boundary. Field list copied from `rustline-core`'s test `ctx()`.
+    fn sample_ctx_with_toggle(name: &str) -> Context {
+        Context {
+            session_name: "0".into(),
+            window_index: "0".into(),
+            pane_index: "0".into(),
+            pane_current_path: "/".into(),
+            home: "/home/steve".into(),
+            hostname: "h".into(),
+            loadavg: None,
+            now: chrono::Local::now(),
+            window: None,
+            interfaces: Vec::new(),
+            battery: None,
+            cpu: None,
+            memory: None,
+            os: String::new(),
+            arch: String::new(),
+            toggled: std::collections::BTreeSet::from([name.to_string()]),
+        }
+    }
+
+    #[test]
+    fn render_input_serializes_toggled_for_guests() {
+        // Build a minimal Context with a toggled entry and assert the guest
+        // payload carries it — this is the seam a plugin depends on to honor
+        // toggling.
+        let json = serde_json::to_string(&RenderInput {
+            context: &sample_ctx_with_toggle("weather"),
+            config: &serde_json::json!({}),
+        })
+        .unwrap();
+        assert!(
+            json.contains("\"toggled\""),
+            "payload carries toggled: {json}"
+        );
+        assert!(
+            json.contains("weather"),
+            "payload carries the toggled name: {json}"
+        );
+    }
 
     #[test]
     fn parse_output_degrades_on_malformed() {

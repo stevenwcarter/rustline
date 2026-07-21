@@ -71,7 +71,10 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
                 continue;
             }
         }
-        let widget = host::WasmWidget::new(plugin, options);
+        if stem.len() > 15 {
+            tracing::warn!(plugin = %stem, "plugin name > 15 bytes; not click-toggleable");
+        }
+        let widget = host::WasmWidget::new(plugin, options, stem);
         let shared = Arc::new(widget);
         reg.register(stem, Box::new(move || Box::new((*shared).clone())));
     }
