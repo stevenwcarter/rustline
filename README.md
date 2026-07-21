@@ -109,10 +109,12 @@ your config (`allowed_urls` / `allowed_paths`, each a glob or a `re:`-prefixed
 regex; `re:` patterns are anchored to a full-string match, so include `.*` for a
 prefix, e.g. `re:https://wttr\.in/.*`), and each plugin gets its own sandboxed
 state directory with a size
-quota (`max_state_bytes`, default 50 MB) for caching data between renders. A
-plugin has no ambient access to anything — a disallowed request is simply
-refused, and any plugin error, timeout, or crash renders as an empty segment
-rather than breaking the status line.
+quota (`max_state_bytes`, default 50 MB) for caching data between renders. The
+host also exposes a TTL-cached HTTP GET, so a plugin can fetch remote data at
+most once per interval without managing its own cache — the bundled `weather`
+example uses it. A plugin has no ambient access to anything — a disallowed
+request is simply refused, and any plugin error, timeout, or crash renders as
+an empty segment rather than breaking the status line.
 
 Build and install the bundled `weather` example (a Nerd-Font condition icon +
 °F for a configured zip code, fetched from wttr.in at most once per

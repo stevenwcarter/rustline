@@ -25,11 +25,12 @@ Cargo **workspace**, edition 2024, `resolver = "2"`:
   `Context` from CLI args + local system reads, discovers/registers WASM
   plugins, calls the core, and prints.
 - `crates/rustline-wasm` — the **WASM plugin host**: an Extism (wasmtime)
-  runtime with five capability-gated host functions (network + state +
-  arbitrary-file read/write), per-plugin allowlists and a sandboxed/quota-bounded
-  state dir, and discovery of `*.wasm` files into `Widget` registrations. Zero
-  ambient authority — guests run with wasi off and no built-in Extism HTTP/FS;
-  every effect is host-checked. Reusable verbatim by a future daemon front-end.
+  runtime with six capability-gated host functions (TTL-cached + raw network +
+  state + arbitrary-file read/write), per-plugin allowlists and a
+  sandboxed/quota-bounded state dir, and discovery of `*.wasm` files into
+  `Widget` registrations. Zero ambient authority — guests run with wasi off
+  and no built-in Extism HTTP/FS; every effect is host-checked. Reusable
+  verbatim by a future daemon front-end.
 
 `plugins/` holds example/third-party plugin sources, each an **excluded**
 workspace member (own `Cargo.lock`, built for `wasm32-unknown-unknown`):
@@ -97,23 +98,27 @@ these shared types, not a design shortcut. Keep them serializable.
   (state-dir quota accounting via `walkdir`).
 - `paths.rs` — `expand_tilde`, `data_root`, `state_root`, `default_plugin_dir`
   (all under `$XDG_DATA_HOME/rustline`, falling back to `$HOME/.local/share/rustline`).
-- `abi.rs` — the host↔guest wire types (`HttpResult`, `ReadResult`,
-  `WriteResult`, `RenderInput`) and `parse_render_output` (malformed JSON →
-  empty `Vec`).
+- `abi.rs` — the host↔guest wire types (`HttpResult`, `CachedHttpResult`,
+  `ReadResult`, `WriteResult`, `RenderInput`) and `parse_render_output`
+  (malformed JSON → empty `Vec`).
+- `cache.rs` — pure HTTP-response-cache helpers: FNV-1a URL→path, RFC3339
+  freshness (`age_secs`/`is_fresh`), quota-bounded `read_entry`/`write_entry`.
 - `capability.rs` — `CapabilityCtx`: one plugin instance's allowlists, state
   root, and quota, built from `PluginConfig` and held in Extism `UserData` so
   each instance only ever sees its own grants.
 - `fetch.rs` — `Fetcher` trait + `UreqFetcher` (the real rustls blocking HTTP
   client); the trait seam makes `perform_http_get`'s gating logic testable
   without a network.
-- `perform.rs` — the five capability-checked effect functions
-  (`perform_http_get`, `perform_state_read/write`, `perform_file_read/write`);
-  pure enough to unit-test directly, incl. the denied-case tests.
-- `host.rs` — the `host_fn!` wrappers binding `perform_*` to each plugin's
-  `CapabilityCtx`, `build_plugin` (Extism instantiation: wasi off, fuel +
-  timeout + memory caps), and `WasmWidget` (wraps an `extism::Plugin`;
-  `Widget::render` degrades to empty segments on any error/timeout/malformed
-  output).
+- `perform.rs` — the six capability-checked effect functions
+  (`perform_http_get`, `perform_http_get_cached` — the TTL-cached GET:
+  gate-first, 2xx-only caching, serve-stale — `perform_state_read/write`,
+  `perform_file_read/write`); pure enough to unit-test directly, incl. the
+  denied-case tests.
+- `host.rs` — the `host_fn!` wrappers binding `perform_*` (incl.
+  `rl_http_get_cached`) to each plugin's `CapabilityCtx`, `build_plugin`
+  (Extism instantiation: wasi off, fuel + timeout + memory caps), and
+  `WasmWidget` (wraps an `extism::Plugin`; `Widget::render` degrades to empty
+  segments on any error/timeout/malformed output).
 - `lib.rs::register_plugins` — discovers `*.wasm` in the plugin dir, and for
   each name in the caller's `needed` list (i.e. actually referenced by a
   layout region — avoids paying wasm cold-start for unused plugins):
@@ -122,10 +127,11 @@ these shared types, not a design shortcut. Keep them serializable.
   colliding with a built-in is skipped (built-in wins).
 
 `plugins/weather` (excluded workspace member, `wasm32-unknown-unknown`):
-- `lib.rs` — pure logic (`code_to_icon`, `render_format`, `is_fresh`,
-  `parse_wttr`) compiled and unit-tested on the host target, plus a
+- `lib.rs` — pure logic (`code_to_icon`, `render_format`, `parse_wttr`)
+  compiled and unit-tested on the host target, plus a
   `#[cfg(target_arch = "wasm32")] mod guest` with the Extism `name`/`render`
-  exports and `rl_http_get`/`rl_state_read`/`rl_state_write` guest imports.
+  exports and a single `rl_http_get_cached` guest import (the host owns the
+  TTL cache).
 
 `rustline` (bin):
 - `cli.rs` — `clap` derive. `render` and `plugin` are subcommand *groups*.
@@ -236,7 +242,10 @@ with globs); to match a prefix/substring, include `.*` in the pattern (e.g.
 7. **N1. Zero ambient authority.** A guest runs with `with_wasi(false)` and no
    Extism built-in HTTP/FS; every network/filesystem effect goes through a
    host function that checks the plugin's `CapabilityCtx` first. Adding a new
-   host capability means adding its gate *and* a denied-case test.
+   host capability means adding its gate *and* a denied-case test. The
+   TTL-cached GET (`rl_http_get_cached`) gates `allowed_urls` before any fetch
+   (gate-first: a denied URL makes no network call and touches no cache),
+   with its own denied-case test.
 8. **N2. A plugin never breaks the bar.** Any instantiation error, render
    error, timeout, or malformed output degrades to empty segments
    (`WasmWidget::render`), bounded by fuel + wall-clock timeout + memory caps.
@@ -277,16 +286,19 @@ with globs); to match a prefix/substring, include `.*` in the pattern (e.g.
   **rustls-only, still true with the plugin host**: `rustline-wasm`'s HTTP
   capability uses `ureq` with `default-features = false` + the `tls`/`json`
   features (rustls), and `extism` is built with `default-features = false`
-  (its built-in HTTP client is deliberately dropped — `rl_http_get` is the only
-  network path). `cargo tree -i openssl` / `-i native-tls` stay empty across
-  the whole graph, including `plugins/weather`. The `2.3 MB` dynamic binary is
+  (its built-in HTTP client is deliberately dropped — `rl_http_get` and
+  `rl_http_get_cached` are the only network paths). `cargo tree -i openssl` /
+  `-i native-tls` stay empty across the whole graph, including
+  `plugins/weather`. The `2.3 MB` dynamic binary is
   fine here — the musl/`scratch` Docker policy is for server images, not this
   local CLI.
 
 ## Roadmap
 
 - Done: WASM plugins — a real Extism host, capability-gated network/filesystem
-  access, and the `weather` example plugin.
+  access, and the `weather` example plugin, plus a host-managed TTL-cached
+  fetch capability (`rl_http_get_cached`) that plugins use instead of
+  hand-rolling caches.
 - Plugin auto-download by `owner/repo` (today, `source` is just a config note;
   installing a plugin means putting the `.wasm` in the plugin dir yourself).
 - An interactive capability-approval flow (config/CLI allowlist edits are
