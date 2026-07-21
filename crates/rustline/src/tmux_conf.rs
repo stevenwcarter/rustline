@@ -43,6 +43,20 @@ set-hook -g after-select-pane   "refresh-client -S"
 set-hook -g after-select-window "refresh-client -S"
 "##,
     );
+    block.push_str(
+        r##"# rustline click-to-toggle a widget's alt view (needs: set -g mouse on)
+bind -T root MouseDown1Status {
+    if -F "#{==:#{mouse_status_range},window}" {
+        select-window -t=
+    } {
+        if -F "#{mouse_status_range}" {
+            run-shell "rustline click --range=#{q:mouse_status_range} --button=left"
+            refresh-client -S
+        }
+    }
+}
+"##,
+    );
     block
 }
 
@@ -90,5 +104,32 @@ mod tests {
             "status-style bg: {b}"
         );
         assert!(b.contains("status-justify centre"), "centered: {b}");
+    }
+
+    #[test]
+    fn init_block_wires_click_toggle_binding() {
+        let b = init_block("colour234", "colour255");
+        assert!(b.contains("MouseDown1Status"), "binds status click: {b}");
+        // preserves default window-click selection
+        assert!(
+            b.contains("select-window -t="),
+            "keeps window selection: {b}"
+        );
+        // dispatches to rustline click with the q-escaped range (invariant #4)
+        assert!(
+            b.contains("rustline click --range=#{q:mouse_status_range}"),
+            "click dispatch q-escaped: {b}"
+        );
+        // never a bare, unescaped mouse_status_range in the click arg
+        assert!(
+            !b.contains("--range=#{mouse_status_range}"),
+            "must q-escape: {b}"
+        );
+        // discoverability hint
+        assert!(b.contains("set -g mouse on"), "mentions mouse-on hint: {b}");
+        assert!(
+            b.contains("refresh-client -S"),
+            "refreshes after toggle: {b}"
+        );
     }
 }
