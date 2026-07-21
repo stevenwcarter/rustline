@@ -101,6 +101,7 @@ pub fn parse_wttr(json: &str) -> Option<Wttr> {
 mod guest {
     use super::*;
     use extism_pdk::*;
+    use rustline_abi::Segment;
     use serde_json::Value;
 
     #[host_fn]
@@ -170,8 +171,7 @@ mod guest {
     fn segment(format: &str, code: &str, temp_f: &str, desc: &str, zip: &str) -> String {
         let text = render_format(format, code_to_icon(code), temp_f, desc, zip);
         // one unstyled segment; the host assigns palette for left/right regions
-        serde_json::json!([{ "text": text, "style": { "fg": null, "bg": null, "bold": false } }])
-            .to_string()
+        serde_json::to_string(&vec![Segment::new(text)]).unwrap_or_else(|_| "[]".to_string())
     }
 
     fn read_cache() -> Option<(String, String, String, String, String)> {

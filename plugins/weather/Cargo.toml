@@ -16,3 +16,4 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "allo
 # builds just the pure logic below.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 extism-pdk = "1"
+rustline-abi = { path = "../../crates/rustline-abi" }

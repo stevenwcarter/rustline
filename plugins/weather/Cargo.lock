@@ -270,6 +270,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustline-abi"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -382,6 +389,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "extism-pdk",
+ "rustline-abi",
  "serde",
  "serde_json",
 ]
