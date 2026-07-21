@@ -14,6 +14,14 @@ walkdir = "2"
 tracing = "0.1"
 thiserror = "2"
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+# default-features = false drops Extism's built-in HTTP client (`http`) and
+# module registration over http/fs — our `rl_http_get` is the only network path.
+# `wasmtime-default-features` is re-enabled because without it wasmtime loses its
+# Cranelift backend and std error integration and extism fails to compile; it
+# does NOT pull `http` back in.
+extism = { version = "1", default-features = false, features = [
+    "wasmtime-default-features",
+] }
 
 [dev-dependencies]
 tempfile = "3"
