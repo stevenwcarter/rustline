@@ -330,30 +330,31 @@ fn plugin_add_on_unparseable_config_preserves_file() {
 #[test]
 fn click_toggles_state_file() {
     let tmp = tempfile::tempdir().unwrap();
+    let toggles_path = tmp.path().join("data/rustline/toggles");
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
-    cmd.env("XDG_DATA_HOME", tmp.path())
-        .args(["click", "--range=cpu", "--button=left"]);
+    cmd.args(["click", "--range=cpu", "--button=left"]);
+    isolate(&mut cmd, tmp.path());
     let out = cmd.output().unwrap();
     assert!(
         out.status.success(),
         "exit ok; stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let toggles = std::fs::read_to_string(tmp.path().join("rustline/toggles")).unwrap();
+    let toggles = std::fs::read_to_string(&toggles_path).unwrap();
     assert!(toggles.contains("cpu"), "cpu toggled on: {toggles:?}");
 
     // second click toggles off
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
-    cmd.env("XDG_DATA_HOME", tmp.path())
-        .args(["click", "--range=cpu", "--button=left"]);
+    cmd.args(["click", "--range=cpu", "--button=left"]);
+    isolate(&mut cmd, tmp.path());
     let out = cmd.output().unwrap();
     assert!(
         out.status.success(),
         "exit ok; stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let toggles = std::fs::read_to_string(tmp.path().join("rustline/toggles")).unwrap_or_default();
+    let toggles = std::fs::read_to_string(&toggles_path).unwrap_or_default();
     assert!(!toggles.contains("cpu"), "cpu toggled off: {toggles:?}");
 }
 
