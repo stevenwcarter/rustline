@@ -3,7 +3,7 @@
 //! [`Registry`] resolution, per-segment palette assignment, and
 //! [`render_region`].
 
-use crate::render::{Direction, Theme, render_region};
+use crate::render::{Direction, Theme, render_region, render_window_pill};
 use crate::{Context, Registry, Segment, Widget};
 
 /// Fill in each segment's background from `theme.palette`, cycling through
@@ -62,18 +62,22 @@ pub fn render_named_region(
     render_region(dir, &segments, theme)
 }
 
-/// Render the single `windows` segment. Unlike [`render_named_region`], no
-/// palette is assigned: the `windows` widget owns its own style (the
-/// current window keeps its emphasis background; inactive windows stay
-/// text-only), so overwriting missing backgrounds here would clobber that
-/// distinction.
+/// Render the single `windows` segment as a rounded pill. Unlike
+/// [`render_named_region`], this does not go through [`render_region`]'s pointed
+/// separators or `assign_palette`: the window list owns a dedicated rounded-cap
+/// pill ([`render_window_pill`]), colored by the theme from the window's
+/// current/inactive state. A panicking or absent window degrades to `""`.
 pub fn render_window(ctx: &Context, registry: &Registry, theme: &Theme) -> String {
     let widgets = registry.resolve(&["windows".to_string()]);
     let segments: Vec<Segment> = widgets
         .iter()
         .flat_map(|w| render_guarded(w.as_ref(), ctx))
         .collect();
-    render_region(Direction::Left, &segments, theme)
+    let Some(seg) = segments.first() else {
+        return String::new();
+    };
+    let is_current = ctx.window.as_ref().is_some_and(|w| w.is_current);
+    render_window_pill(&seg.text, is_current, theme)
 }
 
 #[cfg(test)]
@@ -152,6 +156,60 @@ mod tests {
             "explicit bg preserved"
         );
         assert_eq!(segs[2].style.bg, Some(theme.palette[0].clone()));
+    }
+
+    #[test]
+    fn render_window_current_is_bold_accent_pill() {
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        let theme = cfg.to_theme();
+        let mut c = ctx();
+        c.window = Some(crate::WindowCtx {
+            index: "1".into(),
+            name: "shell".into(),
+            flags: "*".into(),
+            is_current: true,
+        });
+        let out = render_window(&c, &reg, &theme);
+        assert!(
+            out.contains('\u{e0b6}') && out.contains('\u{e0b4}'),
+            "rounded caps: {out}"
+        );
+        assert!(out.contains("1* shell"), "text: {out}");
+        assert!(out.contains(",bold]"), "current bold: {out}");
+        assert!(
+            out.contains(&format!("bg={}", theme.win_current_bg.to_tmux())),
+            "accent fill: {out}"
+        );
+    }
+
+    #[test]
+    fn render_window_inactive_is_gray_pill() {
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        let theme = cfg.to_theme();
+        let mut c = ctx();
+        c.window = Some(crate::WindowCtx {
+            index: "2".into(),
+            name: "editor".into(),
+            flags: "".into(),
+            is_current: false,
+        });
+        let out = render_window(&c, &reg, &theme);
+        assert!(out.contains("2 editor"), "text: {out}");
+        assert!(
+            out.contains(&format!("bg={}", theme.win_inactive_bg.to_tmux())),
+            "gray fill: {out}"
+        );
+        assert!(!out.contains(",bold]"), "inactive not bold: {out}");
+    }
+
+    #[test]
+    fn render_window_no_window_is_empty() {
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        let theme = cfg.to_theme();
+        assert_eq!(render_window(&ctx(), &reg, &theme), "");
     }
 
     #[test]
