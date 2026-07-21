@@ -1,8 +1,3 @@
-// `gauge_bar` has no production caller yet — the `cpu`/`memory` widgets that
-// consume it land in Tasks 3-4 of
-// docs/superpowers/plans/2026-07-21-rustline-cpu-memory-widgets.md. Remove
-// this allow once either widget calls into `bar::gauge_bar`.
-#[allow(dead_code)]
 mod bar;
 pub mod battery;
 pub mod cwd;
@@ -10,6 +5,7 @@ pub mod datetime;
 pub mod hostname;
 pub mod lan_ip;
 pub mod loadavg;
+pub mod memory;
 mod net;
 pub mod pane_id;
 pub mod tailscale_ip;
@@ -21,6 +17,7 @@ pub use datetime::DateTime;
 pub use hostname::Hostname;
 pub use lan_ip::LanIp;
 pub use loadavg::LoadAvg;
+pub use memory::MemoryWidget;
 pub use pane_id::PaneId;
 pub use tailscale_ip::TailscaleIp;
 pub use windows::Windows;
