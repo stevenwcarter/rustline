@@ -95,25 +95,63 @@ just preview
 
 Other recipes: `just build`, `just test`, `just lint`.
 
-## Roadmap: WASM plugins
+## Plugins
 
-Third-party widgets via WASM plugins are **planned but not yet implemented**.
-The config format already reserves a table for them, keyed by the plugin's
-GitHub repo:
+Third-party widgets can be added as WASM plugins. A plugin is a small wasm
+module (built for `wasm32-unknown-unknown` with the [Extism PDK][extism-pdk])
+that exports a `name` function and a `render(context, config) -> Segment[]`
+function — the same `Context` in, `Segment`s out contract as a built-in
+widget, just crossing the wasm boundary as JSON.
 
-```toml
-# reserved for future WASM plugins; parsed and retained, unused today
-[plugins."owner/repo"]
+Everything a plugin can touch is capability-gated by the host: network
+requests and arbitrary file paths are checked against per-plugin allowlists in
+your config (`allowed_urls` / `allowed_paths`, each a glob or a `re:`-prefixed
+regex), and each plugin gets its own sandboxed state directory with a size
+quota (`max_state_bytes`, default 50 MB) for caching data between renders. A
+plugin has no ambient access to anything — a disallowed request is simply
+refused, and any plugin error, timeout, or crash renders as an empty segment
+rather than breaking the status line.
+
+Build and install the bundled `weather` example (a Nerd-Font condition icon +
+°F for a configured zip code, fetched from wttr.in at most once per
+`refresh_secs`):
+
+```bash
+just build-weather
 ```
 
-The core `Context`/`Segment`/`Style` types are already serde-serializable so
-they can serve as the future plugin ABI, but there is no WASM runtime yet —
-this is a roadmap item, not a current feature.
+Then add it to your layout and give it a URL allowlist:
+
+```toml
+[layout]
+right = ["weather", "cwd", "loadavg", "datetime"]
+
+[plugins.weather]
+allowed_urls = ["https://wttr.in/*"]
+
+[plugins.weather.options]
+zip = "48183"
+format = "{icon} {temp_f}°F"
+refresh_secs = 1800
+```
+
+Manage a plugin's allowlists from the command line without hand-editing TOML:
+
+```bash
+rustline plugin list
+rustline plugin url add weather "https://wttr.in/*"
+```
+
+See the [design spec](docs/superpowers/specs/2026-07-20-rustline-wasm-plugins-design.md)
+for the full capability model, config schema, and plugin ABI.
+
+[extism-pdk]: https://github.com/extism/rust-pdk
 
 ## Design
 
-See the full design spec:
-[`docs/superpowers/specs/2026-07-20-rustline-tmux-statusline-design.md`](docs/superpowers/specs/2026-07-20-rustline-tmux-statusline-design.md).
+See the full design specs:
+[core statusline](docs/superpowers/specs/2026-07-20-rustline-tmux-statusline-design.md),
+[WASM plugins](docs/superpowers/specs/2026-07-20-rustline-wasm-plugins-design.md).
 
 ## License
 
