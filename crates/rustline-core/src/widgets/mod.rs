@@ -23,9 +23,8 @@ pub use loadavg::LoadAvg;
 pub use memory::MemoryWidget;
 pub use pane_id::PaneId;
 pub use tailscale_ip::TailscaleIp;
-// Re-exported for Task 3 (assemble.rs) and Task 4+ (widget alt_format) of the
-// click-toggle plan; unused at this crate-level path until those land.
-#[allow(unused_imports)]
+// Re-exported for assemble.rs (Task 3) and the widgets' alt_format toggling
+// (Task 4+) of the click-toggle plan.
 pub(crate) use toggle::{active_format, clickable_range};
 pub use windows::Windows;
 
@@ -96,6 +95,7 @@ impl Registry {
             Box::new(move || {
                 Box::new(CpuWidget {
                     format: cpu.format.clone(),
+                    alt_format: cpu.alt_format.clone(),
                     down_format: cpu.down_format.clone(),
                     bar_width: cpu.bar_width,
                 })
