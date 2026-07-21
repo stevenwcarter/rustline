@@ -1,4 +1,7 @@
+use std::fs;
+use std::path::Path;
 use std::process::Command;
+use tempfile::tempdir;
 
 #[test]
 fn render_left_produces_styled_output() {
@@ -239,4 +242,98 @@ fn plugin_add_on_unparseable_config_preserves_file() {
     );
     let after = std::fs::read_to_string(&cfg).unwrap();
     assert_eq!(after, invalid, "config left byte-for-byte unchanged");
+}
+
+/// A `rustline` invocation with an isolated HOME/XDG environment so logging
+/// and config read/write a throwaway tree, never the developer's real dirs.
+fn isolated_cmd(home: &Path, xdg_data: &Path, xdg_config: &Path) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    c.env("HOME", home)
+        .env("XDG_DATA_HOME", xdg_data)
+        .env("XDG_CONFIG_HOME", xdg_config)
+        .env_remove("RUST_LOG");
+    c
+}
+
+#[test]
+fn warning_lands_in_log_file_and_not_stderr_at_default() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    fs::create_dir_all(config.join("rustline")).unwrap();
+    // An unknown widget name triggers `warn!("unknown widget, skipping")`.
+    fs::write(
+        config.join("rustline/config.toml"),
+        "[layout]\nleft = [\"definitely_not_a_widget\"]\n",
+    )
+    .unwrap();
+
+    let out = isolated_cmd(&home, &data, &config)
+        .args([
+            "render",
+            "left",
+            "--session",
+            "0",
+            "--window",
+            "0",
+            "--pane",
+            "0",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "render exited 0");
+
+    // Default stderr level is ERROR, so a WARN must NOT surface on stderr.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("unknown widget"),
+        "warning must not hit stderr at default level; got: {stderr}"
+    );
+
+    // The file sink (INFO) captured the WARN.
+    let log = fs::read_to_string(data.join("rustline/rustline.log")).expect("log file created");
+    assert!(
+        log.contains("unknown widget"),
+        "warning captured in log file; got: {log}"
+    );
+}
+
+#[test]
+fn stderr_level_override_promotes_warning_to_stderr() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    fs::create_dir_all(config.join("rustline")).unwrap();
+    fs::write(
+        config.join("rustline/config.toml"),
+        "[layout]\nleft = [\"definitely_not_a_widget\"]\n\n[log]\nstderr_level = \"warn\"\n",
+    )
+    .unwrap();
+
+    let out = isolated_cmd(&home, &data, &config)
+        .args([
+            "render",
+            "left",
+            "--session",
+            "0",
+            "--window",
+            "0",
+            "--pane",
+            "0",
+        ])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown widget"),
+        "stderr_level=warn surfaces the warning on stderr; got: {stderr}"
+    );
 }
