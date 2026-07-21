@@ -82,3 +82,63 @@ fn render_right_with_missing_plugin_degrades_gracefully() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("#["), "built-ins still render: {s}");
 }
+
+#[test]
+fn plugin_url_add_remove_roundtrips_preserving_comments() {
+    let dir = std::env::temp_dir().join("rustline_smoke_pluginedit");
+    let cfgdir = dir.join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    std::fs::write(&cfg, "# keepme\n[plugins.weather]\nallowed_urls = []\n").unwrap();
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rustline"))
+            .args(args)
+            .env("XDG_CONFIG_HOME", &dir)
+            .output()
+            .unwrap()
+    };
+
+    assert!(
+        run(&["plugin", "url", "add", "weather", "https://wttr.in/*"])
+            .status
+            .success()
+    );
+    let after_add = std::fs::read_to_string(&cfg).unwrap();
+    assert!(
+        after_add.contains("# keepme"),
+        "comment preserved: {after_add}"
+    );
+    assert!(
+        after_add.contains("https://wttr.in/*"),
+        "pattern added: {after_add}"
+    );
+
+    // idempotent add
+    assert!(
+        run(&["plugin", "url", "add", "weather", "https://wttr.in/*"])
+            .status
+            .success()
+    );
+    let dup = std::fs::read_to_string(&cfg).unwrap();
+    assert_eq!(
+        dup.matches("https://wttr.in/*").count(),
+        1,
+        "no duplicate: {dup}"
+    );
+
+    assert!(
+        run(&["plugin", "url", "remove", "weather", "https://wttr.in/*"])
+            .status
+            .success()
+    );
+    let after_rm = std::fs::read_to_string(&cfg).unwrap();
+    assert!(
+        !after_rm.contains("https://wttr.in/*"),
+        "pattern removed: {after_rm}"
+    );
+    assert!(
+        after_rm.contains("# keepme"),
+        "comment still there: {after_rm}"
+    );
+}

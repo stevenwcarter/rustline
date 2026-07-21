@@ -27,6 +27,33 @@ pub enum Command {
     Init,
     /// Print the effective config as TOML.
     PrintConfig,
+    /// Manage plugins and their capability allowlists.
+    #[command(subcommand)]
+    Plugin(PluginCmd),
+}
+
+/// Manage discovered plugins and their capability allowlists.
+#[derive(Subcommand)]
+pub enum PluginCmd {
+    /// List configured plugins and their allowlists/caps.
+    List,
+    /// Manage a plugin's URL allowlist.
+    #[command(subcommand)]
+    Url(PatternCmd),
+    /// Manage a plugin's filesystem-path allowlist.
+    #[command(subcommand)]
+    Path(PatternCmd),
+}
+
+/// list/add/remove operations over one allowlist of a named plugin.
+#[derive(Subcommand)]
+pub enum PatternCmd {
+    /// List the plugin's patterns.
+    List { plugin: String },
+    /// Append a pattern (idempotent).
+    Add { plugin: String, pattern: String },
+    /// Remove an exact-match pattern.
+    Remove { plugin: String, pattern: String },
 }
 
 /// The `render` subcommand group: which region or window segment to render.

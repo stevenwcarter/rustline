@@ -1,5 +1,6 @@
 mod build_context;
 mod cli;
+mod plugin_cmd;
 mod tmux_conf;
 
 use std::env;
@@ -93,5 +94,6 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Command::Plugin(cmd) => plugin_cmd::run(cmd, &config_path()),
     }
 }
