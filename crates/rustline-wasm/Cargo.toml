@@ -1,0 +1,33 @@
+[package]
+name = "rustline-wasm"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+rustline-core = { path = "../rustline-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+globset = "0.4"
+regex = "1"
+walkdir = "2"
+tracing = "0.1"
+thiserror = "2"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+# default-features = false drops Extism's built-in HTTP client (`http`) and
+# module registration over http/fs — our `rl_http_get` is the only network path.
+# `wasmtime-default-features` is re-enabled because without it wasmtime loses its
+# Cranelift backend and std error integration and extism fails to compile; it
+# does NOT pull `http` back in.
+extism = { version = "1", default-features = false, features = [
+    "wasmtime-default-features",
+] }
+
+[features]
+# Opt-in end-to-end tests that load the real `weather.wasm` (needs the wasm
+# target + `just build-weather`). Gated so a plain `cargo test` stays hermetic.
+wasm-e2e = []
+
+[dev-dependencies]
+tempfile = "3"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

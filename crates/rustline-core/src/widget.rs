@@ -40,6 +40,11 @@ impl Registry {
         self.factories.get(name).map(|factory| factory())
     }
 
+    /// Whether a widget is already registered under `name`.
+    pub fn contains(&self, name: &str) -> bool {
+        self.factories.contains_key(name)
+    }
+
     /// Build widgets for each name in order, skipping (and logging) any
     /// name that isn't registered.
     ///
@@ -88,6 +93,14 @@ mod tests {
                 .unwrap(),
             window: None,
         }
+    }
+
+    #[test]
+    fn contains_reports_registration() {
+        let mut r = Registry::new();
+        assert!(!r.contains("a"));
+        r.register("a", Box::new(|| Box::new(Fixed("A"))));
+        assert!(r.contains("a"));
     }
 
     #[test]

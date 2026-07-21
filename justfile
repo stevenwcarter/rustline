@@ -12,6 +12,11 @@ build:
 test:
     cargo test --workspace
 
+# Build the weather plugin and run the end-to-end WASM host tests (opt-in)
+test-wasm: build-weather
+    cargo test -p rustline-wasm --features wasm-e2e --test e2e
+    cargo test -p rustline --features wasm-e2e --test wasm_wiring
+
 # CI-style checks: formatting and clippy
 lint:
     cargo fmt --all --check
@@ -51,3 +56,14 @@ preview:
     printf 'LEFT   : %s\n' "$left"
     printf 'CENTER : %s\n' "$center"
     printf 'RIGHT  : %s\n' "$right"
+
+# Build the example weather WASM plugin and install it into the plugin dir
+build-weather:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rustup target add wasm32-unknown-unknown >/dev/null 2>&1 || true
+    cargo build --release --target wasm32-unknown-unknown --manifest-path plugins/weather/Cargo.toml
+    dest="${XDG_DATA_HOME:-$HOME/.local/share}/rustline/plugins"
+    mkdir -p "$dest"
+    cp plugins/weather/target/wasm32-unknown-unknown/release/weather.wasm "$dest/weather.wasm"
+    echo "installed weather.wasm -> $dest/weather.wasm"

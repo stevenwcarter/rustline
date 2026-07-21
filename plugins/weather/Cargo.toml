@@ -1,0 +1,19 @@
+[package]
+name = "weather"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"] }
+
+# Guest bindings only compiled for the wasm target; host-side `cargo test`
+# builds just the pure logic below.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+extism-pdk = "1"
+rustline-abi = { path = "../../crates/rustline-abi" }
