@@ -66,20 +66,27 @@ these shared types, not a design shortcut. Keep them serializable.
   resolving now that the types themselves live in `rustline-abi`.
 - `context.rs` — `Context` (session/window/pane ids, `pane_current_path`,
   `home`, `hostname`, `loadavg: Option<[f64;3]>`, `now: DateTime<Local>`,
-  `window: Option<WindowCtx>`, `interfaces: Vec<NetIface>`), `WindowCtx`, and
+  `window: Option<WindowCtx>`, `interfaces: Vec<NetIface>`,
+  `battery: Option<Battery>`, `os: String`, `arch: String`), `WindowCtx`, and
   `NetIface { name, ipv4: Ipv4Addr }` (one non-loopback IPv4 interface, read
   once at `Context`-build time; the IP widgets select from this list rather
-  than touching the OS mid-render).
+  than touching the OS mid-render). `Battery { percent: u8, state:
+  BatteryState }` and `BatteryState { Charging, Discharging, Full, Unknown }`
+  (serde `snake_case`) are a battery snapshot read once at `Context`-build
+  time; `os`/`arch` come from `std::env::consts::OS`/`ARCH`.
 - `render.rs` — `render_region(Direction, &[Segment], &Theme) -> String`, the
   load-bearing powerline renderer (hard `` `` / soft `` `` separators, edge
   blending to `bar_bg`); `Theme` (palette, glyphs, colors) with `Default`.
 - `widget.rs` — `Widget` trait and `Registry` (name → factory; `resolve` skips
   unknown widget names with a `warn!`, never errors).
-- `widgets/` — the eight built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
-  `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, plus
+- `widgets/` — the nine built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
+  `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, `battery`, plus
   `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
   LAN/Tailscale interface-selection and `{ip}` formatting logic shared by
   `lan_ip`/`tailscale_ip` (no I/O — operates on `Context.interfaces`).
+  `battery.rs` is the `battery` widget: pure over `Context.battery`, with a
+  level-bucketed, charging-aware Nerd-Font `{icon}` plus `{percent}`/`{state}`
+  placeholders.
 - `assemble.rs` — `assign_palette`, `render_named_region` (panic-guarded per
   widget via `catch_unwind`), `render_window`.
 - `config.rs` — `Config` (TOML): `layout`, `theme`, `widgets`, a top-level
@@ -144,11 +151,19 @@ these shared types, not a design shortcut. Keep them serializable.
 
 `rustline` (bin):
 - `cli.rs` — `clap` derive. `render` and `plugin` are subcommand *groups*.
+- `battery.rs` — `read_battery()`, the sole `#[cfg(target_os)]` surface: a
+  Linux sysfs (`/sys/class/power_supply/*/{capacity,status}`) arm and a macOS
+  `pmset -g batt` arm, each delegating to a pure parser (`parse_linux`/
+  `parse_pmset`) that is `#[cfg(any(target_os = …, test))]`-compiled so both
+  are unit-tested on the Linux dev box even though only one reader arm
+  compiles per platform. Any other platform, or a failed read, yields `None`.
 - `build_context.rs` — builds `Context` from args + `gethostname`,
   `libc::getloadavg` (the only `unsafe`, guarded on `n == 3`), `chrono::Local`,
-  `$HOME`, and now also non-loopback IPv4 interfaces via `if-addrs` into
+  `$HOME`, non-loopback IPv4 interfaces via `if-addrs` into
   `Context.interfaces` (a failed read yields an empty `Vec`, never a
-  fabricated address — same spirit as `read_loadavg` returning `None`).
+  fabricated address — same spirit as `read_loadavg` returning `None`), and
+  now also `battery` (via `battery::read_battery()`), `os`, and `arch` (from
+  `std::env::consts::OS`/`ARCH`).
 - `plugin_cmd.rs` — `rustline plugin …`: `list` reads the effective `Config`;
   `url|path add/remove` mutate the config file in place via `toml_edit`
   (preserving comments/formatting), creating `[plugins.<name>]` if absent.
@@ -231,6 +246,20 @@ format = "TS {ip}"
 down_format = "TS off"
 ```
 
+**Battery widget:** `battery` is opt-in — not in the default layout. It takes
+a `format` (default `"{icon} {percent}%"`) with `{icon}` (level-bucketed,
+charging-aware Nerd-Font glyph), `{percent}`, and `{state}` placeholders, and
+a `down_format` (default `""`, i.e. render nothing) shown when
+`Context.battery` is `None` (no battery, unsupported platform, or a failed
+read) — same collapse-placeholders-to-empty behavior as the IP widgets'
+`down_format`.
+
+```toml
+[widgets.battery]
+format = "{icon} {percent}%"
+down_format = ""
+```
+
 **Plugins:** an optional top-level `plugin_dir` (default
 `$XDG_DATA_HOME/rustline/plugins`, `~/` expanded) plus a typed
 `[plugins.<name>]` table per plugin, keyed by the plugin's name (the `.wasm`
@@ -288,6 +317,15 @@ info|debug|trace` and is parsed leniently (a typo falls back to the default).
    which is not reversed.
 6. **`loadavg` is `Option`** — a failed `getloadavg` renders nothing, never fake
    zeros. A panicking widget degrades to empty via the `catch_unwind` guard.
+
+**Platform-specific reads stay at the `Context`-build edge.** `read_battery()`
+(`crates/rustline/src/battery.rs`) is the only `#[cfg(target_os)]` surface in
+the codebase; each OS arm (Linux sysfs, macOS `pmset`) delegates to a pure
+parser (`parse_linux`/`parse_pmset`) that is `#[cfg(any(target_os = …, test))]`-
+compiled, so both parsers are unit-tested on the Linux dev box even though
+only one reader arm compiles per platform. Follow this pattern for any future
+OS-specific signal. `Context.os`/`Context.arch` (from `std::env::consts::OS`/
+`ARCH`) are now available for WASM guests that want to branch on platform.
 
 **WASM plugin invariants (added by the plugin system — re-check when touching
 `rustline-wasm` or `plugins/*`):**
@@ -354,6 +392,9 @@ info|debug|trace` and is parsed leniently (a typo falls back to the default).
   access, and the `weather` example plugin, plus a host-managed TTL-cached
   fetch capability (`rl_http_get_cached`) that plugins use instead of
   hand-rolling caches.
+- Done: `battery` widget — `Context.battery`/`os`/`arch`, the ninth built-in,
+  and the platform-specific-read pattern (see Invariants above) that any
+  future OS-specific signal should follow.
 - Plugin auto-download by `owner/repo` (today, `source` is just a config note;
   installing a plugin means putting the `.wasm` in the plugin dir yourself).
 - An interactive capability-approval flow (config/CLI allowlist edits are

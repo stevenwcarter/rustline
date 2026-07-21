@@ -1,3 +1,4 @@
+pub mod battery;
 pub mod cwd;
 pub mod datetime;
 pub mod hostname;
@@ -8,6 +9,7 @@ pub mod pane_id;
 pub mod tailscale_ip;
 pub mod windows;
 
+pub use battery::BatteryWidget;
 pub use cwd::Cwd;
 pub use datetime::DateTime;
 pub use hostname::Hostname;
@@ -21,7 +23,7 @@ use crate::Config;
 use crate::widget::Registry;
 
 impl Registry {
-    /// Build a [`Registry`] pre-populated with all eight built-in widgets,
+    /// Build a [`Registry`] pre-populated with all nine built-in widgets,
     /// configuring the ones with options (`datetime`, `cwd`) from `cfg`.
     pub fn with_builtins(cfg: &Config) -> Registry {
         let mut registry = Registry::new();
@@ -66,6 +68,17 @@ impl Registry {
             }),
         );
 
+        let battery = cfg.widgets.battery.clone();
+        registry.register(
+            "battery",
+            Box::new(move || {
+                Box::new(BatteryWidget {
+                    format: battery.format.clone(),
+                    down_format: battery.down_format.clone(),
+                })
+            }),
+        );
+
         registry
     }
 }
@@ -91,6 +104,9 @@ mod tests {
                 .unwrap(),
             window: None,
             interfaces: ifaces,
+            battery: None,
+            os: String::new(),
+            arch: String::new(),
         }
     }
 
@@ -131,5 +147,38 @@ mod tests {
             .map(|s| s.text)
             .collect();
         assert_eq!(texts, vec!["TS off".to_string()]);
+    }
+
+    #[test]
+    fn battery_registered_and_renders_from_context() {
+        use crate::{Battery, BatteryState};
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        assert!(reg.contains("battery"));
+
+        let mut c = ctx(Vec::new());
+        c.battery = Some(Battery {
+            percent: 73,
+            state: BatteryState::Discharging,
+        });
+        let widgets = reg.resolve(&["battery".into()]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|w| w.render(&c))
+            .map(|s| s.text)
+            .collect();
+        // default format "{icon} {percent}%", 73% discharging -> md-battery-70.
+        assert_eq!(texts, vec!["\u{f0080} 73%".to_string()]);
+
+        // No battery + default (empty) down_format -> widget skipped.
+        let mut c0 = ctx(Vec::new());
+        c0.battery = None;
+        let widgets = reg.resolve(&["battery".into()]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|w| w.render(&c0))
+            .map(|s| s.text)
+            .collect();
+        assert!(texts.is_empty());
     }
 }

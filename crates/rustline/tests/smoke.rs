@@ -226,6 +226,37 @@ fn render_right_with_ip_widgets_renders_gracefully() {
 }
 
 #[test]
+fn render_right_with_battery_renders_gracefully() {
+    // `battery` in a layout must render alongside built-ins and exit 0 on ANY
+    // host, whether or not it actually has a battery (desktops/CI have none →
+    // the widget skips via its empty down_format; laptops render the level).
+    // This proves the build_context -> read_battery -> Context -> widget wiring
+    // does not crash; the deterministic icon/percent formatting is pinned by
+    // the widget's own unit tests (host-independent there).
+    let tmp = tempfile::tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    std::fs::write(
+        cfgdir.join("config.toml"),
+        "[layout]\nright = [\"battery\", \"datetime\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["render", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("#["), "built-ins still render: {s}");
+}
+
+#[test]
 fn plugin_add_on_unparseable_config_preserves_file() {
     // A pre-existing config with a TOML *syntax* error must abort with exit 1
     // and leave the file byte-for-byte intact — never truncate the user's whole

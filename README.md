@@ -12,6 +12,8 @@ pane, window, host, and system info, with zero required configuration.
 - Optional TOML config to reorder widgets or tweak per-widget options.
 - Opt-in `lan_ip` and `tailscale_ip` widgets that show the machine's LAN and
   Tailscale IPv4 addresses.
+- Opt-in `battery` widget showing charge percentage, state, and a
+  level-bucketed Nerd-Font icon (Linux + macOS).
 - Instant refresh on pane/window switch via tmux hooks (no waiting for the
   next `status-interval` tick).
 
@@ -63,7 +65,8 @@ because of a bad config.
 
 Widget names available for the `layout` arrays are: `pane_id`, `hostname`,
 `windows`, `cwd`, `loadavg`, `datetime`, and the opt-in `lan_ip` /
-`tailscale_ip` (see [IP address widgets](#ip-address-widgets) below).
+`tailscale_ip` (see [IP address widgets](#ip-address-widgets) below) and
+`battery` (see [Battery widget](#battery-widget) below).
 
 Example — reorder the right region and change the clock format:
 
@@ -102,6 +105,26 @@ format = "LAN {ip}"        # {ip} -> 192.168.1.20; or a glyph, e.g. "󰈀 {ip}"
 [widgets.tailscale_ip]
 format = "TS {ip}"
 down_format = "TS off"     # shown when Tailscale is down; omit to render nothing
+```
+
+### Battery widget
+
+An opt-in `battery` built-in shows charge percentage, state, and a
+level-bucketed, charging-aware Nerd-Font icon. It works on Linux (sysfs) and
+macOS (`pmset`); on any other platform, or a host with no battery, it renders
+nothing by default.
+
+Takes a `format` where `{icon}`, `{percent}`, and `{state}` are replaced, and
+a `down_format` shown when there's no battery reading (default empty — same
+collapse-to-nothing behavior as the IP widgets' `down_format`).
+
+```toml
+[layout]
+right = ["battery", "cwd", "loadavg", "datetime"]
+
+[widgets.battery]
+format = "{icon} {percent}%"   # {icon}, {percent}, {state}
+down_format = ""               # shown when no battery (desktops); default: nothing
 ```
 
 ## Logging
