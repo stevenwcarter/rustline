@@ -27,6 +27,17 @@ pub struct Theme {
     pub soft_left: String,
     pub soft_right: String,
     pub soft_fg: Color,
+    /// Rounded left/right cap glyphs for the window-list pill (distinct from the
+    /// pointed `hard_*`/`soft_*` separators used by [`render_region`]).
+    pub win_cap_left: String,
+    pub win_cap_right: String,
+    /// Fill/text colors for the active (current) window pill; the active pill is
+    /// also rendered bold.
+    pub win_current_bg: Color,
+    pub win_current_fg: Color,
+    /// Fill/text colors for inactive window pills.
+    pub win_inactive_bg: Color,
+    pub win_inactive_fg: Color,
 }
 
 impl Default for Theme {
@@ -40,6 +51,12 @@ impl Default for Theme {
             soft_left: "\u{e0b1}".into(),
             soft_right: "\u{e0b3}".into(),
             soft_fg: Color::Indexed(240),
+            win_cap_left: "\u{e0b6}".into(),
+            win_cap_right: "\u{e0b4}".into(),
+            win_current_bg: Color::Indexed(31),
+            win_current_fg: Color::Indexed(255),
+            win_inactive_bg: Color::Indexed(236),
+            win_inactive_fg: Color::Indexed(250),
         }
     }
 }
@@ -151,6 +168,27 @@ pub fn render_region(dir: Direction, segments: &[Segment], theme: &Theme) -> Str
     out
 }
 
+/// Render one window as a self-contained rounded "pill": a left rounded cap, the
+/// ` text ` body, and a right rounded cap. The caps are colored
+/// `fg=<pill>,bg=<bar_bg>` (the opposite of the pointed powerline separators in
+/// [`render_region`]), which is what makes them read as the rounded ends of the
+/// pill rather than arrows into the next segment. The active window uses the
+/// accent fill + bold; inactive windows use the gray fill.
+pub fn render_window_pill(text: &str, is_current: bool, theme: &Theme) -> String {
+    let (pill, fg, bold) = if is_current {
+        (&theme.win_current_bg, &theme.win_current_fg, ",bold")
+    } else {
+        (&theme.win_inactive_bg, &theme.win_inactive_fg, "")
+    };
+    let (pill, fg) = (pill.to_tmux(), fg.to_tmux());
+    let bar = theme.bar_bg.to_tmux();
+    format!(
+        "#[fg={pill},bg={bar}]{cap_l}#[fg={fg},bg={pill}{bold}] {text} #[fg={pill},bg={bar}]{cap_r}#[default]",
+        cap_l = theme.win_cap_left,
+        cap_r = theme.win_cap_right,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +204,12 @@ mod tests {
             soft_left: "\u{e0b1}".into(),
             soft_right: "\u{e0b3}".into(),
             soft_fg: Color::Indexed(240),
+            win_cap_left: "\u{e0b6}".into(),
+            win_cap_right: "\u{e0b4}".into(),
+            win_current_bg: Color::Indexed(31),
+            win_current_fg: Color::Indexed(255),
+            win_inactive_bg: Color::Indexed(236),
+            win_inactive_fg: Color::Indexed(250),
         }
     }
 
@@ -183,6 +227,50 @@ mod tests {
     #[test]
     fn empty_is_empty() {
         assert_eq!(render_region(Direction::Left, &[], &theme()), "");
+    }
+
+    #[test]
+    fn window_pill_current_is_accent_bold_rounded() {
+        let t = theme();
+        let out = render_window_pill("1* shell", true, &t);
+        assert!(out.contains('\u{e0b6}'), "left rounded cap: {out}");
+        assert!(out.contains('\u{e0b4}'), "right rounded cap: {out}");
+        assert!(
+            out.contains(&format!(
+                "#[fg={},bg={}]\u{e0b6}",
+                t.win_current_bg.to_tmux(),
+                t.bar_bg.to_tmux()
+            )),
+            "left cap fg=pill,bg=bar: {out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "#[fg={},bg={},bold] 1* shell ",
+                t.win_current_fg.to_tmux(),
+                t.win_current_bg.to_tmux()
+            )),
+            "current body: {out}"
+        );
+        assert!(out.ends_with("#[default]"), "ends default: {out}");
+    }
+
+    #[test]
+    fn window_pill_inactive_is_gray_not_bold() {
+        let t = theme();
+        let out = render_window_pill("2 editor", false, &t);
+        assert!(
+            out.contains('\u{e0b6}') && out.contains('\u{e0b4}'),
+            "rounded caps: {out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "#[fg={},bg={}] 2 editor ",
+                t.win_inactive_fg.to_tmux(),
+                t.win_inactive_bg.to_tmux()
+            )),
+            "inactive body, no bold: {out}"
+        );
+        assert!(!out.contains("bold"), "inactive not bold: {out}");
     }
 
     #[test]

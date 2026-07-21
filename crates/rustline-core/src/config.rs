@@ -182,6 +182,18 @@ pub struct ThemeConfig {
     pub fg: Option<Color>,
     #[serde(default)]
     pub bar_bg: Option<Color>,
+    #[serde(default)]
+    pub win_cap_left: Option<String>,
+    #[serde(default)]
+    pub win_cap_right: Option<String>,
+    #[serde(default)]
+    pub win_current_bg: Option<Color>,
+    #[serde(default)]
+    pub win_current_fg: Option<Color>,
+    #[serde(default)]
+    pub win_inactive_bg: Option<Color>,
+    #[serde(default)]
+    pub win_inactive_fg: Option<Color>,
 }
 
 /// Logging configuration: per-sink level thresholds and an optional log-file
@@ -335,6 +347,24 @@ impl Config {
         if let Some(bar_bg) = &self.theme.bar_bg {
             theme.bar_bg = bar_bg.clone();
         }
+        if let Some(v) = &self.theme.win_cap_left {
+            theme.win_cap_left = v.clone();
+        }
+        if let Some(v) = &self.theme.win_cap_right {
+            theme.win_cap_right = v.clone();
+        }
+        if let Some(v) = &self.theme.win_current_bg {
+            theme.win_current_bg = v.clone();
+        }
+        if let Some(v) = &self.theme.win_current_fg {
+            theme.win_current_fg = v.clone();
+        }
+        if let Some(v) = &self.theme.win_inactive_bg {
+            theme.win_inactive_bg = v.clone();
+        }
+        if let Some(v) = &self.theme.win_inactive_fg {
+            theme.win_inactive_fg = v.clone();
+        }
         theme
     }
 }
@@ -344,6 +374,33 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn to_theme_maps_window_pill_overrides() {
+        use crate::Color;
+        let mut cfg = Config::default();
+        cfg.theme.win_current_bg = Some(Color::Indexed(60));
+        cfg.theme.win_inactive_bg = Some(Color::Indexed(61));
+        cfg.theme.win_current_fg = Some(Color::Indexed(62));
+        cfg.theme.win_inactive_fg = Some(Color::Indexed(63));
+        cfg.theme.win_cap_left = Some("L".into());
+        cfg.theme.win_cap_right = Some("R".into());
+        let t = cfg.to_theme();
+        assert_eq!(t.win_current_bg, Color::Indexed(60));
+        assert_eq!(t.win_inactive_bg, Color::Indexed(61));
+        assert_eq!(t.win_current_fg, Color::Indexed(62));
+        assert_eq!(t.win_inactive_fg, Color::Indexed(63));
+        assert_eq!(t.win_cap_left, "L");
+        assert_eq!(t.win_cap_right, "R");
+    }
+
+    #[test]
+    fn to_theme_defaults_window_pill_when_unset() {
+        let t = Config::default().to_theme();
+        assert_eq!(t.win_current_bg, crate::Color::Indexed(31));
+        assert_eq!(t.win_inactive_bg, crate::Color::Indexed(236));
+        assert_eq!(t.win_cap_left, "\u{e0b6}");
+    }
 
     #[test]
     fn default_layout_matches_spec() {

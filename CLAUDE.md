@@ -46,7 +46,10 @@ workspace member (own `Cargo.lock`, built for `wasm32-unknown-unknown`):
 fills segment backgrounds → `render_region` joins segments with powerline
 separators into tmux `#[fg=..,bg=..]` markup. For the window list, tmux calls
 `render window` once per window and each window is rendered as a self-contained
-segment (no palette). WASM plugins implement the same `Widget` trait as
+**rounded pill** (`render_window_pill`, not `render_region`/`assign_palette`):
+rounded caps (`` / ``) colored `fg=pill,bg=bar_bg`, the active window in the
+accent fill + bold and inactive windows in a gray fill — all six colors/glyphs
+themeable via `[theme]` (see Config). WASM plugins implement the same `Widget` trait as
 built-ins (via `WasmWidget`) and are resolved into the same registry, so they
 flow through this pipeline unchanged.
 
@@ -76,7 +79,10 @@ these shared types, not a design shortcut. Keep them serializable.
   time; `os`/`arch` come from `std::env::consts::OS`/`ARCH`.
 - `render.rs` — `render_region(Direction, &[Segment], &Theme) -> String`, the
   load-bearing powerline renderer (hard `` `` / soft `` `` separators, edge
-  blending to `bar_bg`); `Theme` (palette, glyphs, colors) with `Default`.
+  blending to `bar_bg`); `render_window_pill(text, is_current, &Theme) ->
+  String`, the window-list rounded-pill renderer (rounded `` / `` caps colored
+  `fg=pill,bg=bar_bg` — the *opposite* of a pointed separator); `Theme`
+  (palette, glyphs, colors, incl. the six `win_*` pill fields) with `Default`.
 - `widget.rs` — `Widget` trait and `Registry` (name → factory; `resolve` skips
   unknown widget names with a `warn!`, never errors).
 - `widgets/` — the nine built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
@@ -86,9 +92,15 @@ these shared types, not a design shortcut. Keep them serializable.
   `lan_ip`/`tailscale_ip` (no I/O — operates on `Context.interfaces`).
   `battery.rs` is the `battery` widget: pure over `Context.battery`, with a
   level-bucketed, charging-aware Nerd-Font `{icon}` plus `{percent}`/`{state}`
-  placeholders.
+  placeholders. `windows.rs` is the `windows` widget: it emits only the window
+  **text** (`{index}{flags} {name}`); the pill styling and active/inactive
+  colors are applied downstream by the theme-aware renderer (widgets can't see
+  the `Theme`).
 - `assemble.rs` — `assign_palette`, `render_named_region` (panic-guarded per
-  widget via `catch_unwind`), `render_window`.
+  widget via `catch_unwind`), `render_window` (wraps the `windows` text in a
+  themed rounded pill via `render.rs::render_window_pill`, keyed on
+  `ctx.window.is_current`; still `catch_unwind`-guarded → `""` on panic/no
+  window).
 - `config.rs` — `Config` (TOML): `layout`, `theme`, `widgets`, a top-level
   `plugin_dir: Option<String>`, and a typed `plugins: HashMap<String,
   PluginConfig>` table (see Config below). `Config::load` is **total**
@@ -260,6 +272,24 @@ format = "{icon} {percent}%"
 down_format = ""
 ```
 
+**Window pill (`[theme]`):** the window list renders as a rounded pill (see
+Render pipeline). Six optional `[theme]` fields override the defaults — active
+pill in the accent color, inactive pills gray, rounded caps:
+
+```toml
+[theme]
+win_current_bg = { Indexed = 31 }    # active fill (accent); default colour31
+win_current_fg = { Indexed = 255 }   # active text (bold); default colour255
+win_inactive_bg = { Indexed = 236 }  # inactive fill (gray); default colour236
+win_inactive_fg = { Indexed = 250 }  # inactive text; default colour250
+win_cap_left = ""                    # rounded left cap; default U+E0B6
+win_cap_right = ""                   # rounded right cap; default U+E0B4
+```
+
+Active is always bold (intrinsic, not a field). Colors are `Color` enums
+(`{ Indexed = N }`, `{ Named = "cyan" }`, or `{ Rgb = [r,g,b] }`); caps are
+strings. All `#[serde(default)]`, so they stay covered by invariant #3.
+
 **Plugins:** an optional top-level `plugin_dir` (default
 `$XDG_DATA_HOME/rustline/plugins`, `~/` expanded) plus a typed
 `[plugins.<name>]` table per plugin, keyed by the plugin's name (the `.wasm`
@@ -395,6 +425,9 @@ OS-specific signal. `Context.os`/`Context.arch` (from `std::env::consts::OS`/
 - Done: `battery` widget — `Context.battery`/`os`/`arch`, the ninth built-in,
   and the platform-specific-read pattern (see Invariants above) that any
   future OS-specific signal should follow.
+- Done: window-list rounded pill — `render_window_pill`, the six themeable
+  `win_*` `Theme`/`[theme]` fields (active accent + bold, inactive gray, rounded
+  `` / `` caps); the `windows` widget reduced to a text producer.
 - Plugin auto-download by `owner/repo` (today, `source` is just a config note;
   installing a plugin means putting the `.wasm` in the plugin dir yourself).
 - An interactive capability-approval flow (config/CLI allowlist edits are
