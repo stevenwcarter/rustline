@@ -1717,6 +1717,7 @@ dependencies = [
  "gethostname",
  "libc",
  "rustline-core",
+ "rustline-wasm",
  "toml",
  "tracing",
  "tracing-subscriber",

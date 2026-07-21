@@ -59,6 +59,10 @@ pub struct RegionArgs {
     /// instead of raw tmux markup.
     #[arg(long)]
     pub preview: bool,
+    /// Override the plugin discovery directory (default
+    /// `$XDG_DATA_HOME/rustline/plugins`, or config `plugin_dir`).
+    #[arg(long)]
+    pub plugin_dir: Option<String>,
 }
 
 /// Arguments for rendering one window's segment in the window list, sourced
