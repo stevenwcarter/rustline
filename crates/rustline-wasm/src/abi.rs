@@ -26,6 +26,18 @@ pub struct WriteResult {
     pub error: String,
 }
 
+/// Result of a TTL-cached HTTP GET. `ok` means "a usable body is present"
+/// (fresh OR stale), not "transport succeeded"; `stale` distinguishes them.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct CachedHttpResult {
+    pub ok: bool,
+    pub status: u16,
+    pub body: String,
+    pub error: String,
+    pub stale: bool,
+    pub age_secs: i64,
+}
+
 /// What the host passes to a plugin's `render` export.
 #[derive(Serialize)]
 pub struct RenderInput<'a> {
