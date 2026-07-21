@@ -38,9 +38,12 @@ toggle, but shapes the click path so those slot in at one choke point.
 
 ### Config
 
-The eight format-bearing built-ins gain an optional `alt_format` (default `""`):
-`cwd`, `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`,
-`memory`. `pane_id`/`hostname`/`windows` have no second view and get none.
+The six format-bearing built-ins gain an optional `alt_format` (default `""`):
+`datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`. Widgets with no
+format-string surface get none: `cwd` (a bool, `abbreviate_home`), `loadavg`
+(hardcoded three-float format), and `pane_id`/`hostname`/`windows`. Giving
+`cwd`/`loadavg` a toggle would need a format-string refactor first, so they are
+deferred to a follow-up.
 
 ```toml
 [widgets.cpu]
