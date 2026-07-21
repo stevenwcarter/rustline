@@ -34,13 +34,23 @@ use crate::widget::Registry;
 impl Registry {
     /// Build a [`Registry`] pre-populated with all eleven built-in widgets,
     /// configuring the ones that carry options (`datetime`, `cwd`, `lan_ip`,
-    /// `tailscale_ip`, `battery`, `cpu`, `memory`) from `cfg`.
+    /// `tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg`) from `cfg`.
     pub fn with_builtins(cfg: &Config) -> Registry {
         let mut registry = Registry::new();
         registry.register("pane_id", Box::new(|| Box::new(PaneId)));
         registry.register("hostname", Box::new(|| Box::new(Hostname)));
         registry.register("windows", Box::new(|| Box::new(Windows)));
-        registry.register("loadavg", Box::new(|| Box::new(LoadAvg)));
+        let loadavg = cfg.widgets.loadavg.clone();
+        registry.register(
+            "loadavg",
+            Box::new(move || {
+                Box::new(LoadAvg {
+                    format: loadavg.format.clone(),
+                    alt_format: loadavg.alt_format.clone(),
+                    down_format: loadavg.down_format.clone(),
+                })
+            }),
+        );
 
         let datetime = cfg.widgets.datetime.clone();
         registry.register(

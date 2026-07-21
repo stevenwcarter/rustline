@@ -238,6 +238,33 @@ impl Default for MemoryOpts {
     }
 }
 
+/// Default `format` for the `loadavg` widget: 1/5/15-min values at 2 decimals,
+/// reproducing the pre-config output byte-for-byte.
+fn default_loadavg_format() -> String {
+    "{load1} {load5} {load15}".into()
+}
+
+/// Options for the `loadavg` widget.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LoadAvgOpts {
+    #[serde(default = "default_loadavg_format")]
+    pub format: String,
+    #[serde(default)]
+    pub alt_format: String,
+    #[serde(default)]
+    pub down_format: String,
+}
+
+impl Default for LoadAvgOpts {
+    fn default() -> Self {
+        Self {
+            format: default_loadavg_format(),
+            alt_format: String::new(),
+            down_format: String::new(),
+        }
+    }
+}
+
 /// Per-widget option overrides, keyed by widget name.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WidgetOpts {
@@ -255,6 +282,8 @@ pub struct WidgetOpts {
     pub cpu: CpuOpts,
     #[serde(default)]
     pub memory: MemoryOpts,
+    #[serde(default)]
+    pub loadavg: LoadAvgOpts,
 }
 
 /// Optional theme overrides layered onto [`Theme::default`] by
@@ -713,6 +742,39 @@ bar_width = 12
         std::fs::write(&p, "[widgets.cpu]\nbar_width = \"wide\"\n").unwrap();
         let c = Config::load(&p);
         assert_eq!(c.widgets.cpu.bar_width, 8);
+        assert_eq!(c.layout.left, Config::default().layout.left);
+    }
+
+    #[test]
+    fn loadavg_opts_parse_with_defaults() {
+        let toml = r#"
+[widgets.loadavg]
+format = "L {load1:.1}"
+alt_format = "{load1} {load5} {load15}"
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.widgets.loadavg.format, "L {load1:.1}");
+        assert_eq!(c.widgets.loadavg.alt_format, "{load1} {load5} {load15}");
+        assert_eq!(c.widgets.loadavg.down_format, ""); // omitted -> default
+    }
+
+    #[test]
+    fn loadavg_opts_default_when_absent() {
+        let c = Config::default();
+        assert_eq!(c.widgets.loadavg.format, "{load1} {load5} {load15}");
+        assert_eq!(c.widgets.loadavg.alt_format, "");
+        assert_eq!(c.widgets.loadavg.down_format, "");
+    }
+
+    #[test]
+    fn malformed_loadavg_table_falls_back_to_default() {
+        let dir = std::env::temp_dir().join("rustline_test_badloadavg");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        // format must be a string; an integer makes the table invalid.
+        std::fs::write(&p, "[widgets.loadavg]\nformat = 5\n").unwrap();
+        let c = Config::load(&p);
+        assert_eq!(c.widgets.loadavg.format, "{load1} {load5} {load15}");
         assert_eq!(c.layout.left, Config::default().layout.left);
     }
 }

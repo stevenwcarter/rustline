@@ -170,13 +170,32 @@ format = "{icon} {used}/{total}"     # default; or "{icon} {bar} {percent}%"
 bar_width = 8
 ```
 
+### Load average widget
+
+`loadavg` is built-in and **in the default right layout** — it shows the
+1/5/15-minute system load average (nothing on platforms where it can't be read,
+rather than fake zeros).
+
+Takes a `format` with `{load1}`/`{load5}`/`{load15}` placeholders, each of which
+accepts an inline Rust-style precision spec `:.N` — `{load1:.1}` → `0.4`. A bare
+`{load1}` is two decimals (so the default renders exactly like older versions),
+and `N` is clamped to 0–10. Also takes a `down_format` (default empty, shown
+when the load can't be read) and an `alt_format` for
+[click-to-toggle](#click-to-toggle-widget-views).
+
+```toml
+[widgets.loadavg]
+format      = "{load1} {load5} {load15}"          # default
+alt_format  = "{load1:.1} {load5:.1} {load15:.1}" # left-click toggles to this
+```
+
 ### Click-to-toggle widget views
 
-`datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, and `memory` each take
-an `alt_format` (default empty). Give a widget a non-empty `alt_format` and it
-becomes clickable: left-clicking it in the tmux status line toggles it between
-`format` and `alt_format`, e.g. a compact CPU reading swapping to one with a
-gauge bar:
+`datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`, and `loadavg`
+each take an `alt_format` (default empty). Give a widget a non-empty
+`alt_format` and it becomes clickable: left-clicking it in the tmux status
+line toggles it between `format` and `alt_format`, e.g. a compact CPU reading
+swapping to one with a gauge bar:
 
 ```toml
 [widgets.cpu]
