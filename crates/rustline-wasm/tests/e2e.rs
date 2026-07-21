@@ -59,6 +59,8 @@ fn ctx_now(rfc3339: &str) -> Context {
         window: None,
         interfaces: Vec::new(),
         battery: None,
+        cpu: None,
+        memory: None,
         os: String::new(),
         arch: String::new(),
     }

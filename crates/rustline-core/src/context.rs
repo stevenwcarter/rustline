@@ -46,6 +46,25 @@ pub struct Battery {
     pub state: BatteryState,
 }
 
+/// A memory snapshot captured at Context-build time. All values are bytes;
+/// `used_bytes = total_bytes - available_bytes` (saturating). `Context::memory`
+/// is `None` on unsupported platforms or when the read failed — never a
+/// fabricated `0` (invariant #6), mirroring `loadavg`/`battery`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemInfo {
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub available_bytes: u64,
+}
+
+/// A CPU-utilization snapshot: the busy fraction measured over a short sampling
+/// window at Context-build time, as a percentage clamped to `0.0..=100.0`.
+/// `Context::cpu` is `None` on unsupported platforms or when the read failed.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CpuUsage {
+    pub percent: f32,
+}
+
 /// Everything the renderer needs to know about the current tmux session,
 /// pane, and host in order to produce a status line.
 ///
@@ -68,6 +87,11 @@ pub struct Context {
     pub interfaces: Vec<NetIface>,
     /// Battery snapshot read once at build time; `None` when absent/unsupported.
     pub battery: Option<Battery>,
+    /// CPU-utilization snapshot read once at build time; `None` when
+    /// absent/unsupported.
+    pub cpu: Option<CpuUsage>,
+    /// Memory snapshot read once at build time; `None` when absent/unsupported.
+    pub memory: Option<MemInfo>,
     /// Host OS (`std::env::consts::OS`, e.g. `"linux"`, `"macos"`). Additive
     /// platform metadata for WASM guests.
     pub os: String,
@@ -101,6 +125,12 @@ mod tests {
             battery: Some(Battery {
                 percent: 73,
                 state: BatteryState::Discharging,
+            }),
+            cpu: Some(CpuUsage { percent: 12.5 }),
+            memory: Some(MemInfo {
+                total_bytes: 16 * 1024 * 1024 * 1024,
+                used_bytes: 6 * 1024 * 1024 * 1024,
+                available_bytes: 10 * 1024 * 1024 * 1024,
             }),
             os: "linux".into(),
             arch: "x86_64".into(),
@@ -150,5 +180,20 @@ mod tests {
             serde_json::to_string(&BatteryState::Full).unwrap(),
             "\"full\""
         );
+    }
+
+    #[test]
+    fn context_cpu_memory_survive_serde() {
+        let mut ctx = sample();
+        ctx.cpu = Some(CpuUsage { percent: 37.5 });
+        ctx.memory = Some(MemInfo {
+            total_bytes: 16 * 1024 * 1024 * 1024,
+            used_bytes: 6 * 1024 * 1024 * 1024,
+            available_bytes: 10 * 1024 * 1024 * 1024,
+        });
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: Context = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.cpu, ctx.cpu);
+        assert_eq!(back.memory, ctx.memory);
     }
 }

@@ -39,7 +39,13 @@ fn default_center() -> Vec<String> {
 }
 
 fn default_right() -> Vec<String> {
-    vec!["cwd".into(), "loadavg".into(), "datetime".into()]
+    vec![
+        "cwd".into(),
+        "cpu".into(),
+        "memory".into(),
+        "loadavg".into(),
+        "datetime".into(),
+    ]
 }
 
 impl Default for Layout {
@@ -157,6 +163,63 @@ impl Default for BatteryOpts {
     }
 }
 
+/// Default `format` for the `cpu` widget.
+fn default_cpu_format() -> String {
+    "{icon} {percent}%".into()
+}
+
+/// Default `format` for the `memory` widget.
+fn default_memory_format() -> String {
+    "{icon} {used}/{total}".into()
+}
+
+/// Default width (cells) of the `{bar}` gauge for cpu/memory.
+fn default_bar_width() -> usize {
+    8
+}
+
+/// Options for the `cpu` widget.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CpuOpts {
+    #[serde(default = "default_cpu_format")]
+    pub format: String,
+    #[serde(default)]
+    pub down_format: String,
+    #[serde(default = "default_bar_width")]
+    pub bar_width: usize,
+}
+
+impl Default for CpuOpts {
+    fn default() -> Self {
+        Self {
+            format: default_cpu_format(),
+            down_format: String::new(),
+            bar_width: default_bar_width(),
+        }
+    }
+}
+
+/// Options for the `memory` widget.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryOpts {
+    #[serde(default = "default_memory_format")]
+    pub format: String,
+    #[serde(default)]
+    pub down_format: String,
+    #[serde(default = "default_bar_width")]
+    pub bar_width: usize,
+}
+
+impl Default for MemoryOpts {
+    fn default() -> Self {
+        Self {
+            format: default_memory_format(),
+            down_format: String::new(),
+            bar_width: default_bar_width(),
+        }
+    }
+}
+
 /// Per-widget option overrides, keyed by widget name.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WidgetOpts {
@@ -170,6 +233,10 @@ pub struct WidgetOpts {
     pub tailscale_ip: TailscaleIpOpts,
     #[serde(default)]
     pub battery: BatteryOpts,
+    #[serde(default)]
+    pub cpu: CpuOpts,
+    #[serde(default)]
+    pub memory: MemoryOpts,
 }
 
 /// Optional theme overrides layered onto [`Theme::default`] by
@@ -407,7 +474,10 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.layout.left, vec!["pane_id", "hostname"]);
         assert_eq!(c.layout.center, vec!["windows"]);
-        assert_eq!(c.layout.right, vec!["cwd", "loadavg", "datetime"]);
+        assert_eq!(
+            c.layout.right,
+            vec!["cwd", "cpu", "memory", "loadavg", "datetime"]
+        );
     }
 
     #[test]
@@ -588,6 +658,43 @@ down_format = "TS off"
         std::fs::write(&p, "[widgets.battery]\nformat = 5\n").unwrap();
         let c = Config::load(&p);
         assert_eq!(c.widgets.battery.format, "{icon} {percent}%");
+        assert_eq!(c.layout.left, Config::default().layout.left);
+    }
+
+    #[test]
+    fn cpu_memory_opts_parse_with_defaults() {
+        let toml = r#"
+[widgets.cpu]
+format = "{bar} {percent}%"
+[widgets.memory]
+bar_width = 12
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.widgets.cpu.format, "{bar} {percent}%");
+        assert_eq!(c.widgets.cpu.bar_width, 8); // omitted -> default
+        assert_eq!(c.widgets.memory.format, "{icon} {used}/{total}"); // omitted -> default
+        assert_eq!(c.widgets.memory.bar_width, 12);
+        assert_eq!(c.widgets.memory.down_format, "");
+    }
+
+    #[test]
+    fn cpu_memory_opts_default_when_absent() {
+        let c = Config::default();
+        assert_eq!(c.widgets.cpu.format, "{icon} {percent}%");
+        assert_eq!(c.widgets.cpu.bar_width, 8);
+        assert_eq!(c.widgets.memory.format, "{icon} {used}/{total}");
+        assert_eq!(c.widgets.memory.bar_width, 8);
+    }
+
+    #[test]
+    fn malformed_cpu_table_falls_back_to_default() {
+        let dir = std::env::temp_dir().join("rustline_test_badcpu");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        // bar_width must be an integer; a string makes the table invalid.
+        std::fs::write(&p, "[widgets.cpu]\nbar_width = \"wide\"\n").unwrap();
+        let c = Config::load(&p);
+        assert_eq!(c.widgets.cpu.bar_width, 8);
         assert_eq!(c.layout.left, Config::default().layout.left);
     }
 }

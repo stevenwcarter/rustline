@@ -86,6 +86,8 @@ mod tests {
             window: None,
             interfaces: Vec::new(),
             battery,
+            cpu: None,
+            memory: None,
             os: String::new(),
             arch: String::new(),
         }

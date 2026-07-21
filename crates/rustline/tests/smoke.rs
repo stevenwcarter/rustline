@@ -257,6 +257,45 @@ fn render_right_with_battery_renders_gracefully() {
 }
 
 #[test]
+fn render_right_with_cpu_memory_renders_gracefully() {
+    // `cpu`/`memory` in a layout must render alongside built-ins and exit 0 on
+    // ANY host. Proves the build_context -> read_cpu/read_memory -> Context ->
+    // widgets wiring does not crash; deterministic formatting is pinned by the
+    // widgets' own unit tests. On Linux the /proc reads succeed and the widgets
+    // render live values; elsewhere they skip via empty down_format — either way
+    // `datetime` guarantees non-empty tmux markup.
+    let tmp = tempfile::tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    std::fs::write(
+        cfgdir.join("config.toml"),
+        "[layout]\nright = [\"cpu\", \"memory\", \"datetime\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["render", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("#["), "built-ins still render: {s}");
+    // On Linux the /proc reads succeed, so the cpu widget renders its icon —
+    // this guards the read -> Context -> widget seam end to end (host-dependent,
+    // so Linux-gated).
+    #[cfg(target_os = "linux")]
+    assert!(
+        s.contains('\u{f061a}'),
+        "cpu widget should render its icon on Linux: {s}"
+    );
+}
+
+#[test]
 fn plugin_add_on_unparseable_config_preserves_file() {
     // A pre-existing config with a TOML *syntax* error must abort with exit 1
     // and leave the file byte-for-byte intact — never truncate the user's whole

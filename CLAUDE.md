@@ -70,13 +70,17 @@ these shared types, not a design shortcut. Keep them serializable.
 - `context.rs` — `Context` (session/window/pane ids, `pane_current_path`,
   `home`, `hostname`, `loadavg: Option<[f64;3]>`, `now: DateTime<Local>`,
   `window: Option<WindowCtx>`, `interfaces: Vec<NetIface>`,
-  `battery: Option<Battery>`, `os: String`, `arch: String`), `WindowCtx`, and
+  `battery: Option<Battery>`, `cpu: Option<CpuUsage>`,
+  `memory: Option<MemInfo>`, `os: String`, `arch: String`), `WindowCtx`, and
   `NetIface { name, ipv4: Ipv4Addr }` (one non-loopback IPv4 interface, read
   once at `Context`-build time; the IP widgets select from this list rather
   than touching the OS mid-render). `Battery { percent: u8, state:
   BatteryState }` and `BatteryState { Charging, Discharging, Full, Unknown }`
   (serde `snake_case`) are a battery snapshot read once at `Context`-build
-  time; `os`/`arch` come from `std::env::consts::OS`/`ARCH`.
+  time; `CpuUsage { percent: f32 }` and `MemInfo { total_bytes, used_bytes,
+  available_bytes }` (all bytes as `u64`) are the cpu/memory snapshots,
+  likewise read once at `Context`-build time; `os`/`arch` come from
+  `std::env::consts::OS`/`ARCH`.
 - `render.rs` — `render_region(Direction, &[Segment], &Theme) -> String`, the
   load-bearing powerline renderer (hard `` `` / soft `` `` separators, edge
   blending to `bar_bg`); `render_window_pill(text, is_current, &Theme) ->
@@ -85,17 +89,25 @@ these shared types, not a design shortcut. Keep them serializable.
   (palette, glyphs, colors, incl. the six `win_*` pill fields) with `Default`.
 - `widget.rs` — `Widget` trait and `Registry` (name → factory; `resolve` skips
   unknown widget names with a `warn!`, never errors).
-- `widgets/` — the nine built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
-  `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, `battery`, plus
-  `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
+- `widgets/` — the eleven built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
+  `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`,
+  plus `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
   LAN/Tailscale interface-selection and `{ip}` formatting logic shared by
   `lan_ip`/`tailscale_ip` (no I/O — operates on `Context.interfaces`).
   `battery.rs` is the `battery` widget: pure over `Context.battery`, with a
   level-bucketed, charging-aware Nerd-Font `{icon}` plus `{percent}`/`{state}`
-  placeholders. `windows.rs` is the `windows` widget: it emits only the window
-  **text** (`{index}{flags} {name}`); the pill styling and active/inactive
-  colors are applied downstream by the theme-aware renderer (widgets can't see
-  the `Theme`).
+  placeholders. `bar.rs` is `pub(crate) fn gauge_bar(fraction: f64, width:
+  usize) -> String`, a shared pure Unicode block-eighths gauge (full `█`
+  cells, one sub-cell partial, `░` track) used by the `{bar}` placeholder in
+  both `cpu.rs` and `memory.rs`. `cpu.rs` is the `cpu` widget: pure over
+  `Context.cpu`, with an nf-md-chip `{icon}`, `{percent}`, and `{bar}`
+  placeholders. `memory.rs` is the `memory` widget: pure over
+  `Context.memory`, with an nf-md-memory `{icon}`, `{used}`/`{total}`/
+  `{avail}` (human-readable binary sizes via `format_bytes`, e.g. `6.2G`),
+  `{percent}`, and `{bar}` placeholders. `windows.rs` is the `windows` widget:
+  it emits only the window **text** (`{index}{flags} {name}`); the pill
+  styling and active/inactive colors are applied downstream by the
+  theme-aware renderer (widgets can't see the `Theme`).
 - `assemble.rs` — `assign_palette`, `render_named_region` (panic-guarded per
   widget via `catch_unwind`), `render_window` (wraps the `windows` text in a
   themed rounded pill via `render.rs::render_window_pill`, keyed on
@@ -163,19 +175,34 @@ these shared types, not a design shortcut. Keep them serializable.
 
 `rustline` (bin):
 - `cli.rs` — `clap` derive. `render` and `plugin` are subcommand *groups*.
-- `battery.rs` — `read_battery()`, the sole `#[cfg(target_os)]` surface: a
-  Linux sysfs (`/sys/class/power_supply/*/{capacity,status}`) arm and a macOS
+- `battery.rs` — `read_battery()`, a `#[cfg(target_os)]` read surface (one of
+  three — see `cpu.rs`/`memory.rs` below): a Linux sysfs
+  (`/sys/class/power_supply/*/{capacity,status}`) arm and a macOS
   `pmset -g batt` arm, each delegating to a pure parser (`parse_linux`/
   `parse_pmset`) that is `#[cfg(any(target_os = …, test))]`-compiled so both
   are unit-tested on the Linux dev box even though only one reader arm
   compiles per platform. Any other platform, or a failed read, yields `None`.
+- `cpu.rs` — `read_cpu()`, a `#[cfg(target_os)]` read surface: Linux takes two
+  `/proc/stat` samples ~120 ms apart (`CPU_SAMPLE_WINDOW`) and diffs the
+  aggregate `cpu ` line (`parse_proc_stat` + `busy_percent`, a stateless
+  two-sample delta — no cross-invocation state); macOS shells out to
+  `top -l 2 -n 0` and parses the last `CPU usage:` line (`parse_top_cpu`).
+  Both parsers are `#[cfg(any(target_os = …, test))]`-compiled and unit-tested
+  on the Linux dev box. Unsupported platform or failed read → `None`.
+- `memory.rs` — `read_memory()`, a `#[cfg(target_os)]` read surface: Linux
+  reads `/proc/meminfo` (`MemTotal`/`MemAvailable` in kB, `parse_meminfo`);
+  macOS shells out to `sysctl -n hw.memsize` + `vm_stat` and derives available
+  bytes from free/inactive/speculative pages at the reported page size
+  (`parse_macos_memory`). Same cfg-gated pure-parser pattern as
+  `battery.rs`/`cpu.rs`. Unsupported platform or failed read → `None`.
 - `build_context.rs` — builds `Context` from args + `gethostname`,
   `libc::getloadavg` (the only `unsafe`, guarded on `n == 3`), `chrono::Local`,
   `$HOME`, non-loopback IPv4 interfaces via `if-addrs` into
   `Context.interfaces` (a failed read yields an empty `Vec`, never a
   fabricated address — same spirit as `read_loadavg` returning `None`), and
-  now also `battery` (via `battery::read_battery()`), `os`, and `arch` (from
-  `std::env::consts::OS`/`ARCH`).
+  now also `battery` (via `battery::read_battery()`), `cpu` (via
+  `cpu::read_cpu()`), `memory` (via `memory::read_memory()`), `os`, and `arch`
+  (from `std::env::consts::OS`/`ARCH`).
 - `plugin_cmd.rs` — `rustline plugin …`: `list` reads the effective `Config`;
   `url|path add/remove` mutate the config file in place via `toml_edit`
   (preserving comments/formatting), creating `[plugins.<name>]` if absent.
@@ -234,7 +261,7 @@ This is why `render window` takes named args, not positional. See `tmux_conf.rs`
 Optional TOML at `~/.config/rustline/config.toml` (or
 `$XDG_CONFIG_HOME/rustline/config.toml`). Zero-config works. Default layout:
 left = `[pane_id, hostname]`, center = `[windows]`,
-right = `[cwd, loadavg, datetime]`. Default datetime format
+right = `[cwd, cpu, memory, loadavg, datetime]`. Default datetime format
 `"%a < %Y-%m-%d < %H:%M"` (the `<` are literal). Unknown widget names in a layout
 are skipped, not fatal.
 
@@ -269,6 +296,29 @@ read) — same collapse-placeholders-to-empty behavior as the IP widgets'
 ```toml
 [widgets.battery]
 format = "{icon} {percent}%"
+down_format = ""
+```
+
+**CPU and memory widgets:** `cpu` and `memory` are in the **default** right
+layout (unlike the opt-in IP/battery widgets above). `cpu` takes a `format`
+(default `"{icon} {percent}%"`) with `{icon}` (nf-md-chip), `{percent}`, and
+`{bar}` (a `bar_width`-cell Unicode block-eighths gauge, default 8)
+placeholders. `memory` takes a `format` (default `"{icon} {used}/{total}"`)
+with `{icon}` (nf-md-memory), `{used}`/`{total}`/`{avail}` (human-readable
+binary sizes, e.g. `6.2G`), `{percent}`, and `{bar}` (`bar_width`, default 8)
+placeholders. Both take a `down_format` (default `""`, i.e. render nothing)
+shown when the platform read failed or is unsupported — same
+collapse-placeholders-to-empty behavior as `battery`'s `down_format`.
+
+```toml
+[widgets.cpu]
+format = "{icon} {bar} {percent}%"   # default "{icon} {percent}%"
+bar_width = 8
+down_format = ""
+
+[widgets.memory]
+format = "{icon} {used}/{total}"     # default; or "{icon} {bar} {percent}%"
+bar_width = 8
 down_format = ""
 ```
 
@@ -349,13 +399,17 @@ info|debug|trace` and is parsed leniently (a typo falls back to the default).
    zeros. A panicking widget degrades to empty via the `catch_unwind` guard.
 
 **Platform-specific reads stay at the `Context`-build edge.** `read_battery()`
-(`crates/rustline/src/battery.rs`) is the only `#[cfg(target_os)]` surface in
-the codebase; each OS arm (Linux sysfs, macOS `pmset`) delegates to a pure
-parser (`parse_linux`/`parse_pmset`) that is `#[cfg(any(target_os = …, test))]`-
-compiled, so both parsers are unit-tested on the Linux dev box even though
-only one reader arm compiles per platform. Follow this pattern for any future
-OS-specific signal. `Context.os`/`Context.arch` (from `std::env::consts::OS`/
-`ARCH`) are now available for WASM guests that want to branch on platform.
+(`crates/rustline/src/battery.rs`), `read_cpu()` (`crates/rustline/src/cpu.rs`),
+and `read_memory()` (`crates/rustline/src/memory.rs`) are the three
+`#[cfg(target_os)]` surfaces in the codebase; each OS arm (Linux sysfs/`/proc`,
+macOS `pmset`/`top`/`sysctl`+`vm_stat`) delegates to a pure parser
+(`parse_linux`/`parse_pmset`, `parse_proc_stat`/`parse_top_cpu`,
+`parse_meminfo`/`parse_macos_memory`) that is `#[cfg(any(target_os = …,
+test))]`-compiled, so all of them are unit-tested on the Linux dev box even
+though only one reader arm per module compiles per platform. Follow this
+pattern for any future OS-specific signal. `Context.os`/`Context.arch` (from
+`std::env::consts::OS`/`ARCH`) are now available for WASM guests that want to
+branch on platform.
 
 **WASM plugin invariants (added by the plugin system — re-check when touching
 `rustline-wasm` or `plugins/*`):**
@@ -428,6 +482,14 @@ OS-specific signal. `Context.os`/`Context.arch` (from `std::env::consts::OS`/
 - Done: window-list rounded pill — `render_window_pill`, the six themeable
   `win_*` `Theme`/`[theme]` fields (active accent + bold, inactive gray, rounded
   `` / `` caps); the `windows` widget reduced to a text producer.
+- Done: `cpu` + `memory` widgets — `Context.cpu`/`Context.memory`
+  (`CpuUsage`/`MemInfo`), the tenth/eleventh built-ins and now in the
+  **default** right layout; the shared `gauge_bar` Unicode block-eighths
+  renderer (`widgets/bar.rs`) backing both widgets' `{bar}` placeholder;
+  `read_cpu`/`read_memory` following the `read_battery` platform-read pattern.
+- Historical sparkline (last-X-seconds graph) for `cpu`/`memory` — today's
+  reads are single-shot, stateless snapshots; a sparkline needs
+  cross-invocation sample persistence, deferred to its own spec.
 - Plugin auto-download by `owner/repo` (today, `source` is just a config note;
   installing a plugin means putting the `.wasm` in the plugin dir yourself).
 - An interactive capability-approval flow (config/CLI allowlist edits are
@@ -448,3 +510,5 @@ OS-specific signal. `Context.os`/`Context.arch` (from `std::env::consts::OS`/
 - Plan (WASM plugins): `docs/superpowers/plans/2026-07-20-rustline-wasm-plugins.md`
 - Spec (IP widgets): `docs/superpowers/specs/2026-07-20-rustline-ip-widgets-design.md`
 - Plan (IP widgets): `docs/superpowers/plans/2026-07-20-rustline-ip-widgets.md`
+- Spec (cpu/memory widgets): `docs/superpowers/specs/2026-07-21-rustline-cpu-memory-widgets-design.md`
+- Plan (cpu/memory widgets): `docs/superpowers/plans/2026-07-21-rustline-cpu-memory-widgets.md`
