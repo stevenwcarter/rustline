@@ -125,14 +125,20 @@ these shared types, not a design shortcut. Keep them serializable.
   `{percent}`, and `{bar}` placeholders. `windows.rs` is the `windows` widget:
   it emits only the window **text** (`{index}{flags} {name}`); the pill
   styling and active/inactive colors are applied downstream by the
-  theme-aware renderer (widgets can't see the `Theme`). `toggle.rs` holds the
-  shared click-toggle helpers `active_format(ctx, name, format, alt) -> &str`
+  theme-aware renderer (widgets can't see the `Theme`). `loadavg.rs` is the
+  `loadavg` widget: pure over `Context.loadavg`, with `{load1}`/`{load5}`/
+  `{load15}` placeholders that each accept an inline Rust-style precision spec
+  (`{load1:.1}`; default 2 decimals, so the default format is byte-identical
+  to the pre-config output), plus `alt_format`/`down_format` like the rest of
+  the family; a private `substitute` scanner does the replacement.
+  `toggle.rs` holds the shared click-toggle helpers
+  `active_format(ctx, name, format, alt) -> &str`
   (picks `alt` iff it's non-empty AND `name` is in `ctx.toggled`, else
   `format`) and `clickable_range(name, alt) -> Option<&str>` (`Some(name)` iff
   `alt` is non-empty AND `name.len() <= 15`, tmux's `range=user|X` byte limit);
-  the six format-bearing widgets (`datetime`, `lan_ip`, `tailscale_ip`,
-  `battery`, `cpu`, `memory`) each carry an `alt_format` field and call both
-  helpers from their `render`/`range_name`.
+  the seven format-bearing widgets (`datetime`, `lan_ip`, `tailscale_ip`,
+  `battery`, `cpu`, `memory`, `loadavg`) each carry an `alt_format` field and
+  call both helpers from their `render`/`range_name`.
 - `assemble.rs` — `assign_palette`, `render_named_region` (panic-guarded per
   widget via `catch_unwind`; now range-wraps via `render_region_ranged`,
   remembering each widget's `range_name()` across the palette-assignment
@@ -385,12 +391,24 @@ bar_width = 8
 down_format = ""
 ```
 
-**Click-to-toggle widget views:** the six format-bearing widgets —
-`datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory` — each take an
-additional `alt_format` (default `""`, `#[serde(default)]`, so covered by
-invariant #3 like every other opt). A non-empty `alt_format` makes that widget
-clickable: left-clicking it in the tmux status line toggles it between
-`format` and `alt_format`.
+**Load average widget:** `loadavg` is in the **default** right layout. It takes
+a `format` (default `"{load1} {load5} {load15}"`) with `{load1}`/`{load5}`/
+`{load15}` placeholders (1/5/15-minute averages), each accepting an inline
+precision spec `:.N` (e.g. `{load1:.1}`; bare `{loadN}` is 2 decimals, `N`
+clamped to 0–10). Also takes an `alt_format` (click-toggle) and a `down_format`
+(shown when `getloadavg` fails; default empty → renders nothing).
+
+    [widgets.loadavg]
+    format      = "{load1} {load5} {load15}"   # default
+    alt_format  = "{load1:.1} {load5:.1} {load15:.1}"   # left-click toggles to this
+    down_format = ""
+
+**Click-to-toggle widget views:** the seven format-bearing widgets —
+`datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg` —
+each take an additional `alt_format` (default `""`, `#[serde(default)]`, so
+covered by invariant #3 like every other opt). A non-empty `alt_format` makes
+that widget clickable: left-clicking it in the tmux status line toggles it
+between `format` and `alt_format`.
 
 ```toml
 [widgets.cpu]
