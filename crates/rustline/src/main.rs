@@ -51,6 +51,23 @@ fn config_path() -> PathBuf {
     base.join("rustline").join("config.toml")
 }
 
+/// Handle `rustline click`: on a left-click with a non-empty range, flip that
+/// widget's membership in the toggle state file. Any other button, or an
+/// empty range, is a no-op. Never fails the process (invariant: never break
+/// the bar).
+///
+/// This is the single choke point for click dispatch: a future `left_click`/
+/// `right_click` script-handler mechanism should extend the resolution here
+/// rather than adding parallel dispatch elsewhere.
+fn run_click(args: &cli::ClickArgs) {
+    if args.button != "left" || args.range.is_empty() {
+        return;
+    }
+    let mut set = toggles::read_toggles();
+    toggles::apply_toggle(&mut set, &args.range);
+    toggles::write_toggles(&set);
+}
+
 fn main() {
     let cli = Cli::parse();
     // Load config first so logging can honor `[log]`; defer the load-failure
@@ -99,5 +116,6 @@ fn main() {
             }
         },
         Command::Plugin(cmd) => plugin_cmd::run(cmd, &config_path()),
+        Command::Click(args) => run_click(&args),
     }
 }

@@ -8,10 +8,6 @@ use std::path::PathBuf;
 /// Path to the toggles state file (reuses the wasm crate's XDG data-root resolver
 /// so there is one base dir: `$XDG_DATA_HOME/rustline`, fallback
 /// `~/.local/share/rustline`).
-#[allow(
-    dead_code,
-    reason = "wired up by tasks 8-9; kept here to land the module standalone"
-)]
 pub fn toggles_path() -> PathBuf {
     rustline_wasm::data_root().join("toggles")
 }
@@ -38,10 +34,6 @@ pub fn serialize_toggles(set: &BTreeSet<String>) -> String {
 }
 
 /// Flip `name`'s membership.
-#[allow(
-    dead_code,
-    reason = "wired up by tasks 8-9; kept here to land the module standalone"
-)]
 pub fn apply_toggle(set: &mut BTreeSet<String>, name: &str) {
     if !set.remove(name) {
         set.insert(name.to_string());
@@ -49,10 +41,6 @@ pub fn apply_toggle(set: &mut BTreeSet<String>, name: &str) {
 }
 
 /// Read the toggle set; a missing/unreadable file yields an empty set.
-#[allow(
-    dead_code,
-    reason = "wired up by tasks 8-9; kept here to land the module standalone"
-)]
 pub fn read_toggles() -> BTreeSet<String> {
     match std::fs::read_to_string(toggles_path()) {
         Ok(text) => parse_toggles(&text),
@@ -62,10 +50,6 @@ pub fn read_toggles() -> BTreeSet<String> {
 
 /// Best-effort atomic write (temp file + rename); logs a warning on failure and
 /// never panics — a broken toggle must never break the bar.
-#[allow(
-    dead_code,
-    reason = "wired up by tasks 8-9; kept here to land the module standalone"
-)]
 pub fn write_toggles(set: &BTreeSet<String>) {
     let path = toggles_path();
     if let Some(parent) = path.parent() {

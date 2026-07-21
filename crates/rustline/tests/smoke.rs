@@ -327,6 +327,36 @@ fn plugin_add_on_unparseable_config_preserves_file() {
     assert_eq!(after, invalid, "config left byte-for-byte unchanged");
 }
 
+#[test]
+fn click_toggles_state_file() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.env("XDG_DATA_HOME", tmp.path())
+        .args(["click", "--range=cpu", "--button=left"]);
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let toggles = std::fs::read_to_string(tmp.path().join("rustline/toggles")).unwrap();
+    assert!(toggles.contains("cpu"), "cpu toggled on: {toggles:?}");
+
+    // second click toggles off
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.env("XDG_DATA_HOME", tmp.path())
+        .args(["click", "--range=cpu", "--button=left"]);
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let toggles = std::fs::read_to_string(tmp.path().join("rustline/toggles")).unwrap_or_default();
+    assert!(!toggles.contains("cpu"), "cpu toggled off: {toggles:?}");
+}
+
 /// A `rustline` invocation with an isolated HOME/XDG environment so logging
 /// and config read/write a throwaway tree, never the developer's real dirs.
 fn isolated_cmd(home: &Path, xdg_data: &Path, xdg_config: &Path) -> Command {
