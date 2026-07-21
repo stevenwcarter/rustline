@@ -2,6 +2,7 @@ pub mod cwd;
 pub mod datetime;
 pub mod hostname;
 pub mod loadavg;
+mod net;
 pub mod pane_id;
 pub mod windows;
 
