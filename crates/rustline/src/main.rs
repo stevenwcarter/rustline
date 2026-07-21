@@ -2,6 +2,7 @@ mod battery;
 mod build_context;
 mod cli;
 mod logging;
+mod memory;
 mod plugin_cmd;
 mod tmux_conf;
 
