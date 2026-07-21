@@ -134,6 +134,29 @@ impl Default for TailscaleIpOpts {
     }
 }
 
+/// Default `format` for the `battery` widget.
+fn default_battery_format() -> String {
+    "{icon} {percent}%".into()
+}
+
+/// Options for the `battery` widget.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BatteryOpts {
+    #[serde(default = "default_battery_format")]
+    pub format: String,
+    #[serde(default)]
+    pub down_format: String,
+}
+
+impl Default for BatteryOpts {
+    fn default() -> Self {
+        Self {
+            format: default_battery_format(),
+            down_format: String::new(),
+        }
+    }
+}
+
 /// Per-widget option overrides, keyed by widget name.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WidgetOpts {
@@ -145,6 +168,8 @@ pub struct WidgetOpts {
     pub lan_ip: LanIpOpts,
     #[serde(default)]
     pub tailscale_ip: TailscaleIpOpts,
+    #[serde(default)]
+    pub battery: BatteryOpts,
 }
 
 /// Optional theme overrides layered onto [`Theme::default`] by
@@ -480,5 +505,32 @@ down_format = "TS off"
         let (cfg, warn) = Config::load_reporting(Path::new("/no/such/rustline/config.toml"));
         assert_eq!(cfg.log.file_level, "info");
         assert!(warn.is_none());
+    }
+
+    #[test]
+    fn battery_opts_parse_with_defaults() {
+        let toml = "[widgets.battery]\nformat = \"{percent}% {state}\"\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.widgets.battery.format, "{percent}% {state}");
+        assert_eq!(c.widgets.battery.down_format, ""); // omitted -> default
+    }
+
+    #[test]
+    fn battery_opts_default_when_absent() {
+        let c = Config::default();
+        assert_eq!(c.widgets.battery.format, "{icon} {percent}%");
+        assert_eq!(c.widgets.battery.down_format, "");
+    }
+
+    #[test]
+    fn malformed_battery_table_falls_back_to_default() {
+        let dir = std::env::temp_dir().join("rustline_test_badbattery");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        // format must be a string; an integer makes the table invalid.
+        std::fs::write(&p, "[widgets.battery]\nformat = 5\n").unwrap();
+        let c = Config::load(&p);
+        assert_eq!(c.widgets.battery.format, "{icon} {percent}%");
+        assert_eq!(c.layout.left, Config::default().layout.left);
     }
 }
