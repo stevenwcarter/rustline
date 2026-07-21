@@ -38,6 +38,7 @@ pub fn build_region_context(args: &RegionArgs) -> Context {
         loadavg: read_loadavg(),
         now: chrono::Local::now(),
         window: None,
+        interfaces: Vec::new(),
     }
 }
 

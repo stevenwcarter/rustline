@@ -1,3 +1,5 @@
+use std::net::Ipv4Addr;
+
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +11,16 @@ pub struct WindowCtx {
     pub name: String,
     pub flags: String,
     pub is_current: bool,
+}
+
+/// One non-loopback IPv4 network interface, captured at `Context`-build time.
+///
+/// The widgets (`lan_ip`, `tailscale_ip`) select from this list rather than
+/// reading the OS, keeping invariant #1 (Context is the sole render input).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetIface {
+    pub name: String,
+    pub ipv4: Ipv4Addr,
 }
 
 /// Everything the renderer needs to know about the current tmux session,
@@ -28,6 +40,9 @@ pub struct Context {
     pub loadavg: Option<[f64; 3]>,
     pub now: DateTime<Local>,
     pub window: Option<WindowCtx>,
+    /// Non-loopback IPv4 interfaces read once at build time; the IP widgets
+    /// select from this rather than touching the OS mid-render.
+    pub interfaces: Vec<NetIface>,
 }
 
 #[cfg(test)]
@@ -49,6 +64,10 @@ mod tests {
                 .single()
                 .unwrap(),
             window: None,
+            interfaces: vec![NetIface {
+                name: "eth0".into(),
+                ipv4: "192.168.1.20".parse().unwrap(),
+            }],
         }
     }
 
@@ -60,5 +79,18 @@ mod tests {
         assert_eq!(back.session_name, ctx.session_name);
         assert_eq!(back.loadavg, ctx.loadavg);
         assert_eq!(back.now, ctx.now);
+    }
+
+    #[test]
+    fn context_interfaces_survive_serde() {
+        let ctx = sample();
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: Context = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.interfaces, ctx.interfaces);
+        assert_eq!(back.interfaces[0].name, "eth0");
+        assert_eq!(
+            back.interfaces[0].ipv4,
+            "192.168.1.20".parse::<std::net::Ipv4Addr>().unwrap()
+        );
     }
 }

@@ -57,6 +57,7 @@ fn ctx_now(rfc3339: &str) -> Context {
             .unwrap()
             .with_timezone(&chrono::Local),
         window: None,
+        interfaces: Vec::new(),
     }
 }
 

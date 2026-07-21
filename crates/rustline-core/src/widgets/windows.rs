@@ -43,6 +43,7 @@ mod tests {
                 .single()
                 .unwrap(),
             window: win,
+            interfaces: Vec::new(),
         }
     }
 
