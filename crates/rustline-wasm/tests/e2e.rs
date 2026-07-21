@@ -63,6 +63,7 @@ fn ctx_now(rfc3339: &str) -> Context {
         memory: None,
         os: String::new(),
         arch: String::new(),
+        toggled: Default::default(),
     }
 }
 
@@ -74,7 +75,7 @@ fn build_widget(api_base: &str, state_root: std::path::PathBuf, zip: &str) -> Wa
     let cap = CapabilityCtx::from_config("weather", &pc, state_root);
     let plugin = build_plugin(&weather_wasm(), cap).unwrap();
     let options = serde_json::json!({ "zip": zip, "api_base": api_base, "refresh_secs": 1800 });
-    WasmWidget::new(plugin, options)
+    WasmWidget::new(plugin, options, "weather")
 }
 
 /// A mock that serves exactly one successful response then closes its

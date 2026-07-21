@@ -35,6 +35,8 @@ pub enum Command {
     /// Manage plugins and their capability allowlists.
     #[command(subcommand)]
     Plugin(PluginCmd),
+    /// Toggle a widget's alt view (invoked by the tmux MouseDown1Status binding).
+    Click(ClickArgs),
 }
 
 /// Manage discovered plugins and their capability allowlists.
@@ -122,4 +124,15 @@ pub struct WindowArgs {
     /// instead of raw tmux markup.
     #[arg(long)]
     pub preview: bool,
+}
+
+/// Arguments for `rustline click`, sourced from the tmux mouse binding.
+#[derive(Args)]
+pub struct ClickArgs {
+    /// The clicked widget's range name (tmux `#{mouse_status_range}`); empty = no-op.
+    #[arg(long, default_value = "")]
+    pub range: String,
+    /// Which mouse button (currently only `left` acts; others are reserved).
+    #[arg(long, default_value = "left")]
+    pub button: String,
 }

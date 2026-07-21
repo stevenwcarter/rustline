@@ -53,6 +53,14 @@ themeable via `[theme]` (see Config). WASM plugins implement the same `Widget` t
 built-ins (via `WasmWidget`) and are resolved into the same registry, so they
 flow through this pipeline unchanged.
 
+A widget that opts into click-to-toggle (a non-empty `alt_format` and a name
+that fits tmux's 15-byte range limit) reports `Widget::range_name() ->
+Some(name)`; `render_named_region` then calls `render_region_ranged` instead of
+`render_region`, wrapping that widget's cells in `#[range=user|NAME]…#[norange]`
+so a tmux `MouseDown1Status` binding can tell which widget was clicked (see CLI
+below: `rustline click`). With every widget's range `None`, output is
+byte-identical to `render_region`.
+
 The core types (`Context`, `WindowCtx`) live in `rustline-core` (they carry
 `chrono`); the output types (`Segment`, `Style`, `Color`) live in
 `rustline-abi` and are re-exported by `rustline-core`. All derive
@@ -71,7 +79,8 @@ these shared types, not a design shortcut. Keep them serializable.
   `home`, `hostname`, `loadavg: Option<[f64;3]>`, `now: DateTime<Local>`,
   `window: Option<WindowCtx>`, `interfaces: Vec<NetIface>`,
   `battery: Option<Battery>`, `cpu: Option<CpuUsage>`,
-  `memory: Option<MemInfo>`, `os: String`, `arch: String`), `WindowCtx`, and
+  `memory: Option<MemInfo>`, `os: String`, `arch: String`, `toggled:
+  BTreeSet<String>`), `WindowCtx`, and
   `NetIface { name, ipv4: Ipv4Addr }` (one non-loopback IPv4 interface, read
   once at `Context`-build time; the IP widgets select from this list rather
   than touching the OS mid-render). `Battery { percent: u8, state:
@@ -80,15 +89,24 @@ these shared types, not a design shortcut. Keep them serializable.
   time; `CpuUsage { percent: f32 }` and `MemInfo { total_bytes, used_bytes,
   available_bytes }` (all bytes as `u64`) are the cpu/memory snapshots,
   likewise read once at `Context`-build time; `os`/`arch` come from
-  `std::env::consts::OS`/`ARCH`.
+  `std::env::consts::OS`/`ARCH`; `toggled` (`#[serde(default)]`) is the set of
+  widget/plugin names the user has click-toggled to their `alt_format` view,
+  read once at `Context`-build time from the toggles state file (invariant #1)
+  and serialized to WASM guests.
 - `render.rs` — `render_region(Direction, &[Segment], &Theme) -> String`, the
   load-bearing powerline renderer (hard `` `` / soft `` `` separators, edge
   blending to `bar_bg`); `render_window_pill(text, is_current, &Theme) ->
   String`, the window-list rounded-pill renderer (rounded `` / `` caps colored
-  `fg=pill,bg=bar_bg` — the *opposite* of a pointed separator); `Theme`
+  `fg=pill,bg=bar_bg` — the *opposite* of a pointed separator); `RangeGroup`
+  (a widget's segments plus its optional clickable range name) and
+  `render_region_ranged(Direction, &[RangeGroup], &Theme) -> String`, which
+  brackets each clickable group in `#[range=user|NAME]…#[norange]` with
+  separators/edges kept outside any range — byte-identical to `render_region`
+  when every group's range is `None`; `Theme`
   (palette, glyphs, colors, incl. the six `win_*` pill fields) with `Default`.
 - `widget.rs` — `Widget` trait and `Registry` (name → factory; `resolve` skips
-  unknown widget names with a `warn!`, never errors).
+  unknown widget names with a `warn!`, never errors). `Widget::range_name(&self)
+  -> Option<&str>` defaults to `None`; a clickable widget returns `Some(name)`.
 - `widgets/` — the eleven built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
   `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`,
   plus `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
@@ -107,12 +125,22 @@ these shared types, not a design shortcut. Keep them serializable.
   `{percent}`, and `{bar}` placeholders. `windows.rs` is the `windows` widget:
   it emits only the window **text** (`{index}{flags} {name}`); the pill
   styling and active/inactive colors are applied downstream by the
-  theme-aware renderer (widgets can't see the `Theme`).
+  theme-aware renderer (widgets can't see the `Theme`). `toggle.rs` holds the
+  shared click-toggle helpers `active_format(ctx, name, format, alt) -> &str`
+  (picks `alt` iff it's non-empty AND `name` is in `ctx.toggled`, else
+  `format`) and `clickable_range(name, alt) -> Option<&str>` (`Some(name)` iff
+  `alt` is non-empty AND `name.len() <= 15`, tmux's `range=user|X` byte limit);
+  the six format-bearing widgets (`datetime`, `lan_ip`, `tailscale_ip`,
+  `battery`, `cpu`, `memory`) each carry an `alt_format` field and call both
+  helpers from their `render`/`range_name`.
 - `assemble.rs` — `assign_palette`, `render_named_region` (panic-guarded per
-  widget via `catch_unwind`), `render_window` (wraps the `windows` text in a
+  widget via `catch_unwind`; now range-wraps via `render_region_ranged`,
+  remembering each widget's `range_name()` across the palette-assignment
+  flatten/regroup), `render_window` (wraps the `windows` text in a
   themed rounded pill via `render.rs::render_window_pill`, keyed on
   `ctx.window.is_current`; still `catch_unwind`-guarded → `""` on panic/no
-  window).
+  window; the window pill is never clickable — `render window` has no
+  `--plugin-dir` and no range wrapping).
 - `config.rs` — `Config` (TOML): `layout`, `theme`, `widgets`, a top-level
   `plugin_dir: Option<String>`, and a typed `plugins: HashMap<String,
   PluginConfig>` table (see Config below). `Config::load` is **total**
@@ -158,23 +186,30 @@ these shared types, not a design shortcut. Keep them serializable.
   `rl_http_get_cached`) to each plugin's `CapabilityCtx`, `build_plugin`
   (Extism instantiation: wasi off, fuel + timeout + memory caps), and
   `WasmWidget` (wraps an `extism::Plugin`; `Widget::render` degrades to empty
-  segments on any error/timeout/malformed output).
+  segments on any error/timeout/malformed output; carries its own `name` and
+  implements `range_name` as `Some(name)` iff `name.len() <= 15` — the guest
+  itself decides whether to honor `context.toggled`).
 - `lib.rs::register_plugins` — discovers `*.wasm` in the plugin dir, and for
   each name in the caller's `needed` list (i.e. actually referenced by a
   layout region — avoids paying wasm cold-start for unused plugins):
   instantiates it, verifies the exported `name()` equals the filename stem
   (mismatch → `warn!` + skip), and registers a `WasmWidget` factory. A stem
-  colliding with a built-in is skipped (built-in wins).
+  colliding with a built-in is skipped (built-in wins). A stem longer than 15
+  bytes gets a one-time `warn!` (not click-toggleable) but still registers.
 
 `plugins/weather` (excluded workspace member, `wasm32-unknown-unknown`):
-- `lib.rs` — pure logic (`code_to_icon`, `render_format`, `parse_wttr`)
-  compiled and unit-tested on the host target, plus a
+- `lib.rs` — pure logic (`code_to_icon`, `render_format`, `parse_wttr`,
+  `select_weather_format` — the click-toggle exemplar: prefers a non-empty
+  `options.alt_format` when the guest's `render` sees its own name, `"weather"`,
+  in `context.toggled`) compiled and unit-tested on the host target, plus a
   `#[cfg(target_arch = "wasm32")] mod guest` with the Extism `name`/`render`
   exports and a single `rl_http_get_cached` guest import (the host owns the
   TTL cache).
 
 `rustline` (bin):
-- `cli.rs` — `clap` derive. `render` and `plugin` are subcommand *groups*.
+- `cli.rs` — `clap` derive. `render` and `plugin` are subcommand *groups*;
+  `click` (`ClickArgs { range, button }`, both defaulted so an empty click is a
+  parseable no-op) is a flat subcommand invoked by the tmux mouse binding.
 - `battery.rs` — `read_battery()`, a `#[cfg(target_os)]` read surface (one of
   three — see `cpu.rs`/`memory.rs` below): a Linux sysfs
   (`/sys/class/power_supply/*/{capacity,status}`) arm and a macOS
@@ -201,13 +236,23 @@ these shared types, not a design shortcut. Keep them serializable.
   `Context.interfaces` (a failed read yields an empty `Vec`, never a
   fabricated address — same spirit as `read_loadavg` returning `None`), and
   now also `battery` (via `battery::read_battery()`), `cpu` (via
-  `cpu::read_cpu()`), `memory` (via `memory::read_memory()`), `os`, and `arch`
-  (from `std::env::consts::OS`/`ARCH`).
+  `cpu::read_cpu()`), `memory` (via `memory::read_memory()`), `os`, `arch`
+  (from `std::env::consts::OS`/`ARCH`), and `toggled` (via
+  `toggles::read_toggles()`, unconditionally — cheap relative to the gated
+  cpu/memory reads).
+- `toggles.rs` — the global click-toggle state file:
+  `toggles_path()` (`$XDG_DATA_HOME/rustline/toggles`, reusing
+  `rustline_wasm::data_root()`), `parse_toggles`/`serialize_toggles`
+  (newline-delimited, total over blanks/whitespace), `apply_toggle` (flips
+  membership), `read_toggles` (missing/unreadable file → empty set), and
+  `write_toggles` (best-effort atomic temp-file + rename; a write failure
+  `warn!`s and never panics — a broken toggle must never break the bar).
 - `plugin_cmd.rs` — `rustline plugin …`: `list` reads the effective `Config`;
   `url|path add/remove` mutate the config file in place via `toml_edit`
   (preserving comments/formatting), creating `[plugins.<name>]` if absent.
 - `tmux_conf.rs` — `init_block(bar_bg, fg)`: the tmux config `rustline init`
-  emits.
+  emits, now including a `bind -T root MouseDown1Status` block (see CLI
+  below).
 - `logging.rs` — `init(&LogConfig, verbose)`: installs the two-sink `tracing`
   subscriber (rotated file + stderr), plus the pure helpers `verbosity_to_level`,
   `parse_level`, `resolve_file_level`/`resolve_stderr_level`, `should_rotate`,
@@ -217,6 +262,11 @@ these shared types, not a design shortcut. Keep them serializable.
   ANSI) + `resolve_plugin_dir` (`--plugin-dir` flag › config `plugin_dir` ›
   `rustline_wasm::default_plugin_dir()`). Only `render left`/`render right`
   discover and register plugins; `render window` is built-ins only.
+  `run_click` handles `Command::Click`: a no-op unless `button == "left"` and
+  `range` is non-empty, else flips `range`'s membership via
+  `toggles::{read,apply,write}_toggles` — the single choke point for click
+  dispatch, so a future `left_click`/`right_click` script-handler mechanism
+  extends resolution here rather than adding parallel dispatch elsewhere.
 
 ## CLI
 
@@ -235,6 +285,10 @@ A global `-v`/`--verbose` (repeatable) raises the **file** log level:
 - `rustline plugin url|path list|add|remove <plugin> [pattern]` — read or
   edit a plugin's `allowed_urls`/`allowed_paths` (`add`/`remove` rewrite the
   config file in place via `toml_edit`, preserving comments/formatting).
+- `rustline click --range=<name> [--button=left]` — flip `<name>`'s membership
+  in the global toggle state file; invoked by the `init`-emitted tmux mouse
+  binding. Only `left` acts today; other button values are reserved for a
+  future `left_click`/`right_click` script-handler mechanism.
 
 `--plugin-dir` overrides plugin discovery for that invocation (see Config
 below for the full resolution order).
@@ -248,13 +302,22 @@ tmux consumes (stdout is the status line — logs always go to stderr).
 Shell-out per region on `status-interval` (no daemon in v1). `rustline init`
 wires `status-left`/`status-right`/`window-status-format` to `#(rustline render …)`
 and adds `after-select-pane`/`after-select-window` → `refresh-client -S` hooks
-for instant updates.
+for instant updates. It also emits a `bind -T root MouseDown1Status` block: a
+window-name click still runs the default `select-window`, and any other
+non-empty `#{mouse_status_range}` runs `rustline click --range=… --button=left`
+then `refresh-client -S`. This requires **tmux ≥ 3.1** (that's when
+`range=user|X` status ranges and the `mouse_status_range` format variable were
+added) and, at the tmux-config level, `set -g mouse on` — `init` does not set
+that itself (it respects whatever the user already has) but leaves a comment
+hinting at it.
 
 **Injection safety (critical):** tmux expands `#{…}` inside `#(…)` *before*
 `/bin/sh -c` and does not shell-escape. So the `init` block passes every tmux var
 as `--flag=#{q:VAR}` — the `#{q:}` modifier escapes it and the `--flag=` form is
 empty-safe. Never emit a bare `'#{window_name}'` or `'#{pane_current_path}'`.
-This is why `render window` takes named args, not positional. See `tmux_conf.rs`.
+This is why `render window` takes named args, not positional; the click
+binding's `--range=#{q:mouse_status_range}` follows the same rule. See
+`tmux_conf.rs`.
 
 ## Config
 
@@ -321,6 +384,34 @@ format = "{icon} {used}/{total}"     # default; or "{icon} {bar} {percent}%"
 bar_width = 8
 down_format = ""
 ```
+
+**Click-to-toggle widget views:** the six format-bearing widgets —
+`datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory` — each take an
+additional `alt_format` (default `""`, `#[serde(default)]`, so covered by
+invariant #3 like every other opt). A non-empty `alt_format` makes that widget
+clickable: left-clicking it in the tmux status line toggles it between
+`format` and `alt_format`.
+
+```toml
+[widgets.cpu]
+format     = "{icon} {percent}%"
+alt_format = "{icon} {bar} {percent}%"   # left-click toggles to this
+```
+
+Toggle state is **global**, not per-widget-instance or per-session: one flat,
+newline-delimited set of toggled widget/plugin names at
+`$XDG_DATA_HOME/rustline/toggles` (fallback `~/.local/share/rustline/toggles`),
+read once into `Context.toggled` at Context-build time and flipped by
+`rustline click --range=<name> [--button=left]` (see CLI above). WASM plugins
+participate the same way — `Context.toggled` rides the JSON boundary to the
+guest, and a plugin honors toggling by checking whether its own `name()` is a
+member; the `weather` example demonstrates this via `options.alt_format`. Any
+widget or plugin name longer than 15 bytes is simply not clickable (tmux's
+`range=user|X` byte cap — see tmux integration model above).
+
+A plugin author should pick a name (the `.wasm` stem) that is ≤ 15 bytes,
+avoids the reserved name `window`, and sticks to `[A-Za-z0-9_-]`, since it
+becomes a tmux `range=user|<name>` argument verbatim.
 
 **Window pill (`[theme]`):** the window list renders as a rounded pill (see
 Render pipeline). Six optional `[theme]` fields override the defaults — active
@@ -397,6 +488,13 @@ info|debug|trace` and is parsed leniently (a typo falls back to the default).
    which is not reversed.
 6. **`loadavg` is `Option`** — a failed `getloadavg` renders nothing, never fake
    zeros. A panicking widget degrades to empty via the `catch_unwind` guard.
+7. **The click-toggle NAME is one identity end-to-end.** The range name
+   `render_region_ranged` emits (`#[range=user|NAME]`), tmux's
+   `#{mouse_status_range}`, the `--range` value `rustline click` receives, the
+   `Context.toggled` key, and a widget's/plugin's own `range_name()`/
+   `active_format` key must all be the *same* layout/registry name. Break that
+   chain anywhere and the widget silently stops being clickable or
+   toggleable — there's no error, just a click that does nothing.
 
 **Platform-specific reads stay at the `Context`-build edge.** `read_battery()`
 (`crates/rustline/src/battery.rs`), `read_cpu()` (`crates/rustline/src/cpu.rs`),
@@ -414,23 +512,23 @@ branch on platform.
 **WASM plugin invariants (added by the plugin system — re-check when touching
 `rustline-wasm` or `plugins/*`):**
 
-7. **N1. Zero ambient authority.** A guest runs with `with_wasi(false)` and no
+8. **N1. Zero ambient authority.** A guest runs with `with_wasi(false)` and no
    Extism built-in HTTP/FS; every network/filesystem effect goes through a
    host function that checks the plugin's `CapabilityCtx` first. Adding a new
    host capability means adding its gate *and* a denied-case test. The
    TTL-cached GET (`rl_http_get_cached`) gates `allowed_urls` before any fetch
    (gate-first: a denied URL makes no network call and touches no cache),
    with its own denied-case test.
-8. **N2. A plugin never breaks the bar.** Any instantiation error, render
+9. **N2. A plugin never breaks the bar.** Any instantiation error, render
    error, timeout, or malformed output degrades to empty segments
    (`WasmWidget::render`), bounded by fuel + wall-clock timeout + memory caps.
    This composes with, not replaces, the existing `catch_unwind` per-widget
    guard in `render_named_region`.
-9. **N3. State writes are dir-sandboxed and quota-bounded.** `rl_state_*` is
-   confined to `<state_root>/<name>/` (`sanitize_relpath` rejects absolute
-   paths and any `..` component) and refuses a write that would push the
-   plugin's state dir over `max_state_bytes` (`check_cap`).
-10. **N4. Per-plugin capability scope.** Allowlists/state root/quota come from
+10. **N3. State writes are dir-sandboxed and quota-bounded.** `rl_state_*` is
+    confined to `<state_root>/<name>/` (`sanitize_relpath` rejects absolute
+    paths and any `..` component) and refuses a write that would push the
+    plugin's state dir over `max_state_bytes` (`check_cap`).
+11. **N4. Per-plugin capability scope.** Allowlists/state root/quota come from
     that plugin instance's own `CapabilityCtx` (Extism `UserData`); one
     plugin can never use another's grants.
 
@@ -487,6 +585,11 @@ branch on platform.
   **default** right layout; the shared `gauge_bar` Unicode block-eighths
   renderer (`widgets/bar.rs`) backing both widgets' `{bar}` placeholder;
   `read_cpu`/`read_memory` following the `read_battery` platform-read pattern.
+- Done: click-to-toggle widget alt views — `alt_format` on the six
+  format-bearing widgets, `Context.toggled` + the global toggles state file,
+  `Widget::range_name`/`render_region_ranged`'s `#[range=user|NAME]` markup,
+  the `rustline click` subcommand, `init`'s `MouseDown1Status` binding, and
+  plugin participation via `Context.toggled` (the `weather` example).
 - Historical sparkline (last-X-seconds graph) for `cpu`/`memory` — today's
   reads are single-shot, stateless snapshots; a sparkline needs
   cross-invocation sample persistence, deferred to its own spec.
@@ -501,6 +604,12 @@ branch on platform.
 - Optional daemon front-end for sub-second / push-driven widgets (the pure core
   and the wasm host are already daemon-ready).
 - Per-widget richer customization; naming the widget in the panic-guard `warn!`.
+- `left_click`/`right_click` script handlers — today only a left click on a
+  widget acts (toggling `alt_format`); `ClickArgs.button` already threads
+  through other button values for this to extend into later.
+- A widget-management TUI/popup (enable/disable/reorder layout widgets,
+  writing `config.toml`) — parked in `TODO.md`; distinct from this feature's
+  transient click-toggle view state.
 
 ## Design docs
 
@@ -512,3 +621,5 @@ branch on platform.
 - Plan (IP widgets): `docs/superpowers/plans/2026-07-20-rustline-ip-widgets.md`
 - Spec (cpu/memory widgets): `docs/superpowers/specs/2026-07-21-rustline-cpu-memory-widgets-design.md`
 - Plan (cpu/memory widgets): `docs/superpowers/plans/2026-07-21-rustline-cpu-memory-widgets.md`
+- Spec (click-toggle widgets): `docs/superpowers/specs/2026-07-21-rustline-click-toggle-widgets-design.md`
+- Plan (click-toggle widgets): `docs/superpowers/plans/2026-07-21-rustline-click-toggle-widgets.md`

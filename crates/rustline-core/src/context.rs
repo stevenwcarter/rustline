@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
 use chrono::{DateTime, Local};
@@ -97,6 +98,12 @@ pub struct Context {
     pub os: String,
     /// Host CPU arch (`std::env::consts::ARCH`, e.g. `"x86_64"`, `"aarch64"`).
     pub arch: String,
+    /// Widgets the user has click-toggled to their `alt_format` view. Read once
+    /// at Context-build time from the toggles state file (invariant #1). Keyed by
+    /// widget/plugin name; also serialized to WASM guests so a plugin can honor
+    /// toggling by checking its own name.
+    #[serde(default)]
+    pub toggled: BTreeSet<String>,
 }
 
 #[cfg(test)]
@@ -134,6 +141,7 @@ mod tests {
             }),
             os: "linux".into(),
             arch: "x86_64".into(),
+            toggled: BTreeSet::new(),
         }
     }
 
@@ -195,5 +203,24 @@ mod tests {
         let back: Context = serde_json::from_str(&json).unwrap();
         assert_eq!(back.cpu, ctx.cpu);
         assert_eq!(back.memory, ctx.memory);
+    }
+
+    #[test]
+    fn context_toggled_survives_serde_and_defaults_empty() {
+        let mut ctx = sample();
+        ctx.toggled = std::collections::BTreeSet::from(["cpu".to_string()]);
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: Context = serde_json::from_str(&json).unwrap();
+        assert!(back.toggled.contains("cpu"));
+
+        // A Context JSON lacking `toggled` must deserialize to an empty set
+        // (guards host/guest version skew; keeps deserialization total).
+        let without = json.replace(r#","toggled":["cpu"]"#, "");
+        assert_ne!(
+            without, json,
+            "sanity: the toggled key was present to strip"
+        );
+        let back2: Context = serde_json::from_str(&without).unwrap();
+        assert!(back2.toggled.is_empty());
     }
 }

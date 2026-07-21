@@ -3,19 +3,31 @@ use crate::{Context, Segment, Widget};
 /// Renders the current time, formatted with a `chrono` strftime string.
 pub struct DateTime {
     pub format: String,
+    pub alt_format: String,
+}
+
+impl DateTime {
+    /// Registry/layout name; the toggle key threaded through render + click.
+    pub const NAME: &'static str = "datetime";
 }
 
 impl Default for DateTime {
     fn default() -> Self {
         Self {
             format: "%a < %Y-%m-%d < %H:%M".into(),
+            alt_format: String::new(),
         }
     }
 }
 
 impl Widget for DateTime {
     fn render(&self, ctx: &Context) -> Vec<Segment> {
-        vec![Segment::new(ctx.now.format(&self.format).to_string())]
+        let fmt = crate::widgets::active_format(ctx, Self::NAME, &self.format, &self.alt_format);
+        vec![Segment::new(ctx.now.format(fmt).to_string())]
+    }
+
+    fn range_name(&self) -> Option<&str> {
+        crate::widgets::clickable_range(Self::NAME, &self.alt_format)
     }
 }
 
@@ -45,6 +57,7 @@ mod tests {
             memory: None,
             os: String::new(),
             arch: String::new(),
+            toggled: Default::default(),
         }
     }
 
@@ -58,7 +71,45 @@ mod tests {
     fn custom_format_honored() {
         let w = DateTime {
             format: "%H:%M".into(),
+            alt_format: String::new(),
         };
         assert_eq!(w.render(&ctx_at())[0].text, "17:49");
+    }
+
+    #[test]
+    fn datetime_toggled_uses_alt_format() {
+        let mut c = ctx_at();
+        c.toggled.insert("datetime".to_string());
+        let w = DateTime {
+            format: "%H:%M".into(),
+            alt_format: "%Y-%m-%d %H:%M".into(),
+        };
+        assert_eq!(w.render(&c)[0].text, "2026-07-20 17:49");
+        // untoggled
+        let w = DateTime {
+            format: "%H:%M".into(),
+            alt_format: "%Y-%m-%d %H:%M".into(),
+        };
+        assert_eq!(w.render(&ctx_at())[0].text, "17:49");
+    }
+
+    #[test]
+    fn datetime_range_name_tracks_alt() {
+        assert_eq!(
+            DateTime {
+                format: "%H:%M".into(),
+                alt_format: String::new(),
+            }
+            .range_name(),
+            None
+        );
+        assert_eq!(
+            DateTime {
+                format: "%H:%M".into(),
+                alt_format: "%c".into(),
+            }
+            .range_name(),
+            Some("datetime")
+        );
     }
 }

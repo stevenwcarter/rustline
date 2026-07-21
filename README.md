@@ -16,6 +16,9 @@ pane, window, host, and system info, with zero required configuration.
   Tailscale IPv4 addresses.
 - Opt-in `battery` widget showing charge percentage, state, and a
   level-bucketed Nerd-Font icon (Linux + macOS).
+- Click-to-toggle widget alt views: give a widget an `alt_format` and
+  left-clicking it in the status line swaps it to that view (e.g. a compact
+  `cpu` reading toggling to one with a gauge bar).
 - Instant refresh on pane/window switch via tmux hooks (no waiting for the
   next `status-interval` tick).
 
@@ -41,13 +44,20 @@ tmux source-file ~/.tmux.conf
 
 `rustline init` prints a tmux config block that wires `rustline render` into
 `status-left` / `status-right` and the window list, sets `status-interval 1`,
-and adds `after-select-pane` / `after-select-window` hooks that call
+adds `after-select-pane` / `after-select-window` hooks that call
 `refresh-client -S` so the bar updates immediately when you switch panes or
-windows, not just on the next tick.
+windows, not just on the next tick, and binds a left click on any clickable
+widget to toggle its `alt_format` (see [Click-to-toggle widget
+views](#click-to-toggle-widget-views) below).
 
 > **Font requirement:** the powerline separators are drawn with Powerline
 > glyphs (U+E0B0–U+E0B3). Use a Nerd Font or another powerline-patched font
 > in your terminal, or the separators will show as boxes/blanks.
+>
+> **tmux requirement:** click-to-toggle needs tmux **≥ 3.1** (status-line
+> click ranges) and `set -g mouse on` in your tmux config — `rustline init`
+> does not turn mouse mode on itself, it only binds the click once mouse mode
+> is enabled.
 
 ## Default layout
 
@@ -96,7 +106,8 @@ surrounding label or glyph is printed verbatim, and a `down_format` shown when
 the address isn't available (default empty — the widget then renders nothing
 rather than a stale or fake address). `lan_ip` auto-picks the first private,
 non-virtual interface (container/VM bridges like `docker0`/`virbr0` and the
-Tailscale interface are skipped); set `interface` to force a specific NIC.
+Tailscale interface are skipped); set `interface` to force a specific NIC. Both
+also take an `alt_format` for [click-to-toggle](#click-to-toggle-widget-views).
 
 ```toml
 [layout]
@@ -120,7 +131,8 @@ nothing by default.
 
 Takes a `format` where `{icon}`, `{percent}`, and `{state}` are replaced, and
 a `down_format` shown when there's no battery reading (default empty — same
-collapse-to-nothing behavior as the IP widgets' `down_format`).
+collapse-to-nothing behavior as the IP widgets' `down_format`), plus an
+`alt_format` for [click-to-toggle](#click-to-toggle-widget-views).
 
 ```toml
 [layout]
@@ -145,7 +157,8 @@ each with a Unicode gauge bar.
 8) Unicode block-eighths gauge shared by both widgets. Both also take a
 `down_format` (default empty) shown on an unsupported platform or a failed
 read — same collapse-to-nothing behavior as the `battery` widget's
-`down_format`.
+`down_format` — and an `alt_format` for
+[click-to-toggle](#click-to-toggle-widget-views).
 
 ```toml
 [widgets.cpu]
@@ -156,6 +169,32 @@ bar_width = 8
 format = "{icon} {used}/{total}"     # default; or "{icon} {bar} {percent}%"
 bar_width = 8
 ```
+
+### Click-to-toggle widget views
+
+`datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, and `memory` each take
+an `alt_format` (default empty). Give a widget a non-empty `alt_format` and it
+becomes clickable: left-clicking it in the tmux status line toggles it between
+`format` and `alt_format`, e.g. a compact CPU reading swapping to one with a
+gauge bar:
+
+```toml
+[widgets.cpu]
+format     = "{icon} {percent}%"
+alt_format = "{icon} {bar} {percent}%"   # left-click toggles to this
+```
+
+This needs **tmux ≥ 3.1** and `set -g mouse on` (see [Enable in
+tmux](#enable-in-tmux) above) — `rustline init` wires the click handler but
+never turns mouse mode on itself. Which widgets are currently toggled is
+tracked globally (not per pane/session) in a small state file under
+`$XDG_DATA_HOME/rustline`, written by the `rustline click` subcommand the tmux
+binding invokes. WASM plugins can support this too: a plugin is clickable when
+its name is 15 bytes or less (tmux's status-range name limit), and it decides
+for itself whether to honor a click by checking `context.toggled` — the
+bundled `weather` example does this via `options.alt_format`. Since a plugin's
+name becomes a tmux `range=user|<name>` argument verbatim, pick one that is
+≤ 15 bytes, isn't the reserved name `window`, and sticks to `[A-Za-z0-9_-]`.
 
 ## Logging
 
@@ -262,7 +301,8 @@ See the full design specs:
 [core statusline](docs/superpowers/specs/2026-07-20-rustline-tmux-statusline-design.md),
 [WASM plugins](docs/superpowers/specs/2026-07-20-rustline-wasm-plugins-design.md),
 [IP widgets](docs/superpowers/specs/2026-07-20-rustline-ip-widgets-design.md),
-[CPU/memory widgets](docs/superpowers/specs/2026-07-21-rustline-cpu-memory-widgets-design.md).
+[CPU/memory widgets](docs/superpowers/specs/2026-07-21-rustline-cpu-memory-widgets-design.md),
+[click-to-toggle widgets](docs/superpowers/specs/2026-07-21-rustline-click-toggle-widgets-design.md).
 
 ## License
 

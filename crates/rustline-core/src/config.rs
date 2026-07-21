@@ -63,6 +63,8 @@ impl Default for Layout {
 pub struct DateTimeOpts {
     #[serde(default = "default_dt_format")]
     pub format: String,
+    #[serde(default)]
+    pub alt_format: String,
 }
 
 fn default_dt_format() -> String {
@@ -73,6 +75,7 @@ impl Default for DateTimeOpts {
     fn default() -> Self {
         Self {
             format: default_dt_format(),
+            alt_format: String::new(),
         }
     }
 }
@@ -107,6 +110,8 @@ pub struct LanIpOpts {
     #[serde(default = "default_ip_format")]
     pub format: String,
     #[serde(default)]
+    pub alt_format: String,
+    #[serde(default)]
     pub down_format: String,
     #[serde(default)]
     pub interface: Option<String>,
@@ -116,6 +121,7 @@ impl Default for LanIpOpts {
     fn default() -> Self {
         Self {
             format: default_ip_format(),
+            alt_format: String::new(),
             down_format: String::new(),
             interface: None,
         }
@@ -128,6 +134,8 @@ pub struct TailscaleIpOpts {
     #[serde(default = "default_ip_format")]
     pub format: String,
     #[serde(default)]
+    pub alt_format: String,
+    #[serde(default)]
     pub down_format: String,
 }
 
@@ -135,6 +143,7 @@ impl Default for TailscaleIpOpts {
     fn default() -> Self {
         Self {
             format: default_ip_format(),
+            alt_format: String::new(),
             down_format: String::new(),
         }
     }
@@ -152,6 +161,8 @@ pub struct BatteryOpts {
     pub format: String,
     #[serde(default)]
     pub down_format: String,
+    #[serde(default)]
+    pub alt_format: String,
 }
 
 impl Default for BatteryOpts {
@@ -159,6 +170,7 @@ impl Default for BatteryOpts {
         Self {
             format: default_battery_format(),
             down_format: String::new(),
+            alt_format: String::new(),
         }
     }
 }
@@ -185,6 +197,8 @@ pub struct CpuOpts {
     pub format: String,
     #[serde(default)]
     pub down_format: String,
+    #[serde(default)]
+    pub alt_format: String,
     #[serde(default = "default_bar_width")]
     pub bar_width: usize,
 }
@@ -194,6 +208,7 @@ impl Default for CpuOpts {
         Self {
             format: default_cpu_format(),
             down_format: String::new(),
+            alt_format: String::new(),
             bar_width: default_bar_width(),
         }
     }
@@ -206,6 +221,8 @@ pub struct MemoryOpts {
     pub format: String,
     #[serde(default)]
     pub down_format: String,
+    #[serde(default)]
+    pub alt_format: String,
     #[serde(default = "default_bar_width")]
     pub bar_width: usize,
 }
@@ -215,6 +232,7 @@ impl Default for MemoryOpts {
         Self {
             format: default_memory_format(),
             down_format: String::new(),
+            alt_format: String::new(),
             bar_width: default_bar_width(),
         }
     }

@@ -16,7 +16,7 @@ pub mod state;
 use std::path::Path;
 use std::sync::Arc;
 
-use rustline_core::{Config, Registry};
+use rustline_core::{Config, RANGE_NAME_MAX_BYTES, Registry};
 
 pub use host::{WasmWidget, build_plugin};
 pub use paths::{data_root, default_plugin_dir, expand_tilde, state_root};
@@ -71,7 +71,10 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
                 continue;
             }
         }
-        let widget = host::WasmWidget::new(plugin, options);
+        if stem.len() > RANGE_NAME_MAX_BYTES {
+            tracing::warn!(plugin = %stem, "plugin name > 15 bytes; not click-toggleable");
+        }
+        let widget = host::WasmWidget::new(plugin, options, stem);
         let shared = Arc::new(widget);
         reg.register(stem, Box::new(move || Box::new((*shared).clone())));
     }

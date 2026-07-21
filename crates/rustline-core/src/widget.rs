@@ -5,6 +5,15 @@ use std::collections::HashMap;
 /// current [`Context`].
 pub trait Widget {
     fn render(&self, ctx: &Context) -> Vec<Segment>;
+
+    /// The clickable status-line range name for this widget, if it opts into
+    /// click-to-toggle. Default `None` (not clickable). A widget returns
+    /// `Some(name)` only when it has an alternate view and `name` fits tmux's
+    /// 15-byte `range=user|X` limit; the assemble layer wraps its cells in
+    /// `#[range=user|<name>]…#[norange]` when so.
+    fn range_name(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// A widget constructor, boxed so the registry can hold a heterogeneous set
@@ -98,6 +107,7 @@ mod tests {
             memory: None,
             os: String::new(),
             arch: String::new(),
+            toggled: Default::default(),
         }
     }
 
@@ -107,6 +117,11 @@ mod tests {
         assert!(!r.contains("a"));
         r.register("a", Box::new(|| Box::new(Fixed("A"))));
         assert!(r.contains("a"));
+    }
+
+    #[test]
+    fn range_name_defaults_to_none() {
+        assert_eq!(Fixed("x").range_name(), None);
     }
 
     #[test]

@@ -7,8 +7,14 @@ const CPU_ICON: &str = "\u{f061a}";
 /// Renders CPU utilization from `Context::cpu`. Pure — reads only that field.
 pub struct CpuWidget {
     pub format: String,
+    pub alt_format: String,
     pub down_format: String,
     pub bar_width: usize,
+}
+
+impl CpuWidget {
+    /// Registry/layout name; the toggle key threaded through render + click.
+    pub const NAME: &'static str = "cpu";
 }
 
 impl Widget for CpuWidget {
@@ -16,8 +22,9 @@ impl Widget for CpuWidget {
         match ctx.cpu {
             Some(c) => {
                 let percent = c.percent.round() as u64;
-                let text = self
-                    .format
+                let fmt =
+                    crate::widgets::active_format(ctx, Self::NAME, &self.format, &self.alt_format);
+                let text = fmt
                     .replace("{percent}", &percent.to_string())
                     .replace(
                         "{bar}",
@@ -38,6 +45,10 @@ impl Widget for CpuWidget {
                 vec![Segment::new(text)]
             }
         }
+    }
+
+    fn range_name(&self) -> Option<&str> {
+        crate::widgets::clickable_range(Self::NAME, &self.alt_format)
     }
 }
 
@@ -67,15 +78,44 @@ mod tests {
             memory: None,
             os: String::new(),
             arch: String::new(),
+            toggled: Default::default(),
         }
     }
 
     fn w(format: &str, down: &str) -> CpuWidget {
         CpuWidget {
             format: format.into(),
+            alt_format: String::new(),
             down_format: down.into(),
             bar_width: 8,
         }
+    }
+
+    fn w2(format: &str, alt: &str, down: &str) -> CpuWidget {
+        CpuWidget {
+            format: format.into(),
+            alt_format: alt.into(),
+            down_format: down.into(),
+            bar_width: 8,
+        }
+    }
+
+    #[test]
+    fn toggled_uses_alt_format() {
+        let mut c = ctx(Some(CpuUsage { percent: 50.0 }));
+        c.toggled.insert("cpu".to_string());
+        let out = w2("{percent}%", "{icon} {bar} {percent}%", "").render(&c);
+        assert_eq!(out[0].text, "\u{f061a} ████░░░░ 50%");
+        // untoggled -> normal format
+        let out = w2("{percent}%", "{icon} {bar} {percent}%", "")
+            .render(&ctx(Some(CpuUsage { percent: 50.0 })));
+        assert_eq!(out[0].text, "50%");
+    }
+
+    #[test]
+    fn range_name_some_only_with_alt_format() {
+        assert_eq!(w2("{percent}%", "{bar}", "").range_name(), Some("cpu"));
+        assert_eq!(w2("{percent}%", "", "").range_name(), None);
     }
 
     #[test]

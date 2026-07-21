@@ -7,8 +7,14 @@ const MEMORY_ICON: &str = "\u{f035b}";
 /// Renders memory usage from `Context::memory`. Pure — reads only that field.
 pub struct MemoryWidget {
     pub format: String,
+    pub alt_format: String,
     pub down_format: String,
     pub bar_width: usize,
+}
+
+impl MemoryWidget {
+    /// Registry/layout name; the toggle key threaded through render + click.
+    pub const NAME: &'static str = "memory";
 }
 
 /// Human-readable binary size (1024-based): the largest of `B/K/M/G/T` where the
@@ -41,8 +47,9 @@ impl Widget for MemoryWidget {
                     m.used_bytes as f64 / m.total_bytes as f64
                 };
                 let percent = (fraction * 100.0).round() as u64;
-                let text = self
-                    .format
+                let fmt =
+                    crate::widgets::active_format(ctx, Self::NAME, &self.format, &self.alt_format);
+                let text = fmt
                     .replace("{used}", &format_bytes(m.used_bytes))
                     .replace("{total}", &format_bytes(m.total_bytes))
                     .replace("{avail}", &format_bytes(m.available_bytes))
@@ -66,6 +73,10 @@ impl Widget for MemoryWidget {
                 vec![Segment::new(text)]
             }
         }
+    }
+
+    fn range_name(&self) -> Option<&str> {
+        crate::widgets::clickable_range(Self::NAME, &self.alt_format)
     }
 }
 
@@ -95,6 +106,7 @@ mod tests {
             memory,
             os: String::new(),
             arch: String::new(),
+            toggled: Default::default(),
         }
     }
 
@@ -109,6 +121,7 @@ mod tests {
     fn w(format: &str, down: &str) -> MemoryWidget {
         MemoryWidget {
             format: format.into(),
+            alt_format: String::new(),
             down_format: down.into(),
             bar_width: 8,
         }
@@ -156,5 +169,41 @@ mod tests {
     fn none_down_format_collapses_placeholders() {
         let out = w("{used}", "n/a {used}{total}{avail}{bar}{percent}{icon}").render(&ctx(None));
         assert_eq!(out[0].text, "n/a ");
+    }
+
+    #[test]
+    fn memory_toggled_uses_alt_format() {
+        let g = 1024u64.pow(3);
+        let mut c = ctx(mem(16 * g, 8 * g, 8 * g));
+        c.toggled.insert("memory".to_string());
+        let out = MemoryWidget {
+            format: "{percent}%".into(),
+            alt_format: "{icon} {bar}".into(),
+            down_format: String::new(),
+            bar_width: 8,
+        }
+        .render(&c);
+        assert_eq!(out[0].text, "\u{f035b} ████░░░░");
+    }
+
+    #[test]
+    fn memory_range_name_tracks_alt() {
+        let base = MemoryWidget {
+            format: "x".into(),
+            alt_format: String::new(),
+            down_format: String::new(),
+            bar_width: 8,
+        };
+        assert_eq!(base.range_name(), None);
+        let alt = MemoryWidget {
+            alt_format: "{bar}".into(),
+            ..MemoryWidget {
+                format: "x".into(),
+                alt_format: String::new(),
+                down_format: String::new(),
+                bar_width: 8,
+            }
+        };
+        assert_eq!(alt.range_name(), Some("memory"));
     }
 }

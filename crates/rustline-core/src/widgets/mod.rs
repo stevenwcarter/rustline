@@ -10,6 +10,7 @@ pub mod memory;
 mod net;
 pub mod pane_id;
 pub mod tailscale_ip;
+mod toggle;
 pub mod windows;
 
 pub use battery::BatteryWidget;
@@ -22,6 +23,9 @@ pub use loadavg::LoadAvg;
 pub use memory::MemoryWidget;
 pub use pane_id::PaneId;
 pub use tailscale_ip::TailscaleIp;
+// Re-exported for assemble.rs (Task 3) and the widgets' alt_format toggling
+// (Task 4+) of the click-toggle plan.
+pub(crate) use toggle::{active_format, clickable_range};
 pub use windows::Windows;
 
 use crate::Config;
@@ -38,12 +42,13 @@ impl Registry {
         registry.register("windows", Box::new(|| Box::new(Windows)));
         registry.register("loadavg", Box::new(|| Box::new(LoadAvg)));
 
-        let format = cfg.widgets.datetime.format.clone();
+        let datetime = cfg.widgets.datetime.clone();
         registry.register(
             "datetime",
             Box::new(move || {
                 Box::new(DateTime {
-                    format: format.clone(),
+                    format: datetime.format.clone(),
+                    alt_format: datetime.alt_format.clone(),
                 })
             }),
         );
@@ -57,6 +62,7 @@ impl Registry {
             Box::new(move || {
                 Box::new(LanIp {
                     format: lan.format.clone(),
+                    alt_format: lan.alt_format.clone(),
                     down_format: lan.down_format.clone(),
                     interface: lan.interface.clone(),
                 })
@@ -69,6 +75,7 @@ impl Registry {
             Box::new(move || {
                 Box::new(TailscaleIp {
                     format: ts.format.clone(),
+                    alt_format: ts.alt_format.clone(),
                     down_format: ts.down_format.clone(),
                 })
             }),
@@ -80,6 +87,7 @@ impl Registry {
             Box::new(move || {
                 Box::new(BatteryWidget {
                     format: battery.format.clone(),
+                    alt_format: battery.alt_format.clone(),
                     down_format: battery.down_format.clone(),
                 })
             }),
@@ -91,6 +99,7 @@ impl Registry {
             Box::new(move || {
                 Box::new(CpuWidget {
                     format: cpu.format.clone(),
+                    alt_format: cpu.alt_format.clone(),
                     down_format: cpu.down_format.clone(),
                     bar_width: cpu.bar_width,
                 })
@@ -103,6 +112,7 @@ impl Registry {
             Box::new(move || {
                 Box::new(MemoryWidget {
                     format: memory.format.clone(),
+                    alt_format: memory.alt_format.clone(),
                     down_format: memory.down_format.clone(),
                     bar_width: memory.bar_width,
                 })
@@ -139,6 +149,7 @@ mod tests {
             memory: None,
             os: String::new(),
             arch: String::new(),
+            toggled: Default::default(),
         }
     }
 
