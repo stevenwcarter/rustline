@@ -90,6 +90,50 @@ impl Default for CwdOpts {
     }
 }
 
+/// Default `format` for the IP widgets: the bare address, no label.
+fn default_ip_format() -> String {
+    "{ip}".into()
+}
+
+/// Options for the `lan_ip` widget.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LanIpOpts {
+    #[serde(default = "default_ip_format")]
+    pub format: String,
+    #[serde(default)]
+    pub down_format: String,
+    #[serde(default)]
+    pub interface: Option<String>,
+}
+
+impl Default for LanIpOpts {
+    fn default() -> Self {
+        Self {
+            format: default_ip_format(),
+            down_format: String::new(),
+            interface: None,
+        }
+    }
+}
+
+/// Options for the `tailscale_ip` widget.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TailscaleIpOpts {
+    #[serde(default = "default_ip_format")]
+    pub format: String,
+    #[serde(default)]
+    pub down_format: String,
+}
+
+impl Default for TailscaleIpOpts {
+    fn default() -> Self {
+        Self {
+            format: default_ip_format(),
+            down_format: String::new(),
+        }
+    }
+}
+
 /// Per-widget option overrides, keyed by widget name.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WidgetOpts {
@@ -97,6 +141,10 @@ pub struct WidgetOpts {
     pub datetime: DateTimeOpts,
     #[serde(default)]
     pub cwd: CwdOpts,
+    #[serde(default)]
+    pub lan_ip: LanIpOpts,
+    #[serde(default)]
+    pub tailscale_ip: TailscaleIpOpts,
 }
 
 /// Optional theme overrides layered onto [`Theme::default`] by
@@ -305,5 +353,32 @@ zip = "48183"
         let c = Config::load(&p);
         assert!(c.plugins.is_empty());
         assert_eq!(c.layout.left, Config::default().layout.left);
+    }
+
+    #[test]
+    fn ip_widget_opts_parse_with_defaults() {
+        let toml = r#"
+[widgets.lan_ip]
+format = "LAN {ip}"
+interface = "wlp3s0"
+[widgets.tailscale_ip]
+down_format = "TS off"
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.widgets.lan_ip.format, "LAN {ip}");
+        assert_eq!(c.widgets.lan_ip.interface.as_deref(), Some("wlp3s0"));
+        // omitted -> defaults
+        assert_eq!(c.widgets.lan_ip.down_format, "");
+        assert_eq!(c.widgets.tailscale_ip.format, "{ip}");
+        assert_eq!(c.widgets.tailscale_ip.down_format, "TS off");
+    }
+
+    #[test]
+    fn ip_widget_opts_default_when_absent() {
+        let c = Config::default();
+        assert_eq!(c.widgets.lan_ip.format, "{ip}");
+        assert_eq!(c.widgets.lan_ip.down_format, "");
+        assert_eq!(c.widgets.lan_ip.interface, None);
+        assert_eq!(c.widgets.tailscale_ip.format, "{ip}");
     }
 }
