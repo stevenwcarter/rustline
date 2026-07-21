@@ -239,4 +239,15 @@ mod tests {
         assert!(!r.ok);
         assert!(r.error.contains("not allowed"));
     }
+
+    #[test]
+    fn file_write_denied_when_not_allowlisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("should_not_be_written.txt");
+        let ctx = ctx_with(&[], std::env::temp_dir());
+        let w = perform_file_write(&ctx, target.to_str().unwrap(), "secret");
+        assert!(!w.ok);
+        assert!(w.error.contains("not allowed"));
+        assert!(!target.exists(), "denied write must not create the file");
+    }
 }
