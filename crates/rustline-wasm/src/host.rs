@@ -12,8 +12,8 @@ use crate::abi::{RenderInput, parse_render_output};
 use crate::capability::CapabilityCtx;
 use crate::fetch::UreqFetcher;
 use crate::perform::{
-    perform_file_read, perform_file_write, perform_http_get, perform_state_read,
-    perform_state_write,
+    perform_file_read, perform_file_write, perform_http_get, perform_http_get_cached,
+    perform_state_read, perform_state_write,
 };
 
 fn json<T: serde::Serialize>(v: &T) -> String {
@@ -24,6 +24,13 @@ host_fn!(rl_http_get(user_data: CapabilityCtx; url: String) -> String {
     let ctx = user_data.get()?;
     let ctx = ctx.lock().unwrap();
     Ok(json(&perform_http_get(&ctx, &url, &UreqFetcher)))
+});
+
+host_fn!(rl_http_get_cached(user_data: CapabilityCtx; url: String, ttl_secs: String, now: String) -> String {
+    let ctx = user_data.get()?;
+    let ctx = ctx.lock().unwrap();
+    let ttl: i64 = ttl_secs.parse().unwrap_or(0);
+    Ok(json(&perform_http_get_cached(&ctx, &url, ttl, &now, &UreqFetcher)))
 });
 
 host_fn!(rl_state_read(user_data: CapabilityCtx; relpath: String) -> String {
@@ -51,7 +58,7 @@ host_fn!(rl_file_write(user_data: CapabilityCtx; path: String, contents: String)
 });
 
 /// Build an Extism plugin from wasm bytes with wasi off, fuel + timeout +
-/// memory caps, and the five capability-gated host functions bound to this
+/// memory caps, and the six capability-gated host functions bound to this
 /// instance's `CapabilityCtx`.
 pub fn build_plugin(wasm: &[u8], ctx: CapabilityCtx) -> Result<extism::Plugin, extism::Error> {
     let ud = UserData::new(ctx);
@@ -62,6 +69,13 @@ pub fn build_plugin(wasm: &[u8], ctx: CapabilityCtx) -> Result<extism::Plugin, e
         .with_wasi(false)
         .with_fuel_limit(500_000_000)
         .with_function("rl_http_get", [PTR], [PTR], ud.clone(), rl_http_get)
+        .with_function(
+            "rl_http_get_cached",
+            [PTR, PTR, PTR],
+            [PTR],
+            ud.clone(),
+            rl_http_get_cached,
+        )
         .with_function("rl_state_read", [PTR], [PTR], ud.clone(), rl_state_read)
         .with_function(
             "rl_state_write",
