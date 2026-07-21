@@ -142,3 +142,32 @@ fn plugin_url_add_remove_roundtrips_preserving_comments() {
         "comment still there: {after_rm}"
     );
 }
+
+#[test]
+fn plugin_add_on_malformed_config_errors_cleanly() {
+    // A pre-existing config where `allowed_urls` is a string instead of an
+    // array must fail with a clean, user-facing error (exit 1), never a
+    // panic (exit 101) from an `.expect()` deep in `mutate`.
+    let dir = std::env::temp_dir().join("rustline_smoke_pluginmalformed");
+    let cfgdir = dir.join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    std::fs::write(&cfg, "[plugins.weather]\nallowed_urls = \"notanarray\"\n").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rustline"))
+        .args(["plugin", "url", "add", "weather", "https://wttr.in/*"])
+        .env("XDG_CONFIG_HOME", &dir)
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "clean error exit, not a panic; stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "must not panic: stderr={stderr}"
+    );
+}

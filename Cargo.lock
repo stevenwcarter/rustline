@@ -1718,6 +1718,7 @@ dependencies = [
  "libc",
  "rustline-core",
  "rustline-wasm",
+ "tempfile",
  "toml",
  "toml_edit",
  "tracing",

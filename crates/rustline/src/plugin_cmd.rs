@@ -87,23 +87,42 @@ fn mutate(config_path: &Path, plugin: &str, kind: Kind, f: impl FnOnce(&mut Arra
     let mut doc: DocumentMut = text.parse().unwrap_or_default();
 
     // Ensure [plugins.<plugin>] exists.
-    let plugins = doc
+    let plugins = match doc
         .entry("plugins")
         .or_insert(Item::Table(Table::new()))
         .as_table_mut()
-        .expect("plugins is a table");
+    {
+        Some(t) => t,
+        None => {
+            eprintln!("config error: `plugins` is not a table");
+            std::process::exit(1);
+        }
+    };
     plugins.set_implicit(true);
-    let entry = plugins
+    let entry = match plugins
         .entry(plugin)
         .or_insert(Item::Table(Table::new()))
         .as_table_mut()
-        .expect("plugin entry is a table");
+    {
+        Some(t) => t,
+        None => {
+            eprintln!("config error: `plugins.{plugin}` is not a table");
+            std::process::exit(1);
+        }
+    };
 
     // Ensure the allowlist array exists.
+    let key = kind.key();
     let item = entry
-        .entry(kind.key())
+        .entry(key)
         .or_insert(Item::Value(Value::Array(Array::new())));
-    let arr = item.as_array_mut().expect("allowlist is an array");
+    let arr = match item.as_array_mut() {
+        Some(a) => a,
+        None => {
+            eprintln!("config error: `{plugin}.{key}` is not an array");
+            std::process::exit(1);
+        }
+    };
     f(arr);
 
     if let Err(error) = std::fs::write(config_path, doc.to_string()) {

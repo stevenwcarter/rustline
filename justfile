@@ -15,6 +15,7 @@ test:
 # Build the weather plugin and run the end-to-end WASM host tests (opt-in)
 test-wasm: build-weather
     cargo test -p rustline-wasm --features wasm-e2e --test e2e
+    cargo test -p rustline --features wasm-e2e --test wasm_wiring
 
 # CI-style checks: formatting and clippy
 lint:
