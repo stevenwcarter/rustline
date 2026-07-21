@@ -136,6 +136,13 @@ mod tests {
     }
 
     #[test]
+    fn macos_memory_missing_page_size_is_none() {
+        // Valid hw.memsize, but the vm_stat header lacks "page size of N bytes" -> None.
+        let vm = "Mach Virtual Memory Statistics:\nPages free:                          100.\n";
+        assert!(parse_macos_memory("17179869184", vm).is_none());
+    }
+
+    #[test]
     fn read_memory_never_panics() {
         if let Some(m) = read_memory() {
             assert!(m.used_bytes <= m.total_bytes);

@@ -148,6 +148,22 @@ mod tests {
     }
 
     #[test]
+    fn busy_percent_backward_idle_saturates() {
+        // dt > 0 but idle went backwards: didle saturates to 0 -> 100% busy, finite (no NaN).
+        let prev = CpuTimes {
+            idle: 500,
+            total: 1000,
+        };
+        let cur = CpuTimes {
+            idle: 100,
+            total: 2000,
+        };
+        let b = busy_percent(prev, cur);
+        assert_eq!(b, 100.0); // dt=1000, didle=saturating_sub(100,500)=0 -> (1000-0)/1000*100
+        assert!(b.is_finite());
+    }
+
+    #[test]
     fn top_cpu_uses_last_sample() {
         let out = "Processes: 400 total\n\
                    CPU usage: 3.00% user, 2.00% sys, 95.00% idle\n\
