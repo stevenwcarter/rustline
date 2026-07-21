@@ -10,6 +10,7 @@ pub mod memory;
 mod net;
 pub mod pane_id;
 pub mod tailscale_ip;
+mod toggle;
 pub mod windows;
 
 pub use battery::BatteryWidget;
@@ -22,6 +23,10 @@ pub use loadavg::LoadAvg;
 pub use memory::MemoryWidget;
 pub use pane_id::PaneId;
 pub use tailscale_ip::TailscaleIp;
+// Re-exported for Task 3 (assemble.rs) and Task 4+ (widget alt_format) of the
+// click-toggle plan; unused at this crate-level path until those land.
+#[allow(unused_imports)]
+pub(crate) use toggle::{active_format, clickable_range};
 pub use windows::Windows;
 
 use crate::Config;
