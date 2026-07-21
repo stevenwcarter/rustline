@@ -28,7 +28,7 @@ use crate::Config;
 use crate::widget::Registry;
 
 impl Registry {
-    /// Build a [`Registry`] pre-populated with all nine built-in widgets,
+    /// Build a [`Registry`] pre-populated with all eleven built-in widgets,
     /// configuring the ones with options (`datetime`, `cwd`) from `cfg`.
     pub fn with_builtins(cfg: &Config) -> Registry {
         let mut registry = Registry::new();
@@ -80,6 +80,30 @@ impl Registry {
                 Box::new(BatteryWidget {
                     format: battery.format.clone(),
                     down_format: battery.down_format.clone(),
+                })
+            }),
+        );
+
+        let cpu = cfg.widgets.cpu.clone();
+        registry.register(
+            "cpu",
+            Box::new(move || {
+                Box::new(CpuWidget {
+                    format: cpu.format.clone(),
+                    down_format: cpu.down_format.clone(),
+                    bar_width: cpu.bar_width,
+                })
+            }),
+        );
+
+        let memory = cfg.widgets.memory.clone();
+        registry.register(
+            "memory",
+            Box::new(move || {
+                Box::new(MemoryWidget {
+                    format: memory.format.clone(),
+                    down_format: memory.down_format.clone(),
+                    bar_width: memory.bar_width,
                 })
             }),
         );
@@ -187,5 +211,36 @@ mod tests {
             .map(|s| s.text)
             .collect();
         assert!(texts.is_empty());
+    }
+
+    #[test]
+    fn cpu_memory_registered_and_render_from_context() {
+        use crate::{CpuUsage, MemInfo};
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        assert!(reg.contains("cpu") && reg.contains("memory"));
+
+        let mut c = ctx(Vec::new());
+        c.cpu = Some(CpuUsage { percent: 50.0 });
+        let g = 1024u64.pow(3);
+        c.memory = Some(MemInfo {
+            total_bytes: 16 * g,
+            used_bytes: 8 * g,
+            available_bytes: 8 * g,
+        });
+        let texts: Vec<String> = reg
+            .resolve(&["cpu".into(), "memory".into()])
+            .iter()
+            .flat_map(|w| w.render(&c))
+            .map(|s| s.text)
+            .collect();
+        // cpu default "{icon} {percent}%" and memory default "{icon} {used}/{total}"
+        assert_eq!(
+            texts,
+            vec![
+                "\u{f061a} 50%".to_string(),
+                "\u{f035b} 8.0G/16G".to_string()
+            ]
+        );
     }
 }
