@@ -133,14 +133,28 @@ mod tests {
     #[test]
     fn build_region_context_reads_toggles_from_state_file() {
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: no other in-process unit test mutates XDG_DATA_HOME (checked:
-        // only toggles.rs touches it, via its own pure-function tests that
-        // don't read the env var), so this set/remove pair can't race.
+        // Write the state file via the absolute tempdir path FIRST, before the
+        // env var is ever set: neither `unwrap()` below can panic while
+        // `XDG_DATA_HOME` is overridden, so a setup failure can't leak the
+        // override into other tests.
+        std::fs::create_dir_all(tmp.path().join("rustline")).unwrap();
+        std::fs::write(tmp.path().join("rustline/toggles"), "cpu\nmemory\n").unwrap();
+        // SAFETY: `build_region_context` now unconditionally calls
+        // `read_toggles()` -> `rustline_wasm::data_root()`, which *reads*
+        // `XDG_DATA_HOME` -- so the sibling tests in this module that also call
+        // `build_region_context` (`home_from_env_used_when_present`,
+        // `read_interfaces_excludes_loopback_and_never_panics`,
+        // `cpu_memory_sampled_only_when_region_names_them`) transitively read
+        // this var too, and cargo's test harness may run them concurrently
+        // with the `set_var`/`remove_var` below. That's sound here because
+        // none of those siblings assert on `ctx.toggled` or anything else
+        // derived from `data_root()`, so a torn read during their call can't
+        // change their outcome; this test is the only one whose assertion
+        // depends on the value, and the mutation window is kept minimal
+        // (just around the single `build_region_context` call below).
         unsafe {
             std::env::set_var("XDG_DATA_HOME", tmp.path());
         }
-        std::fs::create_dir_all(tmp.path().join("rustline")).unwrap();
-        std::fs::write(tmp.path().join("rustline/toggles"), "cpu\nmemory\n").unwrap();
         let ctx = build_region_context(&RegionArgs::default(), &[]);
         // SAFETY: matches the set above; restores the process env for other tests.
         unsafe {
