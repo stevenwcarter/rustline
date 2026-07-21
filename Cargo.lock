@@ -1740,6 +1740,7 @@ dependencies = [
 name = "rustline-wasm"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "extism",
  "globset",
  "regex",

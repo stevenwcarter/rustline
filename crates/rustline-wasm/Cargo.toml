@@ -23,5 +23,11 @@ extism = { version = "1", default-features = false, features = [
     "wasmtime-default-features",
 ] }
 
+[features]
+# Opt-in end-to-end tests that load the real `weather.wasm` (needs the wasm
+# target + `just build-weather`). Gated so a plain `cargo test` stays hermetic.
+wasm-e2e = []
+
 [dev-dependencies]
 tempfile = "3"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
