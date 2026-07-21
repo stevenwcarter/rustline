@@ -104,6 +104,29 @@ format = "TS {ip}"
 down_format = "TS off"     # shown when Tailscale is down; omit to render nothing
 ```
 
+## Logging
+
+rustline writes logs to `~/.local/share/rustline/rustline.log`
+(`$XDG_DATA_HOME/rustline/rustline.log`) at `info` by default, and error-level
+messages to stderr. The file rotates to `rustline.log.1` once it exceeds 5 MiB.
+
+Raise the file verbosity with repeated `-v` (file sink only):
+
+| flag    | file level |
+|---------|-----------|
+| (none)  | info       |
+| `-v`    | warn       |
+| `-vv`   | info       |
+| `-vvv`  | debug      |
+| `-vvvv` | trace      |
+
+Override either sink in `config.toml` (`RUST_LOG` is not used):
+
+    [log]
+    file_level   = "info"    # off|error|warn|info|debug|trace
+    stderr_level = "error"
+    file         = "~/.local/share/rustline/rustline.log"   # optional
+
 ## Previewing on the command line
 
 Every render command accepts `--preview`, which prints the region in ANSI colour

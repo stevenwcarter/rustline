@@ -86,7 +86,9 @@ these shared types, not a design shortcut. Keep them serializable.
   `plugin_dir: Option<String>`, and a typed `plugins: HashMap<String,
   PluginConfig>` table (see Config below). `Config::load` is **total**
   (missing/invalid file → `warn!` + defaults); `to_theme()` maps overrides onto
-  `Theme::default()`.
+  `Theme::default()`. `Config::load_reporting` returns the load-failure
+  message instead of logging it, so the binary can install its log subscriber
+  first and then emit the `"invalid config"` warning into the file.
 - `ansi.rs` — `tmux_to_ansi(&str) -> String`: transcodes the tmux markup we emit
   into ANSI SGR (`colourN` → 256-color, `#rrggbb` → truecolor, named → basic)
   for the `--preview` flag.
@@ -152,12 +154,21 @@ these shared types, not a design shortcut. Keep them serializable.
   (preserving comments/formatting), creating `[plugins.<name>]` if absent.
 - `tmux_conf.rs` — `init_block(bar_bg, fg)`: the tmux config `rustline init`
   emits.
+- `logging.rs` — `init(&LogConfig, verbose)`: installs the two-sink `tracing`
+  subscriber (rotated file + stderr), plus the pure helpers `verbosity_to_level`,
+  `parse_level`, `resolve_file_level`/`resolve_stderr_level`, `should_rotate`,
+  `open_log`, `log_path`. Best-effort: a file that can't be opened degrades to
+  stderr-only; never writes stdout.
 - `main.rs` — dispatch + the `emit(markup, preview)` helper (raw markup vs
   ANSI) + `resolve_plugin_dir` (`--plugin-dir` flag › config `plugin_dir` ›
   `rustline_wasm::default_plugin_dir()`). Only `render left`/`render right`
   discover and register plugins; `render window` is built-ins only.
 
 ## CLI
+
+A global `-v`/`--verbose` (repeatable) raises the **file** log level:
+`-v`=warn, `-vv`=info, `-vvv`=debug, `-vvvv`=trace. Works in any position
+(`rustline -vv render left`).
 
 - `rustline render left|right [--session= --window= --pane= --pane-path=] [--preview] [--plugin-dir=]`
 - `rustline render window [--current] --index= [--name=] [--flags=] [--preview]`
@@ -247,6 +258,19 @@ default (matched against the full URL/path string), or a **regex** when
 prefixed `re:` — regex entries are **anchored to a full-string match** (uniform
 with globs); to match a prefix/substring, include `.*` in the pattern (e.g.
 `re:https://wttr\.in/.*`).
+
+**Logging:** a `[log]` table controls the two sinks. `rustline` logs to a
+rotated file (`$XDG_DATA_HOME/rustline/rustline.log`, default level `info`) and
+to stderr (default level `error`). `RUST_LOG` is **not** consulted. Raise the
+*file* level with repeated `-v` (`-v`=warn, `-vv`=info, `-vvv`=debug,
+`-vvvv`=trace); `-v` never affects stderr. The file rotates to `rustline.log.1`
+once it passes 5 MiB (one generation kept). Any level value is `off|error|warn|
+info|debug|trace` and is parsed leniently (a typo falls back to the default).
+
+    [log]
+    file_level   = "info"
+    stderr_level = "error"
+    file         = "~/.local/share/rustline/rustline.log"   # optional override
 
 ## Invariants (load-bearing — re-check when touching these)
 
