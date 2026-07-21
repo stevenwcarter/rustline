@@ -3,6 +3,10 @@
 //! plugins as `rustline_core::Widget`s. All capability checks happen here —
 //! guests have zero ambient authority.
 
+pub mod abi;
 pub mod allow;
+pub mod capability;
+pub mod fetch;
 pub mod paths;
+pub mod perform;
 pub mod state;
