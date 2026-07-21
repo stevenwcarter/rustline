@@ -35,6 +35,7 @@ mod tests {
                 .single()
                 .unwrap(),
             window: None,
+            interfaces: Vec::new(),
         }
     }
 

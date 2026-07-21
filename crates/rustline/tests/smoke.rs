@@ -173,6 +173,43 @@ fn plugin_add_on_malformed_config_errors_cleanly() {
 }
 
 #[test]
+fn render_right_with_ip_widgets_renders_gracefully() {
+    // lan_ip/tailscale_ip in a layout must render alongside built-ins and exit 0
+    // on ANY host, regardless of its real LAN/Tailscale addresses. We force
+    // lan_ip to a nonexistent interface so its down_format ("LANOFF") renders
+    // deterministically — this positively proves the bin wires the interface
+    // read -> Context -> the widget end-to-end, WITHOUT depending on whether the
+    // host has (or lacks) a LAN or Tailscale IP. (A `contains("TSOFF")`-style
+    // assertion would be host-dependent: any dev box actually running Tailscale
+    // renders its real 100.x address instead of the down text.)
+    let tmp = tempfile::tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    std::fs::write(
+        cfgdir.join("config.toml"),
+        "[layout]\nright = [\"lan_ip\", \"tailscale_ip\", \"datetime\"]\n\
+         [widgets.lan_ip]\ninterface = \"rustline-no-such-nic0\"\ndown_format = \"LANOFF\"\n",
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rustline"))
+        .args(["render", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("#["), "built-ins still render: {s}");
+    // forced-nonexistent lan interface -> down_format renders deterministically,
+    // proving the interface-read -> Context -> lan_ip wiring, host-independent.
+    assert!(s.contains("LANOFF"), "lan_ip down_format shown: {s}");
+}
+
+#[test]
 fn plugin_add_on_unparseable_config_preserves_file() {
     // A pre-existing config with a TOML *syntax* error must abort with exit 1
     // and leave the file byte-for-byte intact — never truncate the user's whole
