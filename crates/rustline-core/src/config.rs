@@ -373,6 +373,7 @@ impl Config {
 mod tests {
     use super::*;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn to_theme_maps_window_pill_overrides() {
@@ -400,7 +401,6 @@ mod tests {
         assert_eq!(t.win_inactive_bg, crate::Color::Indexed(236));
         assert_eq!(t.win_cap_left, "\u{e0b6}");
     }
-    use tempfile::NamedTempFile;
 
     #[test]
     fn default_layout_matches_spec() {
