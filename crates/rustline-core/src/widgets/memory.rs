@@ -126,8 +126,9 @@ mod tests {
     #[test]
     fn renders_used_total_percent() {
         let g = 1024u64.pow(3);
-        let out = w("{used}/{total} {percent}%", "").render(&ctx(mem(16 * g, 6 * g, 10 * g)));
-        assert_eq!(out[0].text, "6.0G/16G 38%"); // 6/16 = 37.5 -> 38
+        let out =
+            w("{used}/{total} {avail} {percent}%", "").render(&ctx(mem(16 * g, 6 * g, 10 * g)));
+        assert_eq!(out[0].text, "6.0G/16G 10G 38%"); // avail 10 GiB -> "10G"; 6/16 = 37.5 -> 38
     }
 
     #[test]
@@ -151,7 +152,7 @@ mod tests {
 
     #[test]
     fn none_down_format_collapses_placeholders() {
-        let out = w("{used}", "n/a {used}{total}{bar}{percent}{icon}").render(&ctx(None));
+        let out = w("{used}", "n/a {used}{total}{avail}{bar}{percent}{icon}").render(&ctx(None));
         assert_eq!(out[0].text, "n/a ");
     }
 }
