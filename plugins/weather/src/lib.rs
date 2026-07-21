@@ -117,7 +117,7 @@ mod guest {
     }
 
     #[plugin_fn]
-    pub fn render(input: String) -> FnResult<String> {
+    pub fn render(input: String) -> FnResult<Json<Vec<Segment>>> {
         let v: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
         let now = v["context"]["now"].as_str().unwrap_or_default().to_string();
         let cfg = &v["config"];
@@ -137,7 +137,7 @@ mod guest {
         if let Some((f_at, c_zip, temp_f, code, desc)) = &cached
             && is_fresh(&now, f_at, refresh_secs, c_zip, &zip)
         {
-            return Ok(segment(&format, code, temp_f, desc, &zip));
+            return Ok(Json(segment(&format, code, temp_f, desc, &zip)));
         }
 
         // 2) fetch
@@ -154,24 +154,24 @@ mod guest {
         match fetched {
             Some(w) => {
                 write_cache(&now, &zip, &w);
-                Ok(segment(&format, &w.code, &w.temp_f, &w.desc, &zip))
+                Ok(Json(segment(&format, &w.code, &w.temp_f, &w.desc, &zip)))
             }
             // 3) fetch failed: fall back to stale cache if any *and* it's for
             // the currently-configured zip, else empty (never show one zip's
             // weather under another zip's label).
             None => match cached {
                 Some((_, c_zip, temp_f, code, desc)) if c_zip == zip => {
-                    Ok(segment(&format, &code, &temp_f, &desc, &zip))
+                    Ok(Json(segment(&format, &code, &temp_f, &desc, &zip)))
                 }
-                _ => Ok("[]".to_string()),
+                _ => Ok(Json(Vec::new())),
             },
         }
     }
 
-    fn segment(format: &str, code: &str, temp_f: &str, desc: &str, zip: &str) -> String {
+    fn segment(format: &str, code: &str, temp_f: &str, desc: &str, zip: &str) -> Vec<Segment> {
         let text = render_format(format, code_to_icon(code), temp_f, desc, zip);
         // one unstyled segment; the host assigns palette for left/right regions
-        serde_json::to_string(&vec![Segment::new(text)]).unwrap_or_else(|_| "[]".to_string())
+        vec![Segment::new(text)]
     }
 
     fn read_cache() -> Option<(String, String, String, String, String)> {
