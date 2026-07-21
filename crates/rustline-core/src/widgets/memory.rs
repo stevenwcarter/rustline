@@ -121,6 +121,8 @@ mod tests {
         assert_eq!(format_bytes(512 * 1024u64.pow(2)), "512M");
         assert_eq!(format_bytes(1536 * 1024u64.pow(2)), "1.5G");
         assert_eq!(format_bytes(0), "0B");
+        assert_eq!(format_bytes(512), "512B"); // < 1 KiB stays in bytes
+        assert_eq!(format_bytes(3 * 1024u64.pow(4)), "3.0T"); // TiB unit
     }
 
     #[test]

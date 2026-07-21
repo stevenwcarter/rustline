@@ -285,6 +285,14 @@ fn render_right_with_cpu_memory_renders_gracefully() {
     );
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("#["), "built-ins still render: {s}");
+    // On Linux the /proc reads succeed, so the cpu widget renders its icon —
+    // this guards the read -> Context -> widget seam end to end (host-dependent,
+    // so Linux-gated).
+    #[cfg(target_os = "linux")]
+    assert!(
+        s.contains('\u{f061a}'),
+        "cpu widget should render its icon on Linux: {s}"
+    );
 }
 
 #[test]

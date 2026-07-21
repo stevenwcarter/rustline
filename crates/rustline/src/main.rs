@@ -66,7 +66,7 @@ fn main() {
             let plugin_dir = resolve_plugin_dir(args.plugin_dir.as_deref(), &cfg);
             let mut registry = Registry::with_builtins(&cfg);
             rustline_wasm::register_plugins(&mut registry, &cfg, &plugin_dir, &cfg.layout.left);
-            let ctx = build_region_context(&args);
+            let ctx = build_region_context(&args, &cfg.layout.left);
             let out =
                 render_named_region(Direction::Left, &cfg.layout.left, &ctx, &registry, &theme);
             emit(&out, args.preview);
@@ -75,7 +75,7 @@ fn main() {
             let plugin_dir = resolve_plugin_dir(args.plugin_dir.as_deref(), &cfg);
             let mut registry = Registry::with_builtins(&cfg);
             rustline_wasm::register_plugins(&mut registry, &cfg, &plugin_dir, &cfg.layout.right);
-            let ctx = build_region_context(&args);
+            let ctx = build_region_context(&args, &cfg.layout.right);
             let out =
                 render_named_region(Direction::Right, &cfg.layout.right, &ctx, &registry, &theme);
             emit(&out, args.preview);

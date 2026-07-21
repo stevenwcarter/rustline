@@ -83,7 +83,10 @@ fn parse_macos_memory(memsize: &str, vm_stat: &str) -> Option<MemInfo> {
     let free = pages(vm_stat, "Pages free:");
     let inactive = pages(vm_stat, "Pages inactive:");
     let speculative = pages(vm_stat, "Pages speculative:");
-    let available_bytes = (free + inactive + speculative).saturating_mul(page_size);
+    let available_bytes = free
+        .saturating_add(inactive)
+        .saturating_add(speculative)
+        .saturating_mul(page_size);
     Some(MemInfo {
         total_bytes,
         used_bytes: total_bytes.saturating_sub(available_bytes),
@@ -110,6 +113,11 @@ mod tests {
     #[test]
     fn linux_meminfo_missing_available_is_none() {
         assert!(parse_meminfo("MemTotal: 100 kB\n").is_none());
+    }
+
+    #[test]
+    fn meminfo_missing_total_is_none() {
+        assert!(parse_meminfo("MemAvailable:    100 kB\n").is_none());
     }
 
     #[test]

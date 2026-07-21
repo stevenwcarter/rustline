@@ -49,7 +49,12 @@ fn read_interfaces() -> Vec<NetIface> {
 
 /// Build the [`Context`] for rendering a left/right region from the tmux
 /// format-variable values passed on the command line, plus live host state.
-pub fn build_region_context(args: &RegionArgs) -> Context {
+///
+/// `layout` is the region's widget-name list; the expensive cpu/memory reads
+/// (`read_cpu` sleeps ~120ms on Linux; `read_memory` on macOS spawns `vm_stat`)
+/// are taken ONLY when that region actually renders them — the same
+/// "pay only for what the region references" gating `register_plugins` uses.
+pub fn build_region_context(args: &RegionArgs, layout: &[String]) -> Context {
     Context {
         session_name: args.session.clone().unwrap_or_default(),
         window_index: args.window.clone().unwrap_or_default(),
@@ -62,8 +67,16 @@ pub fn build_region_context(args: &RegionArgs) -> Context {
         window: None,
         interfaces: read_interfaces(),
         battery: crate::battery::read_battery(),
-        cpu: crate::cpu::read_cpu(),
-        memory: crate::memory::read_memory(),
+        cpu: if layout.iter().any(|w| w == "cpu") {
+            crate::cpu::read_cpu()
+        } else {
+            None
+        },
+        memory: if layout.iter().any(|w| w == "memory") {
+            crate::memory::read_memory()
+        } else {
+            None
+        },
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
     }
@@ -74,7 +87,9 @@ pub fn build_region_context(args: &RegionArgs) -> Context {
 /// pane in play for a window segment) and layers on the window-specific
 /// fields from `args`.
 pub fn build_window_context(args: &WindowArgs) -> Context {
-    let mut ctx = build_region_context(&RegionArgs::default());
+    // Windows render only the window pill (builtins, never cpu/memory), so pass
+    // an empty layout: no cpu/memory sampling, no per-window `read_cpu` sleep.
+    let mut ctx = build_region_context(&RegionArgs::default(), &[]);
     ctx.window = Some(WindowCtx {
         index: args.index.clone(),
         name: args.name.clone(),
@@ -91,7 +106,7 @@ mod tests {
     #[test]
     fn home_from_env_used_when_present() {
         // build_context reads $HOME; assert the field is populated non-empty
-        let ctx = build_region_context(&RegionArgs::default());
+        let ctx = build_region_context(&RegionArgs::default(), &[]);
         assert!(!ctx.home.is_empty() || std::env::var("HOME").is_err());
     }
 
@@ -106,11 +121,28 @@ mod tests {
             "loopback IPv4 must be filtered: {ifaces:?}"
         );
         // And build_region_context wires it in (field is populated by the same read).
-        let ctx = build_region_context(&RegionArgs::default());
+        let ctx = build_region_context(&RegionArgs::default(), &[]);
         assert!(
             ctx.interfaces
                 .iter()
                 .all(|i| i.ipv4 != std::net::Ipv4Addr::LOCALHOST)
         );
+    }
+
+    #[test]
+    fn cpu_memory_sampled_only_when_region_names_them() {
+        // Empty layout: neither expensive read runs, so both stay None — this is
+        // what spares `render left` / `render window` the read_cpu sleep.
+        let ctx = build_region_context(&RegionArgs::default(), &[]);
+        assert!(ctx.cpu.is_none() && ctx.memory.is_none());
+        // The window path uses an empty layout too.
+        let wctx = build_window_context(&WindowArgs {
+            current: false,
+            index: String::new(),
+            name: String::new(),
+            flags: String::new(),
+            preview: false,
+        });
+        assert!(wctx.cpu.is_none() && wctx.memory.is_none());
     }
 }

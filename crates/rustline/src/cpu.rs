@@ -5,6 +5,7 @@
 //! `battery.rs`: the pure parsers compile under `test` on any host and carry the
 //! unit tests, while only the file-read / subprocess / sleep is `#[cfg]`-gated.
 
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 use rustline_core::CpuUsage;
@@ -120,6 +121,12 @@ mod tests {
     #[test]
     fn proc_stat_no_cpu_line_is_none() {
         assert!(parse_proc_stat("intr 1 2 3\n").is_none());
+    }
+
+    #[test]
+    fn proc_stat_rejects_too_few_and_nonnumeric_fields() {
+        assert!(parse_proc_stat("cpu 1 2\n").is_none()); // < 4 fields
+        assert!(parse_proc_stat("cpu 1 x 3 4\n").is_none()); // non-numeric field
     }
 
     #[test]

@@ -29,7 +29,8 @@ use crate::widget::Registry;
 
 impl Registry {
     /// Build a [`Registry`] pre-populated with all eleven built-in widgets,
-    /// configuring the ones with options (`datetime`, `cwd`) from `cfg`.
+    /// configuring the ones that carry options (`datetime`, `cwd`, `lan_ip`,
+    /// `tailscale_ip`, `battery`, `cpu`, `memory`) from `cfg`.
     pub fn with_builtins(cfg: &Config) -> Registry {
         let mut registry = Registry::new();
         registry.register("pane_id", Box::new(|| Box::new(PaneId)));
