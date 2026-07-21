@@ -1,0 +1,196 @@
+use crate::{Battery, BatteryState, Context, Segment, Widget};
+
+/// Renders battery percentage, charge state, and a level-bucketed,
+/// charging-aware Nerd-Font icon. Pure — reads only `Context::battery`.
+pub struct BatteryWidget {
+    pub format: String,
+    pub down_format: String,
+}
+
+/// A Nerd-Font (nf-md battery ramp) glyph for the given battery. Charging →
+/// charging glyph; `Full` → full glyph; `Unknown` → unknown glyph; otherwise a
+/// discharge-level bucket. Pure + unit-tested; the bucketing is the contract,
+/// the exact codepoints are the nf-md battery set.
+fn battery_icon(b: &Battery) -> &'static str {
+    match b.state {
+        BatteryState::Charging => "\u{f0084}", // md-battery-charging
+        BatteryState::Full => "\u{f0079}",     // md-battery (full)
+        BatteryState::Unknown => "\u{f0091}",  // md-battery-unknown
+        BatteryState::Discharging => match b.percent {
+            p if p >= 90 => "\u{f0082}", // md-battery-90
+            p if p >= 70 => "\u{f0080}", // md-battery-70
+            p if p >= 50 => "\u{f007e}", // md-battery-50
+            p if p >= 30 => "\u{f007c}", // md-battery-30
+            p if p >= 10 => "\u{f007a}", // md-battery-10
+            _ => "\u{f0083}",            // md-battery-alert (<10%)
+        },
+    }
+}
+
+/// The lowercase state word substituted for `{state}`.
+fn state_word(state: BatteryState) -> &'static str {
+    match state {
+        BatteryState::Charging => "charging",
+        BatteryState::Discharging => "discharging",
+        BatteryState::Full => "full",
+        BatteryState::Unknown => "unknown",
+    }
+}
+
+impl Widget for BatteryWidget {
+    fn render(&self, ctx: &Context) -> Vec<Segment> {
+        match ctx.battery {
+            Some(b) => {
+                let text = self
+                    .format
+                    .replace("{icon}", battery_icon(&b))
+                    .replace("{percent}", &b.percent.to_string())
+                    .replace("{state}", state_word(b.state));
+                vec![Segment::new(text)]
+            }
+            None => {
+                if self.down_format.is_empty() {
+                    return vec![];
+                }
+                // Collapse any placeholder so a stray token never renders and
+                // no fake value shows (invariant #6).
+                let text = self
+                    .down_format
+                    .replace("{icon}", "")
+                    .replace("{percent}", "")
+                    .replace("{state}", "");
+                vec![Segment::new(text)]
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Local, TimeZone};
+
+    fn ctx(battery: Option<Battery>) -> Context {
+        Context {
+            session_name: "0".into(),
+            window_index: "0".into(),
+            pane_index: "0".into(),
+            pane_current_path: "/".into(),
+            home: "/h".into(),
+            hostname: "h".into(),
+            loadavg: None,
+            now: Local
+                .with_ymd_and_hms(2026, 7, 20, 17, 49, 0)
+                .single()
+                .unwrap(),
+            window: None,
+            interfaces: Vec::new(),
+            battery,
+            os: String::new(),
+            arch: String::new(),
+        }
+    }
+
+    fn bat(percent: u8, state: BatteryState) -> Option<Battery> {
+        Some(Battery { percent, state })
+    }
+
+    fn w() -> BatteryWidget {
+        BatteryWidget {
+            format: "{icon} {percent}%".into(),
+            down_format: String::new(),
+        }
+    }
+
+    #[test]
+    fn renders_icon_percent_state() {
+        let widget = BatteryWidget {
+            format: "{icon} {percent}% {state}".into(),
+            down_format: String::new(),
+        };
+        let out = widget.render(&ctx(bat(73, BatteryState::Discharging)));
+        assert_eq!(out[0].text, "\u{f0080} 73% discharging");
+    }
+
+    #[test]
+    fn icon_buckets_by_level_and_state() {
+        assert_eq!(
+            battery_icon(&Battery {
+                percent: 40,
+                state: BatteryState::Charging
+            }),
+            "\u{f0084}"
+        );
+        assert_eq!(
+            battery_icon(&Battery {
+                percent: 100,
+                state: BatteryState::Full
+            }),
+            "\u{f0079}"
+        );
+        assert_eq!(
+            battery_icon(&Battery {
+                percent: 95,
+                state: BatteryState::Discharging
+            }),
+            "\u{f0082}"
+        );
+        assert_eq!(
+            battery_icon(&Battery {
+                percent: 70,
+                state: BatteryState::Discharging
+            }),
+            "\u{f0080}"
+        );
+        assert_eq!(
+            battery_icon(&Battery {
+                percent: 50,
+                state: BatteryState::Discharging
+            }),
+            "\u{f007e}"
+        );
+        assert_eq!(
+            battery_icon(&Battery {
+                percent: 30,
+                state: BatteryState::Discharging
+            }),
+            "\u{f007c}"
+        );
+        assert_eq!(
+            battery_icon(&Battery {
+                percent: 10,
+                state: BatteryState::Discharging
+            }),
+            "\u{f007a}"
+        );
+        assert_eq!(
+            battery_icon(&Battery {
+                percent: 5,
+                state: BatteryState::Discharging
+            }),
+            "\u{f0083}"
+        );
+        assert_eq!(
+            battery_icon(&Battery {
+                percent: 50,
+                state: BatteryState::Unknown
+            }),
+            "\u{f0091}"
+        );
+    }
+
+    #[test]
+    fn none_with_empty_down_format_skips() {
+        assert!(w().render(&ctx(None)).is_empty());
+    }
+
+    #[test]
+    fn none_with_down_format_renders_and_collapses_placeholders() {
+        let widget = BatteryWidget {
+            format: "{icon} {percent}%".into(),
+            down_format: "no-batt {percent}{icon}{state}".into(),
+        };
+        let out = widget.render(&ctx(None));
+        assert_eq!(out[0].text, "no-batt ");
+    }
+}

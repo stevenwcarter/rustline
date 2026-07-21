@@ -1,3 +1,4 @@
+pub mod battery;
 pub mod cwd;
 pub mod datetime;
 pub mod hostname;
