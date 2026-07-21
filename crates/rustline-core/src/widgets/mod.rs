@@ -42,12 +42,13 @@ impl Registry {
         registry.register("windows", Box::new(|| Box::new(Windows)));
         registry.register("loadavg", Box::new(|| Box::new(LoadAvg)));
 
-        let format = cfg.widgets.datetime.format.clone();
+        let datetime = cfg.widgets.datetime.clone();
         registry.register(
             "datetime",
             Box::new(move || {
                 Box::new(DateTime {
-                    format: format.clone(),
+                    format: datetime.format.clone(),
+                    alt_format: datetime.alt_format.clone(),
                 })
             }),
         );
@@ -61,6 +62,7 @@ impl Registry {
             Box::new(move || {
                 Box::new(LanIp {
                     format: lan.format.clone(),
+                    alt_format: lan.alt_format.clone(),
                     down_format: lan.down_format.clone(),
                     interface: lan.interface.clone(),
                 })
@@ -73,6 +75,7 @@ impl Registry {
             Box::new(move || {
                 Box::new(TailscaleIp {
                     format: ts.format.clone(),
+                    alt_format: ts.alt_format.clone(),
                     down_format: ts.down_format.clone(),
                 })
             }),

@@ -63,6 +63,8 @@ impl Default for Layout {
 pub struct DateTimeOpts {
     #[serde(default = "default_dt_format")]
     pub format: String,
+    #[serde(default)]
+    pub alt_format: String,
 }
 
 fn default_dt_format() -> String {
@@ -73,6 +75,7 @@ impl Default for DateTimeOpts {
     fn default() -> Self {
         Self {
             format: default_dt_format(),
+            alt_format: String::new(),
         }
     }
 }
@@ -107,6 +110,8 @@ pub struct LanIpOpts {
     #[serde(default = "default_ip_format")]
     pub format: String,
     #[serde(default)]
+    pub alt_format: String,
+    #[serde(default)]
     pub down_format: String,
     #[serde(default)]
     pub interface: Option<String>,
@@ -116,6 +121,7 @@ impl Default for LanIpOpts {
     fn default() -> Self {
         Self {
             format: default_ip_format(),
+            alt_format: String::new(),
             down_format: String::new(),
             interface: None,
         }
@@ -128,6 +134,8 @@ pub struct TailscaleIpOpts {
     #[serde(default = "default_ip_format")]
     pub format: String,
     #[serde(default)]
+    pub alt_format: String,
+    #[serde(default)]
     pub down_format: String,
 }
 
@@ -135,6 +143,7 @@ impl Default for TailscaleIpOpts {
     fn default() -> Self {
         Self {
             format: default_ip_format(),
+            alt_format: String::new(),
             down_format: String::new(),
         }
     }
