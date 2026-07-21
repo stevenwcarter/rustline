@@ -13,6 +13,11 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Parser)]
 #[command(version, about = "Rust tmux statusline")]
 pub struct Cli {
+    /// Increase file-log verbosity: -v=warn, -vv=info, -vvv=debug, -vvvv=trace.
+    /// Without -v the file logs at info (or the config's `log.file_level`);
+    /// stderr is unaffected (see `log.stderr_level`).
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
+    pub verbose: u8,
     #[command(subcommand)]
     pub command: Command,
 }
