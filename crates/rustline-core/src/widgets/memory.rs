@@ -95,6 +95,7 @@ mod tests {
             memory,
             os: String::new(),
             arch: String::new(),
+            toggled: Default::default(),
         }
     }
 

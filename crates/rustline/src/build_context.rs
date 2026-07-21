@@ -79,6 +79,8 @@ pub fn build_region_context(args: &RegionArgs, layout: &[String]) -> Context {
         },
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
+        // Placeholder until a later task reads the real toggles state file.
+        toggled: std::collections::BTreeSet::new(),
     }
 }
 

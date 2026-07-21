@@ -63,6 +63,7 @@ fn ctx_now(rfc3339: &str) -> Context {
         memory: None,
         os: String::new(),
         arch: String::new(),
+        toggled: Default::default(),
     }
 }
 
