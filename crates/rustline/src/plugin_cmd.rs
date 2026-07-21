@@ -83,8 +83,28 @@ fn pattern_cmd(cmd: PatternCmd, kind: Kind, config_path: &Path) {
 /// that array, and write the document back. Comments and formatting
 /// elsewhere in the file are untouched.
 fn mutate(config_path: &Path, plugin: &str, kind: Kind, f: impl FnOnce(&mut Array)) {
-    let text = std::fs::read_to_string(config_path).unwrap_or_default();
-    let mut doc: DocumentMut = text.parse().unwrap_or_default();
+    // Distinguish absent / unreadable / invalid so we never blow away an
+    // existing config we merely failed to load: only a genuinely missing file
+    // is a legitimate fresh-start; a read error or a TOML syntax error must
+    // abort *before* the write below, or a `plugin add` would silently
+    // truncate the user's whole config down to `[plugins.<x>]`.
+    let mut doc = match std::fs::read_to_string(config_path) {
+        Ok(text) => match text.parse::<DocumentMut>() {
+            Ok(doc) => doc,
+            Err(_) => {
+                eprintln!(
+                    "config error: {} is not valid TOML; refusing to overwrite",
+                    config_path.display()
+                );
+                std::process::exit(1);
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
+        Err(e) => {
+            eprintln!("config error: cannot read {}: {e}", config_path.display());
+            std::process::exit(1);
+        }
+    };
 
     // Ensure [plugins.<plugin>] exists.
     let plugins = match doc

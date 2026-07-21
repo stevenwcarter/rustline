@@ -209,9 +209,9 @@ Every `PluginConfig` field is `#[serde(default)]`, so the whole table stays
 covered by invariant #3. `options` is an opaque TOML table forwarded to the
 plugin's `render` call verbatim. Allow-pattern entries are a **glob** by
 default (matched against the full URL/path string), or a **regex** when
-prefixed `re:` — note regex entries are **unanchored substring matches** (the
-`regex` crate's default), so anchor with `^…$` yourself if you mean a full
-match.
+prefixed `re:` — regex entries are **anchored to a full-string match** (uniform
+with globs); to match a prefix/substring, include `.*` in the pattern (e.g.
+`re:https://wttr\.in/.*`).
 
 ## Invariants (load-bearing — re-check when touching these)
 

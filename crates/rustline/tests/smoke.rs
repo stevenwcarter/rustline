@@ -171,3 +171,35 @@ fn plugin_add_on_malformed_config_errors_cleanly() {
         "must not panic: stderr={stderr}"
     );
 }
+
+#[test]
+fn plugin_add_on_unparseable_config_preserves_file() {
+    // A pre-existing config with a TOML *syntax* error must abort with exit 1
+    // and leave the file byte-for-byte intact — never truncate the user's whole
+    // config (layout/theme/other plugins) down to `[plugins.<x>]`.
+    let dir = std::env::temp_dir().join("rustline_smoke_pluginunparseable");
+    let cfgdir = dir.join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    let invalid = "this = = [[[\n";
+    std::fs::write(&cfg, invalid).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rustline"))
+        .args(["plugin", "url", "add", "weather", "https://wttr.in/*"])
+        .env("XDG_CONFIG_HOME", &dir)
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "clean error exit, not a panic; stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "must not panic: stderr={stderr}"
+    );
+    let after = std::fs::read_to_string(&cfg).unwrap();
+    assert_eq!(after, invalid, "config left byte-for-byte unchanged");
+}

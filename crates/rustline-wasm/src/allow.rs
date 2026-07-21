@@ -15,7 +15,10 @@ impl Pattern {
     /// Compile one entry; `re:` prefix selects regex, otherwise glob.
     pub fn compile(entry: &str) -> Result<Pattern, String> {
         if let Some(rx) = entry.strip_prefix("re:") {
-            Regex::new(rx)
+            // Anchor to a full-string match (uniform with globs) so a bare
+            // host regex like `re:wttr\.in` can't be satisfied by an
+            // off-allowlist URL that merely contains it in a query param.
+            Regex::new(&format!("^(?:{rx})$"))
                 .map(Pattern::Regex)
                 .map_err(|e| e.to_string())
         } else {
@@ -84,9 +87,20 @@ mod tests {
 
     #[test]
     fn regex_prefix_matches() {
-        let s = AllowSet::compile(&[r"re:^https://wttr\.in/\d{5}".into()]);
+        // Patterns are anchored (full-string), so a trailing `.*` is needed to
+        // consume the query tail after the 5-digit zip.
+        let s = AllowSet::compile(&[r"re:https://wttr\.in/\d{5}.*".into()]);
         assert!(s.allows("https://wttr.in/48183?format=j1"));
         assert!(!s.allows("https://wttr.in/abcde"));
+    }
+
+    #[test]
+    fn regex_is_anchored_not_substring() {
+        // Fail-safe: a bare host regex must not be satisfied by an off-allowlist
+        // URL that only mentions the host in a query param.
+        let s = AllowSet::compile(&[r"re:wttr\.in".into()]);
+        assert!(!s.allows("https://evil.example/?x=wttr.in"));
+        assert!(s.allows("wttr.in"));
     }
 
     #[test]

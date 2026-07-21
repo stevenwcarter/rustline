@@ -106,7 +106,9 @@ widget, just crossing the wasm boundary as JSON.
 Everything a plugin can touch is capability-gated by the host: network
 requests and arbitrary file paths are checked against per-plugin allowlists in
 your config (`allowed_urls` / `allowed_paths`, each a glob or a `re:`-prefixed
-regex), and each plugin gets its own sandboxed state directory with a size
+regex; `re:` patterns are anchored to a full-string match, so include `.*` for a
+prefix, e.g. `re:https://wttr\.in/.*`), and each plugin gets its own sandboxed
+state directory with a size
 quota (`max_state_bytes`, default 50 MB) for caching data between renders. A
 plugin has no ambient access to anything — a disallowed request is simply
 refused, and any plugin error, timeout, or crash renders as an empty segment
