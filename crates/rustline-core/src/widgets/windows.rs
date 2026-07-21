@@ -1,7 +1,9 @@
-use crate::{Color, Context, Segment, Style, Widget};
+use crate::{Context, Segment, Widget};
 
-/// Renders the current tmux window as a single segment (index, flags, and
-/// name), emphasized when it is the active window.
+/// Renders the current tmux window as a single text segment (index, flags, and
+/// name). The pill styling and active/inactive colors are applied downstream by
+/// the theme-aware window renderer (`render_window`/`render_window_pill`), since
+/// widgets only see [`Context`], not the `Theme`.
 pub struct Windows;
 
 impl Widget for Windows {
@@ -10,16 +12,7 @@ impl Widget for Windows {
             return vec![];
         };
         let text = format!("{}{} {}", w.index, w.flags, w.name);
-        let style = if w.is_current {
-            Style {
-                fg: None,
-                bg: Some(Color::Indexed(31)),
-                bold: true,
-            }
-        } else {
-            Style::default()
-        };
-        vec![Segment::styled(text, style)]
+        vec![Segment::new(text)]
     }
 }
 
@@ -51,7 +44,7 @@ mod tests {
     }
 
     #[test]
-    fn current_window_text_and_emphasis() {
+    fn current_window_text_only() {
         let w = ctx(Some(WindowCtx {
             index: "0".into(),
             name: "name".into(),
@@ -60,12 +53,12 @@ mod tests {
         }));
         let out = Windows.render(&w);
         assert_eq!(out[0].text, "0* name");
-        assert!(out[0].style.bold);
-        assert!(out[0].style.bg.is_some());
+        // Styling now lives in the theme-aware pill renderer, not the widget.
+        assert_eq!(out[0].style, crate::Style::default());
     }
 
     #[test]
-    fn inactive_window_is_plain() {
+    fn inactive_window_text_only() {
         let w = ctx(Some(WindowCtx {
             index: "1".into(),
             name: "other".into(),
@@ -74,8 +67,7 @@ mod tests {
         }));
         let out = Windows.render(&w);
         assert_eq!(out[0].text, "1 other");
-        assert!(!out[0].style.bold);
-        assert!(out[0].style.bg.is_none());
+        assert_eq!(out[0].style, crate::Style::default());
     }
 
     #[test]
