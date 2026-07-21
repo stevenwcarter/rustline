@@ -1,5 +1,6 @@
 mod bar;
 pub mod battery;
+pub mod cpu;
 pub mod cwd;
 pub mod datetime;
 pub mod hostname;
@@ -12,6 +13,7 @@ pub mod tailscale_ip;
 pub mod windows;
 
 pub use battery::BatteryWidget;
+pub use cpu::CpuWidget;
 pub use cwd::Cwd;
 pub use datetime::DateTime;
 pub use hostname::Hostname;
