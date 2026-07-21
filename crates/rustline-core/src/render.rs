@@ -168,6 +168,84 @@ pub fn render_region(dir: Direction, segments: &[Segment], theme: &Theme) -> Str
     out
 }
 
+/// A widget's rendered segments plus its optional clickable range name. The
+/// assemble layer builds these so `render_region_ranged` can bracket clickable
+/// widgets in `#[range=user|NAME]…#[norange]` while keeping every other byte of
+/// output identical to `render_region`.
+pub struct RangeGroup {
+    pub range: Option<String>,
+    pub segments: Vec<Segment>,
+}
+
+/// Like `render_region`, but bracket each group whose `range` is `Some(name)` in
+/// `#[range=user|name]…#[norange]`. Inter-widget separators and both outer edge
+/// glyphs are emitted OUTSIDE any range. With every group's `range == None` the
+/// output is byte-identical to `render_region` over the flattened segments.
+pub fn render_region_ranged(dir: Direction, groups: &[RangeGroup], theme: &Theme) -> String {
+    let flat: Vec<&Segment> = groups.iter().flat_map(|g| g.segments.iter()).collect();
+    let (Some(&first), Some(&last)) = (flat.first(), flat.last()) else {
+        return String::new();
+    };
+
+    let mut out = String::new();
+    let first_bg = eff_bg(first, theme);
+    if first_bg != &theme.bar_bg {
+        write_hard(&mut out, theme, dir, &theme.bar_bg, first_bg);
+    }
+
+    let mut prev_bg: Option<&Color> = None;
+    let mut open_range = false;
+    for group in groups {
+        for (i, s) in group.segments.iter().enumerate() {
+            let cur_bg = eff_bg(s, theme);
+            if let Some(prev_bg) = prev_bg {
+                // At a group boundary, close the previous range BEFORE the
+                // separator so the separator glyph is not clickable.
+                if i == 0 && open_range {
+                    out.push_str("#[norange]");
+                    open_range = false;
+                }
+                if prev_bg != cur_bg {
+                    write_hard(&mut out, theme, dir, prev_bg, cur_bg);
+                } else {
+                    let _ = write!(
+                        out,
+                        "#[fg={},bg={}]{}",
+                        theme.soft_fg.to_tmux(),
+                        cur_bg.to_tmux(),
+                        theme.soft(dir),
+                    );
+                }
+            }
+            if i == 0
+                && let Some(name) = &group.range
+            {
+                let _ = write!(out, "#[range=user|{name}]");
+                open_range = true;
+            }
+            let bold = if s.style.bold { ",bold" } else { "" };
+            let _ = write!(
+                out,
+                "#[fg={},bg={}{bold}] {} ",
+                eff_fg(s, theme).to_tmux(),
+                cur_bg.to_tmux(),
+                s.text,
+            );
+            prev_bg = Some(cur_bg);
+        }
+    }
+    if open_range {
+        out.push_str("#[norange]");
+    }
+
+    let last_bg = eff_bg(last, theme);
+    if last_bg != &theme.bar_bg {
+        write_hard(&mut out, theme, dir, last_bg, &theme.bar_bg);
+    }
+    out.push_str("#[default]");
+    out
+}
+
 /// Render one window as a self-contained rounded "pill": a left rounded cap, the
 /// ` text ` body, and a right rounded cap. The caps are colored
 /// `fg=<pill>,bg=<bar_bg>` (the opposite of the pointed powerline separators in
@@ -350,5 +428,65 @@ mod tests {
             out.ends_with("#[fg=colour234,bg=colour238]\u{e0b2}#[default]"),
             "right trailing edge (last.bg -> bar_bg): {out}"
         );
+    }
+
+    fn group(range: Option<&str>, segs: Vec<Segment>) -> RangeGroup {
+        RangeGroup {
+            range: range.map(str::to_string),
+            segments: segs,
+        }
+    }
+
+    #[test]
+    fn ranged_wraps_clickable_group_and_leaves_separators_outside() {
+        let groups = vec![
+            group(Some("cpu"), vec![seg("a", 31)]),
+            group(None, vec![seg("b", 238)]),
+        ];
+        let out = render_region_ranged(Direction::Left, &groups, &theme());
+        // clickable group is bracketed; non-clickable group is not.
+        assert!(out.contains("#[range=user|cpu]"), "opens range: {out}");
+        assert!(out.contains("#[norange]"), "closes range: {out}");
+        // the hard separator between the two groups sits OUTSIDE the range
+        // (norange precedes the separator glyph).
+        let sep = "#[fg=colour31,bg=colour238]\u{e0b0}";
+        let nr = out.find("#[norange]").unwrap();
+        let sp = out.find(sep).unwrap();
+        assert!(nr < sp, "norange before separator: {out}");
+    }
+
+    #[test]
+    fn ranged_all_none_is_byte_identical_to_render_region() {
+        let segs = vec![seg("a", 31), seg("b", 238)];
+        let groups = vec![
+            group(None, vec![segs[0].clone()]),
+            group(None, vec![segs[1].clone()]),
+        ];
+        assert_eq!(
+            render_region_ranged(Direction::Left, &groups, &theme()),
+            render_region(Direction::Left, &segs, &theme()),
+        );
+    }
+
+    #[test]
+    fn ranged_stripping_range_tokens_equals_render_region() {
+        // Non-destructive: with a clickable group, stripping the range tokens
+        // reproduces the plain powerline output.
+        let segs = vec![seg("a", 31), seg("b", 238)];
+        let groups = vec![
+            group(Some("cpu"), vec![segs[0].clone()]),
+            group(Some("memory"), vec![segs[1].clone()]),
+        ];
+        let ranged = render_region_ranged(Direction::Left, &groups, &theme());
+        let stripped = ranged
+            .replace("#[range=user|cpu]", "")
+            .replace("#[range=user|memory]", "")
+            .replace("#[norange]", "");
+        assert_eq!(stripped, render_region(Direction::Left, &segs, &theme()));
+    }
+
+    #[test]
+    fn ranged_empty_is_empty() {
+        assert_eq!(render_region_ranged(Direction::Left, &[], &theme()), "");
     }
 }

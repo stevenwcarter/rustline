@@ -3,7 +3,7 @@
 //! [`Registry`] resolution, per-segment palette assignment, and
 //! [`render_region`].
 
-use crate::render::{Direction, Theme, render_region, render_window_pill};
+use crate::render::{Direction, RangeGroup, Theme, render_region_ranged, render_window_pill};
 use crate::{Context, Registry, Segment, Widget};
 
 /// Fill in each segment's background from `theme.palette`, cycling through
@@ -54,12 +54,35 @@ pub fn render_named_region(
     theme: &Theme,
 ) -> String {
     let widgets = registry.resolve(names);
-    let mut segments: Vec<Segment> = widgets
+    // Render each widget (panic-guarded), keeping its clickable range name.
+    let rendered: Vec<(Option<String>, Vec<Segment>)> = widgets
         .iter()
-        .flat_map(|w| render_guarded(w.as_ref(), ctx))
+        .map(|w| {
+            (
+                w.range_name().map(str::to_string),
+                render_guarded(w.as_ref(), ctx),
+            )
+        })
         .collect();
-    assign_palette(&mut segments, theme);
-    render_region(dir, &segments, theme)
+
+    // Assign palette across the FLATTENED region (unchanged global cycling),
+    // then regroup by remembered lengths so range markup can bracket each widget.
+    let range_names: Vec<Option<String>> = rendered.iter().map(|(n, _)| n.clone()).collect();
+    let lens: Vec<usize> = rendered.iter().map(|(_, s)| s.len()).collect();
+    let mut flat: Vec<Segment> = rendered.into_iter().flat_map(|(_, s)| s).collect();
+    assign_palette(&mut flat, theme);
+
+    let mut it = flat.into_iter();
+    let groups: Vec<RangeGroup> = range_names
+        .into_iter()
+        .zip(lens)
+        .map(|(range, len)| RangeGroup {
+            range,
+            segments: (&mut it).take(len).collect(),
+        })
+        .collect();
+
+    render_region_ranged(dir, &groups, theme)
 }
 
 /// Render the single `windows` segment as a rounded pill. Unlike
@@ -233,5 +256,34 @@ mod tests {
             out.contains("scadrial"),
             "surviving widget still renders: {out}"
         );
+    }
+
+    #[test]
+    fn named_region_wraps_clickable_widget_range() {
+        use crate::{Segment, Widget};
+        struct Clicky;
+        impl Widget for Clicky {
+            fn render(&self, _c: &Context) -> Vec<Segment> {
+                vec![Segment::new("hi")]
+            }
+            fn range_name(&self) -> Option<&str> {
+                Some("clicky")
+            }
+        }
+        let mut reg = Registry::with_builtins(&Config::default());
+        reg.register("clicky", Box::new(|| Box::new(Clicky)));
+        let out = render_named_region(
+            Direction::Left,
+            &["clicky".into(), "hostname".into()],
+            &ctx(),
+            &reg,
+            &Theme::default(),
+        );
+        assert!(
+            out.contains("#[range=user|clicky]"),
+            "wraps clickable: {out}"
+        );
+        assert!(out.contains("#[norange]"), "closes range: {out}");
+        assert!(out.contains("hi"), "text present: {out}");
     }
 }
