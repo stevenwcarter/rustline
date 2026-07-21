@@ -64,14 +64,20 @@ these shared types, not a design shortcut. Keep them serializable.
   resolving now that the types themselves live in `rustline-abi`.
 - `context.rs` — `Context` (session/window/pane ids, `pane_current_path`,
   `home`, `hostname`, `loadavg: Option<[f64;3]>`, `now: DateTime<Local>`,
-  `window: Option<WindowCtx>`) and `WindowCtx`.
+  `window: Option<WindowCtx>`, `interfaces: Vec<NetIface>`), `WindowCtx`, and
+  `NetIface { name, ipv4: Ipv4Addr }` (one non-loopback IPv4 interface, read
+  once at `Context`-build time; the IP widgets select from this list rather
+  than touching the OS mid-render).
 - `render.rs` — `render_region(Direction, &[Segment], &Theme) -> String`, the
   load-bearing powerline renderer (hard `` `` / soft `` `` separators, edge
   blending to `bar_bg`); `Theme` (palette, glyphs, colors) with `Default`.
 - `widget.rs` — `Widget` trait and `Registry` (name → factory; `resolve` skips
   unknown widget names with a `warn!`, never errors).
-- `widgets/` — the six built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
-  `loadavg`, `datetime`, plus `Registry::with_builtins(&Config)` in `mod.rs`.
+- `widgets/` — the eight built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
+  `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, plus
+  `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
+  LAN/Tailscale interface-selection and `{ip}` formatting logic shared by
+  `lan_ip`/`tailscale_ip` (no I/O — operates on `Context.interfaces`).
 - `assemble.rs` — `assign_palette`, `render_named_region` (panic-guarded per
   widget via `catch_unwind`), `render_window`.
 - `config.rs` — `Config` (TOML): `layout`, `theme`, `widgets`, a top-level
@@ -131,7 +137,9 @@ these shared types, not a design shortcut. Keep them serializable.
 - `cli.rs` — `clap` derive. `render` and `plugin` are subcommand *groups*.
 - `build_context.rs` — builds `Context` from args + `gethostname`,
   `libc::getloadavg` (the only `unsafe`, guarded on `n == 3`), `chrono::Local`,
-  `$HOME`.
+  `$HOME`, and now also non-loopback IPv4 interfaces via `if-addrs` into
+  `Context.interfaces` (a failed read yields an empty `Vec`, never a
+  fabricated address — same spirit as `read_loadavg` returning `None`).
 - `plugin_cmd.rs` — `rustline plugin …`: `list` reads the effective `Config`;
   `url|path add/remove` mutate the config file in place via `toml_edit`
   (preserving comments/formatting), creating `[plugins.<name>]` if absent.
@@ -184,6 +192,26 @@ left = `[pane_id, hostname]`, center = `[windows]`,
 right = `[cwd, loadavg, datetime]`. Default datetime format
 `"%a < %Y-%m-%d < %H:%M"` (the `<` are literal). Unknown widget names in a layout
 are skipped, not fatal.
+
+**IP widgets:** `lan_ip` and `tailscale_ip` are opt-in — neither is in the
+default layout. Both take a `format` (default `"{ip}"`) whose `{ip}`
+placeholder is replaced by the selected address (any surrounding label/glyph
+text is kept verbatim), and a `down_format` (default `""`, i.e. render
+nothing) shown when no matching address is found — a `{ip}` inside
+`down_format` collapses to empty rather than showing a stale/fake address.
+`lan_ip` additionally takes an `interface` override: an exact interface name
+that wins unconditionally over auto-selection, even a virtual/public NIC.
+
+```toml
+[widgets.lan_ip]
+format = "LAN {ip}"
+down_format = ""
+interface = "wlp3s0"          # optional; overrides auto-selection
+
+[widgets.tailscale_ip]
+format = "TS {ip}"
+down_format = "TS off"
+```
 
 **Plugins:** an optional top-level `plugin_dir` (default
 `$XDG_DATA_HOME/rustline/plugins`, `~/` expanded) plus a typed
@@ -281,7 +309,9 @@ with globs); to match a prefix/substring, include `.*` in the pattern (e.g.
   network path). `cargo tree -i openssl` / `-i native-tls` stay empty across
   the whole graph, including `plugins/weather`. The `2.3 MB` dynamic binary is
   fine here — the musl/`scratch` Docker policy is for server images, not this
-  local CLI.
+  local CLI. `if-addrs` (host interface enumeration for the IP widgets, in
+  `crates/rustline`) is a thin syscall wrapper with no TLS involved, so it
+  doesn't disturb this either.
 
 ## Roadmap
 
@@ -305,3 +335,5 @@ with globs); to match a prefix/substring, include `.*` in the pattern (e.g.
 - Plan: `docs/superpowers/plans/2026-07-20-rustline-tmux-statusline.md`
 - Spec (WASM plugins): `docs/superpowers/specs/2026-07-20-rustline-wasm-plugins-design.md`
 - Plan (WASM plugins): `docs/superpowers/plans/2026-07-20-rustline-wasm-plugins.md`
+- Spec (IP widgets): `docs/superpowers/specs/2026-07-20-rustline-ip-widgets-design.md`
+- Plan (IP widgets): `docs/superpowers/plans/2026-07-20-rustline-ip-widgets.md`
