@@ -75,6 +75,16 @@ pub fn parse_wttr(json: &str) -> Option<Wttr> {
     })
 }
 
+/// Pick the active weather format given whether this plugin is toggled and its
+/// configured `alt_format` (mirrors the host's `active_format`).
+pub fn select_weather_format<'a>(toggled: bool, format: &'a str, alt_format: &'a str) -> &'a str {
+    if toggled && !alt_format.is_empty() {
+        alt_format
+    } else {
+        format
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod guest {
     use super::*;
@@ -98,10 +108,16 @@ mod guest {
         let now = v["context"]["now"].as_str().unwrap_or_default().to_string();
         let cfg = &v["config"];
         let zip = cfg["zip"].as_str().unwrap_or("48183").to_string();
-        let format = cfg["format"]
-            .as_str()
-            .unwrap_or("{icon} {temp_f}°F")
-            .to_string();
+        let raw_format = cfg["format"].as_str().unwrap_or("{icon} {temp_f}°F");
+        // `context.toggled` is a JSON array of names; this plugin is toggled
+        // when it contains its own name, "weather".
+        let toggled = v
+            .get("context")
+            .and_then(|c| c.get("toggled"))
+            .and_then(|t| t.as_array())
+            .is_some_and(|a| a.iter().any(|name| name.as_str() == Some("weather")));
+        let alt_format = cfg["alt_format"].as_str().unwrap_or("");
+        let format = select_weather_format(toggled, raw_format, alt_format);
         let refresh_secs = cfg["refresh_secs"].as_i64().unwrap_or(1800);
         let api_base = cfg["api_base"]
             .as_str()
@@ -122,7 +138,7 @@ mod guest {
                     None
                 }
             })
-            .map(|w| segment(&format, &w.code, &w.temp_f, &w.desc, &zip))
+            .map(|w| segment(format, &w.code, &w.temp_f, &w.desc, &zip))
             .unwrap_or_default();
         Ok(Json(seg))
     }
@@ -168,5 +184,20 @@ mod tests {
         assert_eq!(w.code, "113");
         assert_eq!(w.desc, "Sunny");
         assert!(parse_wttr("{}").is_none());
+    }
+}
+
+#[cfg(test)]
+mod toggle_tests {
+    use super::select_weather_format;
+
+    #[test]
+    fn toggled_prefers_nonempty_alt() {
+        assert_eq!(
+            select_weather_format(true, "{icon} {temp_f}", "{icon} {temp_f}°F {city}"),
+            "{icon} {temp_f}°F {city}"
+        );
+        assert_eq!(select_weather_format(false, "F", "A"), "F");
+        assert_eq!(select_weather_format(true, "F", ""), "F");
     }
 }
