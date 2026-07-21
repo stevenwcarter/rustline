@@ -79,8 +79,7 @@ pub fn build_region_context(args: &RegionArgs, layout: &[String]) -> Context {
         },
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
-        // Placeholder until a later task reads the real toggles state file.
-        toggled: std::collections::BTreeSet::new(),
+        toggled: crate::toggles::read_toggles(),
     }
 }
 
@@ -129,6 +128,25 @@ mod tests {
                 .iter()
                 .all(|i| i.ipv4 != std::net::Ipv4Addr::LOCALHOST)
         );
+    }
+
+    #[test]
+    fn build_region_context_reads_toggles_from_state_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: no other in-process unit test mutates XDG_DATA_HOME (checked:
+        // only toggles.rs touches it, via its own pure-function tests that
+        // don't read the env var), so this set/remove pair can't race.
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", tmp.path());
+        }
+        std::fs::create_dir_all(tmp.path().join("rustline")).unwrap();
+        std::fs::write(tmp.path().join("rustline/toggles"), "cpu\nmemory\n").unwrap();
+        let ctx = build_region_context(&RegionArgs::default(), &[]);
+        // SAFETY: matches the set above; restores the process env for other tests.
+        unsafe {
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        assert!(ctx.toggled.contains("cpu") && ctx.toggled.contains("memory"));
     }
 
     #[test]
