@@ -1,6 +1,7 @@
 mod battery;
 mod build_context;
 mod cli;
+mod cpu;
 mod logging;
 mod memory;
 mod plugin_cmd;

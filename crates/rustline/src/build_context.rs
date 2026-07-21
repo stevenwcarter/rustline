@@ -62,7 +62,7 @@ pub fn build_region_context(args: &RegionArgs) -> Context {
         window: None,
         interfaces: read_interfaces(),
         battery: crate::battery::read_battery(),
-        cpu: None,
+        cpu: crate::cpu::read_cpu(),
         memory: crate::memory::read_memory(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
