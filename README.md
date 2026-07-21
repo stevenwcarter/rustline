@@ -5,11 +5,13 @@ pane, window, host, and system info, with zero required configuration.
 
 ## Features
 
-- Powerline-style segments (pane id, hostname, window list, cwd, load average,
-  date/time) rendered as a single static binary — no shell scripts, no
-  external statusline framework.
+- Powerline-style segments (pane id, hostname, window list, cwd, cpu, memory,
+  load average, date/time) rendered as a single static binary — no shell
+  scripts, no external statusline framework.
 - Zero-config: sensible defaults out of the box.
 - Optional TOML config to reorder widgets or tweak per-widget options.
+- Built-in `cpu` and `memory` widgets (in the default right layout) showing
+  usage percentage, human-readable sizes, and a Unicode gauge bar (`{bar}`).
 - Opt-in `lan_ip` and `tailscale_ip` widgets that show the machine's LAN and
   Tailscale IPv4 addresses.
 - Opt-in `battery` widget showing charge percentage, state, and a
@@ -53,8 +55,9 @@ With no config file, `rustline` renders:
 
 - **Left:** pane id · hostname — e.g. `0:0.0` · `myhost`
 - **Center:** window list, active window emphasized — e.g. `0* zsh  1 vim`
-- **Right:** current directory (`$HOME` abbreviated to `~`) · load average ·
-  date/time — e.g. `~/src/rustline` · `0.31 0.44 0.42` · `Mon < 2026-07-20 < 19:04`
+- **Right:** current directory (`$HOME` abbreviated to `~`) · cpu · memory ·
+  load average · date/time — e.g. `~/src/rustline` · `󰘚 37%` · `󰍛 6.2G/16G` ·
+  `0.31 0.44 0.42` · `Mon < 2026-07-20 < 19:04`
 
 ## Configuration
 
@@ -64,9 +67,10 @@ just falls back to the defaults above — `rustline` never fails to render
 because of a bad config.
 
 Widget names available for the `layout` arrays are: `pane_id`, `hostname`,
-`windows`, `cwd`, `loadavg`, `datetime`, and the opt-in `lan_ip` /
-`tailscale_ip` (see [IP address widgets](#ip-address-widgets) below) and
-`battery` (see [Battery widget](#battery-widget) below).
+`windows`, `cwd`, `cpu`, `memory` (see [CPU and memory
+widgets](#cpu-and-memory-widgets) below), `loadavg`, `datetime`, and the
+opt-in `lan_ip` / `tailscale_ip` (see [IP address widgets](#ip-address-widgets)
+below) and `battery` (see [Battery widget](#battery-widget) below).
 
 Example — reorder the right region and change the clock format:
 
@@ -125,6 +129,32 @@ right = ["battery", "cwd", "loadavg", "datetime"]
 [widgets.battery]
 format = "{icon} {percent}%"   # {icon}, {percent}, {state}
 down_format = ""               # shown when no battery (desktops); default: nothing
+```
+
+### CPU and memory widgets
+
+`cpu` and `memory` are built-in and **in the default right layout** (unlike
+the opt-in widgets above) — they show live CPU utilization and memory usage,
+each with a Unicode gauge bar.
+
+`cpu` takes a `format` (default `"{icon} {percent}%"`) with `{icon}`
+(nf-md-chip), `{percent}`, and `{bar}` placeholders. `memory` takes a `format`
+(default `"{icon} {used}/{total}"`) with `{icon}` (nf-md-memory),
+`{used}`/`{total}`/`{avail}` (human-readable binary sizes, e.g. `6.2G`),
+`{percent}`, and `{bar}` placeholders. `{bar}` is a `bar_width`-cell (default
+8) Unicode block-eighths gauge shared by both widgets. Both also take a
+`down_format` (default empty) shown on an unsupported platform or a failed
+read — same collapse-to-nothing behavior as the `battery` widget's
+`down_format`.
+
+```toml
+[widgets.cpu]
+format = "{icon} {bar} {percent}%"   # default "{icon} {percent}%"
+bar_width = 8
+
+[widgets.memory]
+format = "{icon} {used}/{total}"     # default; or "{icon} {bar} {percent}%"
+bar_width = 8
 ```
 
 ## Logging
@@ -231,7 +261,8 @@ for the full capability model, config schema, and plugin ABI.
 See the full design specs:
 [core statusline](docs/superpowers/specs/2026-07-20-rustline-tmux-statusline-design.md),
 [WASM plugins](docs/superpowers/specs/2026-07-20-rustline-wasm-plugins-design.md),
-[IP widgets](docs/superpowers/specs/2026-07-20-rustline-ip-widgets-design.md).
+[IP widgets](docs/superpowers/specs/2026-07-20-rustline-ip-widgets-design.md),
+[CPU/memory widgets](docs/superpowers/specs/2026-07-21-rustline-cpu-memory-widgets-design.md).
 
 ## License
 
