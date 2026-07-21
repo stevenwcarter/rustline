@@ -1725,10 +1725,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustline-abi"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "rustline-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "rustline-abi",
  "serde",
  "serde_json",
  "thiserror 2.0.19",

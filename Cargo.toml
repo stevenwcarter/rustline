@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/rustline-core", "crates/rustline", "crates/rustline-wasm"]
+members = [
+    "crates/rustline-abi",
+    "crates/rustline-core",
+    "crates/rustline",
+    "crates/rustline-wasm",
+]
 exclude = ["plugins/weather"]
 
 [workspace.package]
