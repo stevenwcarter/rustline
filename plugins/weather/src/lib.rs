@@ -155,12 +155,14 @@ mod guest {
                 write_cache(&now, &zip, &w);
                 Ok(segment(&format, &w.code, &w.temp_f, &w.desc, &zip))
             }
-            // 3) fetch failed: fall back to stale cache if any, else empty
+            // 3) fetch failed: fall back to stale cache if any *and* it's for
+            // the currently-configured zip, else empty (never show one zip's
+            // weather under another zip's label).
             None => match cached {
-                Some((_, _, temp_f, code, desc)) => {
+                Some((_, c_zip, temp_f, code, desc)) if c_zip == zip => {
                     Ok(segment(&format, &code, &temp_f, &desc, &zip))
                 }
-                None => Ok("[]".to_string()),
+                _ => Ok("[]".to_string()),
             },
         }
     }
