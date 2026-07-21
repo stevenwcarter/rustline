@@ -1,17 +1,37 @@
 #![cfg(feature = "wasm-e2e")]
-//! Positive end-to-end proof that plugin registration is actually wired into
-//! the `rustline` binary: renders a real `weather.wasm` through
-//! `main.rs -> register_plugins -> WasmWidget -> guest` and asserts the
-//! cached temperature appears in the rendered output.
-//!
-//! No network: a fresh cache is pre-seeded so the guest serves it without
-//! ever calling `rl_http_get`. Run via `just test-wasm` (needs
-//! `just build-weather` first).
+//! Positive end-to-end proof that plugin registration is wired into the
+//! `rustline` binary: renders a real `weather.wasm` through
+//! `main.rs -> register_plugins -> WasmWidget -> guest`, which makes one
+//! capability-allowed fetch to an in-process mock and renders the temp.
+//! Run via `just test-wasm` (needs `just build-weather` first).
 
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::process::Command;
 
+const WTTR_BODY: &str = r#"{"current_condition":[{"temp_F":"72","weatherCode":"113","weatherDesc":[{"value":"Sunny"}]}]}"#;
+
+fn spawn_mock() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                WTTR_BODY.len(),
+                WTTR_BODY
+            );
+            let _ = s.write_all(resp.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
 #[test]
-fn render_right_with_weather_plugin_renders_cached_temp() {
+fn render_right_with_weather_plugin_fetches_and_renders_temp() {
     let wasm_src = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../plugins/weather/target/wasm32-unknown-unknown/release/weather.wasm"
@@ -20,6 +40,7 @@ fn render_right_with_weather_plugin_renders_cached_temp() {
         panic!("run `just build-weather` first");
     }
 
+    let base = spawn_mock();
     let tmp = tempfile::tempdir().unwrap();
     let cfg_home = tmp.path().join("cfg");
     let data_home = tmp.path().join("data");
@@ -28,33 +49,23 @@ fn render_right_with_weather_plugin_renders_cached_temp() {
     std::fs::create_dir_all(&cfg_dir).unwrap();
     std::fs::write(
         cfg_dir.join("config.toml"),
-        r#"[layout]
+        format!(
+            r#"[layout]
 right = ["weather"]
 [plugins.weather]
-allowed_urls = []
+allowed_urls = ["http://127.0.0.1:*/*"]
 [plugins.weather.options]
 zip = "48183"
-format = "{temp_f}"
-"#,
+format = "{{temp_f}}"
+api_base = "{base}"
+"#
+        ),
     )
     .unwrap();
 
     let plugin_dir = data_home.join("rustline").join("plugins");
     std::fs::create_dir_all(&plugin_dir).unwrap();
     std::fs::copy(wasm_src, plugin_dir.join("weather.wasm")).unwrap();
-
-    // Seed a fresh cache (within the plugin's refresh window) so the guest
-    // serves it directly, with no HTTP call.
-    let state_dir = data_home.join("rustline").join("state").join("weather");
-    std::fs::create_dir_all(&state_dir).unwrap();
-    let now = chrono::Local::now().to_rfc3339();
-    std::fs::write(
-        state_dir.join("weather.json"),
-        format!(
-            r#"{{"fetched_at":"{now}","zip":"48183","temp_f":"72","code":"113","desc":"Sunny"}}"#
-        ),
-    )
-    .unwrap();
 
     let out = Command::new(env!("CARGO_BIN_EXE_rustline"))
         .args(["render", "right"])
@@ -71,6 +82,6 @@ format = "{temp_f}"
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("72"),
-        "cached temp rendered through register_plugins -> WasmWidget -> guest: {stdout}"
+        "temp rendered via register_plugins -> WasmWidget -> guest -> cached fetch: {stdout}"
     );
 }

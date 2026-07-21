@@ -71,23 +71,25 @@ fn build_widget(api_base: &str, state_root: std::path::PathBuf, zip: &str) -> Wa
     WasmWidget::new(plugin, options)
 }
 
-/// Seed a cache entry directly in the plugin's state dir (`<root>/weather/weather.json`).
-/// Field names match what the guest writes (`plugins/weather/src/lib.rs`).
-fn seed_cache(state_root: &std::path::Path, fetched_at: &str, zip: &str, temp_f: &str) {
-    let dir = state_root.join("weather");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("weather.json"),
-        serde_json::json!({
-            "fetched_at": fetched_at,
-            "zip": zip,
-            "temp_f": temp_f,
-            "code": "113",
-            "desc": "Sunny",
-        })
-        .to_string(),
-    )
-    .unwrap();
+/// A mock that serves exactly one successful response then closes its
+/// listener, so a later fetch to the same URL fails (connection refused).
+fn spawn_mock_once() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        if let Some(Ok(mut s)) = listener.incoming().next() {
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                WTTR_BODY.len(),
+                WTTR_BODY
+            );
+            let _ = s.write_all(resp.as_bytes());
+        }
+        // listener dropped here -> port closed
+    });
+    format!("http://{addr}")
 }
 
 #[test]
@@ -111,33 +113,36 @@ fn caches_within_refresh_window_one_http_call() {
 }
 
 #[test]
-fn stale_cache_used_when_fetch_fails() {
+fn stale_cache_served_when_refresh_fails() {
     let state = tempfile::tempdir().unwrap();
-    // seed a stale cache directly in the plugin's state dir
-    seed_cache(state.path(), "2026-07-20T09:00:00-04:00", "48183", "55");
-
-    // point at a dead port so the fetch fails
-    let w = build_widget("http://127.0.0.1:1", state.path().to_path_buf(), "48183");
-    let s = w.render(&ctx_now("2026-07-20T15:00:00-04:00")); // 6h later -> stale, refetch attempted
-    assert!(s[0].text.contains("55"), "fell back to stale cache: {s:?}");
+    let base = spawn_mock_once();
+    let w = build_widget(&base, state.path().to_path_buf(), "48183");
+    // T0: fetch + cache (temp 72)
+    let s1 = w.render(&ctx_now("2026-07-20T12:00:00-04:00"));
+    assert!(s1[0].text.contains("72"), "first render fetched: {s1:?}");
+    // 6h later: cache expired, endpoint now dead -> host serves stale
+    let s2 = w.render(&ctx_now("2026-07-20T18:00:00-04:00"));
+    assert!(
+        s2[0].text.contains("72"),
+        "stale body served on refresh failure: {s2:?}"
+    );
 }
 
 #[test]
-fn cross_zip_fetch_fails_renders_empty() {
+fn cross_zip_isolation_no_leak() {
     let state = tempfile::tempdir().unwrap();
-    // seed a stale cache for zip 48183 (temp 55)...
-    seed_cache(state.path(), "2026-07-20T09:00:00-04:00", "48183", "55");
-
-    // ...but render a DIFFERENT zip whose fetch fails (dead port). The guest must
-    // NOT fall back to the 48183 cache under the 90210 label -> empty segments.
-    let w = build_widget("http://127.0.0.1:1", state.path().to_path_buf(), "90210");
-    let s = w.render(&ctx_now("2026-07-20T15:00:00-04:00"));
+    let base = spawn_mock(Arc::new(AtomicUsize::new(0)));
+    // widget A (48183) fetches + caches into the shared state root
+    let a = build_widget(&base, state.path().to_path_buf(), "48183");
+    let sa = a.render(&ctx_now("2026-07-20T12:00:00-04:00"));
+    assert!(sa[0].text.contains("72"));
+    // widget B (90210) points at a dead endpoint but shares the state root.
+    // Its URL (different zip AND host) has no cache entry -> empty. It must
+    // never surface A's cached entry.
+    let b = build_widget("http://127.0.0.1:1", state.path().to_path_buf(), "90210");
+    let sb = b.render(&ctx_now("2026-07-20T12:05:00-04:00"));
     assert!(
-        s.is_empty(),
-        "cross-zip stale fallback must not leak the 48183 cache: {s:?}"
-    );
-    assert!(
-        !s.iter().any(|seg| seg.text.contains("55")),
-        "must not show the other zip's temp: {s:?}"
+        sb.is_empty(),
+        "no entry for 90210 + failed fetch -> empty: {sb:?}"
     );
 }
