@@ -22,6 +22,7 @@ ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 extism = { version = "1", default-features = false, features = [
     "wasmtime-default-features",
 ] }
+chrono = { version = "0.4", default-features = false }
 
 [features]
 # Opt-in end-to-end tests that load the real `weather.wasm` (needs the wasm

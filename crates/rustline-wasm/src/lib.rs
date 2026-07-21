@@ -5,6 +5,7 @@
 
 pub mod abi;
 pub mod allow;
+pub mod cache;
 pub mod capability;
 pub mod fetch;
 pub mod host;
