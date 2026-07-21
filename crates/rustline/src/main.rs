@@ -6,6 +6,7 @@ mod logging;
 mod memory;
 mod plugin_cmd;
 mod tmux_conf;
+mod toggles;
 
 use std::env;
 use std::path::PathBuf;
