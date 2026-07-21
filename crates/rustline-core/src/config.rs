@@ -111,6 +111,46 @@ pub struct ThemeConfig {
     pub bar_bg: Option<Color>,
 }
 
+/// Per-plugin configuration, keyed by plugin name in [`Config::plugins`].
+///
+/// Capability fields (`allowed_urls`, `allowed_paths`, `max_state_bytes`) are
+/// enforced by the WASM host, never by the guest. `options` is opaque to the
+/// host and forwarded to the plugin verbatim.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PluginConfig {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub allowed_urls: Vec<String>,
+    #[serde(default)]
+    pub allowed_paths: Vec<String>,
+    #[serde(default = "default_max_state_bytes")]
+    pub max_state_bytes: u64,
+    #[serde(default = "empty_table")]
+    pub options: Value,
+}
+
+/// 50 MB — the default per-plugin state-directory quota.
+fn default_max_state_bytes() -> u64 {
+    52_428_800
+}
+
+fn empty_table() -> Value {
+    Value::Table(toml::map::Map::new())
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            source: None,
+            allowed_urls: Vec::new(),
+            allowed_paths: Vec::new(),
+            max_state_bytes: default_max_state_bytes(),
+            options: empty_table(),
+        }
+    }
+}
+
 /// The full user-facing configuration, loaded from a `rustline.toml`.
 ///
 /// Every field, and every nested field, is `#[serde(default)]`, so a config
@@ -125,10 +165,14 @@ pub struct Config {
     pub theme: ThemeConfig,
     #[serde(default)]
     pub widgets: WidgetOpts,
-    /// Plugin config tables, keyed by `"owner/repo"`, kept as raw TOML for
-    /// future WASM plugins to interpret for themselves.
+    /// Directory to discover `*.wasm` plugins from; overrides the default
+    /// `$XDG_DATA_HOME/rustline/plugins`. A `--plugin-dir` CLI flag overrides
+    /// this in turn.
     #[serde(default)]
-    pub plugins: HashMap<String, Value>,
+    pub plugin_dir: Option<String>,
+    /// Per-plugin config, keyed by plugin name.
+    #[serde(default)]
+    pub plugins: HashMap<String, PluginConfig>,
 }
 
 impl Config {
@@ -209,32 +253,57 @@ format = "%H:%M"
     }
 
     #[test]
-    fn plugins_table_retained() {
+    fn plugin_config_typed_parse_with_defaults() {
         let toml = r#"
-[plugins."owner/repo"]
-key = "value"
+plugin_dir = "~/.local/share/rustline/plugins"
+[plugins.weather]
+source = "steve/rustline-weather"
+allowed_urls = ["https://wttr.in/*"]
+[plugins.weather.options]
+zip = "48183"
+format = "{icon} {temp_f}°F"
 "#;
         let c: Config = toml::from_str(toml).unwrap();
-        assert!(c.plugins.contains_key("owner/repo"));
+        assert_eq!(
+            c.plugin_dir.as_deref(),
+            Some("~/.local/share/rustline/plugins")
+        );
+        let w = c.plugins.get("weather").expect("weather entry");
+        assert_eq!(w.source.as_deref(), Some("steve/rustline-weather"));
+        assert_eq!(w.allowed_urls, vec!["https://wttr.in/*".to_string()]);
+        assert!(w.allowed_paths.is_empty());
+        // omitted -> default 50 MB
+        assert_eq!(w.max_state_bytes, 52_428_800);
+        assert_eq!(w.options.get("zip").and_then(Value::as_str), Some("48183"));
     }
 
     #[test]
-    fn config_toml_roundtrip_preserves_plugin_entry() {
+    fn plugin_config_roundtrip_preserves_options() {
         let src = r#"
-[plugins."owner/repo"]
-key = "value"
+[plugins.weather]
+allowed_urls = ["https://wttr.in/*"]
+max_state_bytes = 100
+[plugins.weather.options]
+zip = "48183"
 "#;
         let c: Config = toml::from_str(src).unwrap();
-        // Serialize the full Config back out and reparse: the plugin table (kept
-        // as raw TOML `Value`) must survive the round-trip intact, key and all.
         let serialized = toml::to_string(&c).unwrap();
         let back: Config = toml::from_str(&serialized).unwrap();
-        assert!(back.plugins.contains_key("owner/repo"));
-        assert_eq!(
-            back.plugins["owner/repo"]
-                .get("key")
-                .and_then(Value::as_str),
-            Some("value")
-        );
+        let w = back.plugins.get("weather").unwrap();
+        assert_eq!(w.max_state_bytes, 100);
+        assert_eq!(w.allowed_urls, vec!["https://wttr.in/*".to_string()]);
+        assert_eq!(w.options.get("zip").and_then(Value::as_str), Some("48183"));
+    }
+
+    #[test]
+    fn malformed_plugins_table_falls_back_to_default() {
+        let dir = std::env::temp_dir().join("rustline_test_badplugins");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        // max_state_bytes must be an integer; a string makes the table invalid
+        std::fs::write(&p, "[plugins.weather]\nmax_state_bytes = \"lots\"\n").unwrap();
+        let c = Config::load(&p);
+        assert!(c.plugins.is_empty());
+        assert_eq!(c.layout.left, Config::default().layout.left);
     }
 }
