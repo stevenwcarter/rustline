@@ -1,3 +1,4 @@
+mod battery;
 mod build_context;
 mod cli;
 mod logging;
