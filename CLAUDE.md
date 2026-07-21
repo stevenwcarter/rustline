@@ -36,8 +36,9 @@ Cargo **workspace**, edition 2024, `resolver = "2"`:
 workspace member (own `Cargo.lock`, built for `wasm32-unknown-unknown`):
 
 - `plugins/weather` — the worked example: a Nerd-Font condition icon + °F for a
-  configured zip code from wttr.in, caching to its state dir so it fetches at
-  most once per `refresh_secs`.
+  configured zip code from wttr.in, fetched via the host's TTL-cached GET
+  (`rl_http_get_cached`) so it hits the network at most once per `refresh_secs`
+  (the host owns the cache; the guest no longer manages its own state dir).
 
 ### Render pipeline
 

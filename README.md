@@ -10,6 +10,8 @@ pane, window, host, and system info, with zero required configuration.
   external statusline framework.
 - Zero-config: sensible defaults out of the box.
 - Optional TOML config to reorder widgets or tweak per-widget options.
+- Opt-in `lan_ip` and `tailscale_ip` widgets that show the machine's LAN and
+  Tailscale IPv4 addresses.
 - Instant refresh on pane/window switch via tmux hooks (no waiting for the
   next `status-interval` tick).
 
@@ -60,7 +62,8 @@ just falls back to the defaults above — `rustline` never fails to render
 because of a bad config.
 
 Widget names available for the `layout` arrays are: `pane_id`, `hostname`,
-`windows`, `cwd`, `loadavg`, `datetime`.
+`windows`, `cwd`, `loadavg`, `datetime`, and the opt-in `lan_ip` /
+`tailscale_ip` (see [IP address widgets](#ip-address-widgets) below).
 
 Example — reorder the right region and change the clock format:
 
@@ -74,6 +77,32 @@ format = "%H:%M"
 
 Run `rustline print-config` to print the fully-resolved effective
 configuration (your overrides layered onto the defaults) as TOML.
+
+### IP address widgets
+
+Two opt-in built-ins show the machine's addresses: `lan_ip` (your LAN IPv4) and
+`tailscale_ip` (your Tailscale IPv4, the `100.64.0.0/10` address). Neither is in
+the default layout — add either to a `layout` region to use it.
+
+Each takes a `format` where `{ip}` is replaced by the address and any
+surrounding label or glyph is printed verbatim, and a `down_format` shown when
+the address isn't available (default empty — the widget then renders nothing
+rather than a stale or fake address). `lan_ip` auto-picks the first private,
+non-virtual interface (container/VM bridges like `docker0`/`virbr0` and the
+Tailscale interface are skipped); set `interface` to force a specific NIC.
+
+```toml
+[layout]
+right = ["lan_ip", "tailscale_ip", "cwd", "loadavg", "datetime"]
+
+[widgets.lan_ip]
+format = "LAN {ip}"        # {ip} -> 192.168.1.20; or a glyph, e.g. "󰈀 {ip}"
+# interface = "wlp3s0"     # optional; omit to auto-pick
+
+[widgets.tailscale_ip]
+format = "TS {ip}"
+down_format = "TS off"     # shown when Tailscale is down; omit to render nothing
+```
 
 ## Previewing on the command line
 
@@ -155,7 +184,8 @@ for the full capability model, config schema, and plugin ABI.
 
 See the full design specs:
 [core statusline](docs/superpowers/specs/2026-07-20-rustline-tmux-statusline-design.md),
-[WASM plugins](docs/superpowers/specs/2026-07-20-rustline-wasm-plugins-design.md).
+[WASM plugins](docs/superpowers/specs/2026-07-20-rustline-wasm-plugins-design.md),
+[IP widgets](docs/superpowers/specs/2026-07-20-rustline-ip-widgets-design.md).
 
 ## License
 
