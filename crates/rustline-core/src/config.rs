@@ -152,6 +152,8 @@ pub struct BatteryOpts {
     pub format: String,
     #[serde(default)]
     pub down_format: String,
+    #[serde(default)]
+    pub alt_format: String,
 }
 
 impl Default for BatteryOpts {
@@ -159,6 +161,7 @@ impl Default for BatteryOpts {
         Self {
             format: default_battery_format(),
             down_format: String::new(),
+            alt_format: String::new(),
         }
     }
 }
@@ -209,6 +212,8 @@ pub struct MemoryOpts {
     pub format: String,
     #[serde(default)]
     pub down_format: String,
+    #[serde(default)]
+    pub alt_format: String,
     #[serde(default = "default_bar_width")]
     pub bar_width: usize,
 }
@@ -218,6 +223,7 @@ impl Default for MemoryOpts {
         Self {
             format: default_memory_format(),
             down_format: String::new(),
+            alt_format: String::new(),
             bar_width: default_bar_width(),
         }
     }

@@ -84,6 +84,7 @@ impl Registry {
             Box::new(move || {
                 Box::new(BatteryWidget {
                     format: battery.format.clone(),
+                    alt_format: battery.alt_format.clone(),
                     down_format: battery.down_format.clone(),
                 })
             }),
@@ -108,6 +109,7 @@ impl Registry {
             Box::new(move || {
                 Box::new(MemoryWidget {
                     format: memory.format.clone(),
+                    alt_format: memory.alt_format.clone(),
                     down_format: memory.down_format.clone(),
                     bar_width: memory.bar_width,
                 })
