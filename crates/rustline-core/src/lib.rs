@@ -12,6 +12,6 @@ pub use ansi::tmux_to_ansi;
 pub use assemble::{assign_palette, render_named_region, render_window};
 pub use config::{Config, LogConfig, PluginConfig};
 pub use context::{Battery, BatteryState, Context, CpuUsage, MemInfo, NetIface, WindowCtx};
-pub use render::{Direction, Theme, render_region};
+pub use render::{Direction, RANGE_NAME_MAX_BYTES, Theme, render_region};
 pub use segment::{Color, Segment, Style};
 pub use widget::{Registry, Widget};

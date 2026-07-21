@@ -192,7 +192,9 @@ tracked globally (not per pane/session) in a small state file under
 binding invokes. WASM plugins can support this too: a plugin is clickable when
 its name is 15 bytes or less (tmux's status-range name limit), and it decides
 for itself whether to honor a click by checking `context.toggled` — the
-bundled `weather` example does this via `options.alt_format`.
+bundled `weather` example does this via `options.alt_format`. Since a plugin's
+name becomes a tmux `range=user|<name>` argument verbatim, pick one that is
+≤ 15 bytes, isn't the reserved name `window`, and sticks to `[A-Za-z0-9_-]`.
 
 ## Logging
 

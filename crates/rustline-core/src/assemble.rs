@@ -1,7 +1,7 @@
 //! Region assembly: turns a set of widget names plus a [`Context`] into the
 //! rendered tmux status-line string for one region, gluing together
 //! [`Registry`] resolution, per-segment palette assignment, and
-//! [`render_region`].
+//! [`render_region`](crate::render::render_region).
 
 use crate::render::{Direction, RangeGroup, Theme, render_region_ranged, render_window_pill};
 use crate::{Context, Registry, Segment, Widget};
@@ -86,7 +86,8 @@ pub fn render_named_region(
 }
 
 /// Render the single `windows` segment as a rounded pill. Unlike
-/// [`render_named_region`], this does not go through [`render_region`]'s pointed
+/// [`render_named_region`], this does not go through
+/// [`render_region`](crate::render::render_region)'s pointed
 /// separators or `assign_palette`: the window list owns a dedicated rounded-cap
 /// pill ([`render_window_pill`]), colored by the theme from the window's
 /// current/inactive state. A panicking or absent window degrades to `""`.

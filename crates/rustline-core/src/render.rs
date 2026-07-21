@@ -168,6 +168,12 @@ pub fn render_region(dir: Direction, segments: &[Segment], theme: &Theme) -> Str
     out
 }
 
+/// tmux's `range=user|<name>` argument caps `<name>` at this many bytes. The
+/// single source of truth for that limit: `widgets::toggle::clickable_range`
+/// and `rustline-wasm`'s plugin-name gate both compare against this constant
+/// rather than a hardcoded `15`, so the limit only needs to change in one place.
+pub const RANGE_NAME_MAX_BYTES: usize = 15;
+
 /// A widget's rendered segments plus its optional clickable range name. The
 /// assemble layer builds these so `render_region_ranged` can bracket clickable
 /// widgets in `#[range=user|NAME]…#[norange]` while keeping every other byte of
@@ -488,5 +494,23 @@ mod tests {
     #[test]
     fn ranged_empty_is_empty() {
         assert_eq!(render_region_ranged(Direction::Left, &[], &theme()), "");
+    }
+
+    #[test]
+    fn ranged_multisegment_widget_keeps_internal_separator_inside_range() {
+        // A single clickable widget that renders MORE THAN ONE segment (e.g. a
+        // future multi-part widget) must keep its own internal separator
+        // between the range-open and range-close tokens, so the whole widget
+        // — including the glyph joining its parts — is one clickable range.
+        let groups = vec![group(Some("multi"), vec![seg("a", 31), seg("b", 31)])];
+        let out = render_region_ranged(Direction::Left, &groups, &theme());
+        let open = out.find("#[range=user|multi]").unwrap();
+        let close = out.find("#[norange]").unwrap();
+        // same bg (31, 31) => the two segments are joined by a SOFT separator.
+        let sep = out.find(&theme().soft_left).unwrap();
+        assert!(
+            open < sep && sep < close,
+            "internal separator inside range: {out}"
+        );
     }
 }

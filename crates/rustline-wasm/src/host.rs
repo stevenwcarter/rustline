@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use extism::{Manifest, PTR, PluginBuilder, UserData, Wasm, host_fn};
-use rustline_core::{Context, Segment, Widget};
+use rustline_core::{Context, RANGE_NAME_MAX_BYTES, Segment, Widget};
 
 use crate::abi::{RenderInput, parse_render_output};
 use crate::capability::CapabilityCtx;
@@ -142,16 +142,25 @@ impl Widget for WasmWidget {
     }
 
     fn range_name(&self) -> Option<&str> {
-        // A plugin is clickable when its name fits tmux's 15-byte user-range
+        // A plugin is clickable when its name fits tmux's user-range byte
         // limit; the guest decides whether to honor `context.toggled`.
-        (self.name.len() <= 15).then_some(&*self.name)
+        plugin_range_name(&self.name)
     }
+}
+
+/// A plugin's clickable range name: `Some(name)` when it fits tmux's
+/// [`RANGE_NAME_MAX_BYTES`]-byte `range=user|X` limit; else `None`. Pulled out
+/// of `WasmWidget::range_name` so the boundary can be pinned by a hermetic
+/// unit test without needing a real `extism::Plugin` instance.
+fn plugin_range_name(name: &str) -> Option<&str> {
+    (name.len() <= RANGE_NAME_MAX_BYTES).then_some(name)
 }
 
 #[cfg(test)]
 mod tests {
     use rustline_core::{Config, Context, Registry};
 
+    use super::plugin_range_name;
     use crate::abi::{RenderInput, parse_render_output};
 
     /// A minimal `Context` with `toggled` set to `{name}`, for pinning the
@@ -203,6 +212,19 @@ mod tests {
         assert!(parse_render_output("not json").is_empty());
         let good = r#"[{"text":"x","style":{"fg":null,"bg":null,"bold":false}}]"#;
         assert_eq!(parse_render_output(good).len(), 1);
+    }
+
+    #[test]
+    fn plugin_range_name_pins_the_15_byte_boundary() {
+        // Gives the wasm side its own boundary pin, independent of the
+        // rustline-core one, without needing a real `extism::Plugin`.
+        let fifteen = "fifteen_bytes__";
+        assert_eq!(fifteen.len(), 15);
+        assert_eq!(plugin_range_name(fifteen), Some(fifteen));
+
+        let sixteen = "this_name_is_16b";
+        assert_eq!(sixteen.len(), 16);
+        assert_eq!(plugin_range_name(sixteen), None);
     }
 
     #[test]

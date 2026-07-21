@@ -409,6 +409,10 @@ member; the `weather` example demonstrates this via `options.alt_format`. Any
 widget or plugin name longer than 15 bytes is simply not clickable (tmux's
 `range=user|X` byte cap — see tmux integration model above).
 
+A plugin author should pick a name (the `.wasm` stem) that is ≤ 15 bytes,
+avoids the reserved name `window`, and sticks to `[A-Za-z0-9_-]`, since it
+becomes a tmux `range=user|<name>` argument verbatim.
+
 **Window pill (`[theme]`):** the window list renders as a rounded pill (see
 Render pipeline). Six optional `[theme]` fields override the defaults — active
 pill in the accent color, inactive pills gray, rounded caps:

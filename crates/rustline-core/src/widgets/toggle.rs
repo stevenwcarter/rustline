@@ -1,7 +1,7 @@
 //! Shared click-toggle helpers: which format string is active given the
 //! toggle set, and whether a widget is a clickable range.
 
-use crate::Context;
+use crate::{Context, RANGE_NAME_MAX_BYTES};
 
 /// The active format string for a widget: its `alt` view when the widget has a
 /// non-empty `alt` AND its `name` is in `ctx.toggled`, else its normal `format`.
@@ -19,10 +19,10 @@ pub(crate) fn active_format<'a>(
 }
 
 /// A widget's clickable range name: `Some(name)` when it has a non-empty `alt`
-/// view AND `name` fits tmux's 15-byte `range=user|X` limit; else `None` (the
-/// widget is not clickable and emits no range markup).
+/// view AND `name` fits tmux's [`RANGE_NAME_MAX_BYTES`]-byte `range=user|X`
+/// limit; else `None` (the widget is not clickable and emits no range markup).
 pub(crate) fn clickable_range<'a>(name: &'a str, alt: &str) -> Option<&'a str> {
-    if !alt.is_empty() && name.len() <= 15 {
+    if !alt.is_empty() && name.len() <= RANGE_NAME_MAX_BYTES {
         Some(name)
     } else {
         None
