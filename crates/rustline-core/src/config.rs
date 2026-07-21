@@ -159,6 +159,44 @@ pub struct ThemeConfig {
     pub bar_bg: Option<Color>,
 }
 
+/// Logging configuration: per-sink level thresholds and an optional log-file
+/// path override. Level strings are parsed leniently by the binary — an
+/// unknown value falls back to that sink's default rather than failing the
+/// whole config parse, so `Config::load` stays total (invariant #3). Do NOT
+/// promote these to an enum: a `#[derive(Deserialize)]` enum would make a
+/// typo in `file_level` discard the entire config (layout, theme, plugins).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LogConfig {
+    /// File-sink level: off|error|warn|info|debug|trace. Default "info".
+    #[serde(default = "default_file_level")]
+    pub file_level: String,
+    /// stderr-sink level: off|error|warn|info|debug|trace. Default "error".
+    #[serde(default = "default_stderr_level")]
+    pub stderr_level: String,
+    /// Log-file path override (`~/` expanded by the binary). Default:
+    /// `$XDG_DATA_HOME/rustline/rustline.log`.
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+fn default_file_level() -> String {
+    "info".into()
+}
+
+fn default_stderr_level() -> String {
+    "error".into()
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            file_level: default_file_level(),
+            stderr_level: default_stderr_level(),
+            file: None,
+        }
+    }
+}
+
 /// Per-plugin configuration, keyed by plugin name in [`Config::plugins`].
 ///
 /// Capability fields (`allowed_urls`, `allowed_paths`, `max_state_bytes`) are
@@ -221,6 +259,9 @@ pub struct Config {
     /// Per-plugin config, keyed by plugin name.
     #[serde(default)]
     pub plugins: HashMap<String, PluginConfig>,
+    /// File + stderr logging configuration.
+    #[serde(default)]
+    pub log: LogConfig,
 }
 
 impl Config {
@@ -228,15 +269,31 @@ impl Config {
     /// error both yield [`Config::default`] (the latter after logging a
     /// warning), so the status line keeps rendering.
     pub fn load(path: &Path) -> Config {
+        let (config, warning) = Config::load_reporting(path);
+        if let Some(msg) = warning {
+            tracing::warn!("{msg}");
+        }
+        config
+    }
+
+    /// Like [`Config::load`] but *returns* the failure message instead of
+    /// logging it, so a caller can install its logging subscriber first and
+    /// then emit the warning into it. `None` = success or an absent file
+    /// (absence is not a warning); `Some(msg)` = a present-but-unparseable
+    /// file (config defaulted).
+    pub fn load_reporting(path: &Path) -> (Config, Option<String>) {
         let Ok(text) = fs::read_to_string(path) else {
-            return Config::default();
+            return (Config::default(), None);
         };
         match toml::from_str(&text) {
-            Ok(config) => config,
-            Err(error) => {
-                tracing::warn!(%error, path = %path.display(), "invalid config, using defaults");
-                Config::default()
-            }
+            Ok(config) => (config, None),
+            Err(error) => (
+                Config::default(),
+                Some(format!(
+                    "invalid config at {}: {error}; using defaults",
+                    path.display()
+                )),
+            ),
         }
     }
 
@@ -260,6 +317,8 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn default_layout_matches_spec() {
@@ -380,5 +439,46 @@ down_format = "TS off"
         assert_eq!(c.widgets.lan_ip.down_format, "");
         assert_eq!(c.widgets.lan_ip.interface, None);
         assert_eq!(c.widgets.tailscale_ip.format, "{ip}");
+    }
+
+    #[test]
+    fn log_config_defaults_when_absent() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.log.file_level, "info");
+        assert_eq!(c.log.stderr_level, "error");
+        assert_eq!(c.log.file, None);
+    }
+
+    #[test]
+    fn log_config_partial_keeps_other_defaults() {
+        let c: Config = toml::from_str("[log]\nfile_level = \"debug\"\n").unwrap();
+        assert_eq!(c.log.file_level, "debug");
+        assert_eq!(c.log.stderr_level, "error"); // untouched
+        assert_eq!(c.log.file, None);
+    }
+
+    #[test]
+    fn load_reporting_ok_has_no_warning() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "[log]\nfile_level = \"trace\"\n").unwrap();
+        let (cfg, warn) = Config::load_reporting(f.path());
+        assert_eq!(cfg.log.file_level, "trace");
+        assert!(warn.is_none());
+    }
+
+    #[test]
+    fn load_reporting_bad_file_defaults_with_warning() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "this is = = not valid toml [[[").unwrap();
+        let (cfg, warn) = Config::load_reporting(f.path());
+        assert_eq!(cfg.log.file_level, "info"); // fell back to default
+        assert!(warn.is_some());
+    }
+
+    #[test]
+    fn load_reporting_absent_file_is_not_a_warning() {
+        let (cfg, warn) = Config::load_reporting(Path::new("/no/such/rustline/config.toml"));
+        assert_eq!(cfg.log.file_level, "info");
+        assert!(warn.is_none());
     }
 }
