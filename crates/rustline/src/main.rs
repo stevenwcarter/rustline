@@ -1,10 +1,10 @@
 mod build_context;
 mod cli;
+mod logging;
 mod plugin_cmd;
 mod tmux_conf;
 
 use std::env;
-use std::io;
 use std::path::PathBuf;
 
 use build_context::{build_region_context, build_window_context};
@@ -13,7 +13,6 @@ use cli::{Cli, Command, Render};
 use rustline_core::{
     Config, Direction, Registry, render_named_region, render_window, tmux_to_ansi,
 };
-use tracing_subscriber::{EnvFilter, fmt};
 
 /// Print a rendered region to stdout: as ANSI-coloured text (with a trailing
 /// reset and newline, for terminal preview) when `preview` is set, otherwise as
@@ -49,13 +48,14 @@ fn config_path() -> PathBuf {
 }
 
 fn main() {
-    // This CLI's stdout IS the tmux status line, so keep it quiet by
-    // default; logs go to stderr, never stdout.
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-    fmt().with_env_filter(filter).with_writer(io::stderr).init();
-
     let cli = Cli::parse();
-    let cfg = Config::load(&config_path());
+    // Load config first so logging can honor `[log]`; defer the load-failure
+    // warning until the subscriber exists (else it would be dropped).
+    let (cfg, load_warning) = Config::load_reporting(&config_path());
+    logging::init(&cfg.log, cli.verbose);
+    if let Some(msg) = load_warning {
+        tracing::warn!("{msg}");
+    }
     let theme = cfg.to_theme();
 
     match cli.command {

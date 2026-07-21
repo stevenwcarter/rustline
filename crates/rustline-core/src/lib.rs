@@ -10,7 +10,7 @@ pub mod widgets;
 
 pub use ansi::tmux_to_ansi;
 pub use assemble::{assign_palette, render_named_region, render_window};
-pub use config::{Config, PluginConfig};
+pub use config::{Config, LogConfig, PluginConfig};
 pub use context::{Context, NetIface, WindowCtx};
 pub use render::{Direction, Theme, render_region};
 pub use segment::{Color, Segment, Style};
