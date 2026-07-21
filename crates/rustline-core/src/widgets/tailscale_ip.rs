@@ -36,6 +36,8 @@ mod tests {
             window: None,
             interfaces: ifaces,
             battery: None,
+            cpu: None,
+            memory: None,
             os: String::new(),
             arch: String::new(),
         }

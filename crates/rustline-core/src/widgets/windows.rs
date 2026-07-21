@@ -38,6 +38,8 @@ mod tests {
             window: win,
             interfaces: Vec::new(),
             battery: None,
+            cpu: None,
+            memory: None,
             os: String::new(),
             arch: String::new(),
         }
