@@ -135,6 +135,21 @@ mod tests {
             }),
             "\u{f0082}"
         );
+        // Exact >=90 boundary: 90 is in-bucket, 89 drops to the next (spec §8).
+        assert_eq!(
+            battery_icon(&Battery {
+                percent: 90,
+                state: BatteryState::Discharging
+            }),
+            "\u{f0082}"
+        );
+        assert_eq!(
+            battery_icon(&Battery {
+                percent: 89,
+                state: BatteryState::Discharging
+            }),
+            "\u{f0080}"
+        );
         assert_eq!(
             battery_icon(&Battery {
                 percent: 70,

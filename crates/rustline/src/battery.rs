@@ -141,6 +141,12 @@ mod tests {
 
         let charged = " -InternalBattery-0 (id=1)\t100%; charged; 0:00 remaining present: true\n";
         assert_eq!(parse_pmset(charged).unwrap().state, Full);
+
+        // "finishing charge" (topping off on AC) maps to Charging (spec §4).
+        let finishing =
+            " -InternalBattery-0 (id=1)\t98%; finishing charge; 0:04 remaining present: true\n";
+        assert_eq!(parse_pmset(finishing).unwrap().percent, 98);
+        assert_eq!(parse_pmset(finishing).unwrap().state, Charging);
     }
 
     #[test]
