@@ -21,7 +21,7 @@ use crate::Config;
 use crate::widget::Registry;
 
 impl Registry {
-    /// Build a [`Registry`] pre-populated with all six built-in widgets,
+    /// Build a [`Registry`] pre-populated with all eight built-in widgets,
     /// configuring the ones with options (`datetime`, `cwd`) from `cfg`.
     pub fn with_builtins(cfg: &Config) -> Registry {
         let mut registry = Registry::new();
@@ -43,6 +43,93 @@ impl Registry {
         let abbreviate_home = cfg.widgets.cwd.abbreviate_home;
         registry.register("cwd", Box::new(move || Box::new(Cwd { abbreviate_home })));
 
+        let lan = cfg.widgets.lan_ip.clone();
+        registry.register(
+            "lan_ip",
+            Box::new(move || {
+                Box::new(LanIp {
+                    format: lan.format.clone(),
+                    down_format: lan.down_format.clone(),
+                    interface: lan.interface.clone(),
+                })
+            }),
+        );
+
+        let ts = cfg.widgets.tailscale_ip.clone();
+        registry.register(
+            "tailscale_ip",
+            Box::new(move || {
+                Box::new(TailscaleIp {
+                    format: ts.format.clone(),
+                    down_format: ts.down_format.clone(),
+                })
+            }),
+        );
+
         registry
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::widget::Registry;
+    use crate::{Config, Context, NetIface};
+    use chrono::{Local, TimeZone};
+
+    fn ctx(ifaces: Vec<NetIface>) -> Context {
+        Context {
+            session_name: "0".into(),
+            window_index: "0".into(),
+            pane_index: "0".into(),
+            pane_current_path: "/".into(),
+            home: "/h".into(),
+            hostname: "h".into(),
+            loadavg: None,
+            now: Local
+                .with_ymd_and_hms(2026, 7, 20, 17, 49, 0)
+                .single()
+                .unwrap(),
+            window: None,
+            interfaces: ifaces,
+        }
+    }
+
+    #[test]
+    fn ip_widgets_registered_and_render_from_context() {
+        let mut cfg = Config::default();
+        cfg.widgets.lan_ip.format = "LAN {ip}".into();
+        cfg.widgets.tailscale_ip.down_format = "TS off".into();
+        let reg = Registry::with_builtins(&cfg);
+        assert!(reg.contains("lan_ip") && reg.contains("tailscale_ip"));
+
+        let widgets = reg.resolve(&["lan_ip".into(), "tailscale_ip".into()]);
+        let c = ctx(vec![
+            NetIface {
+                name: "eth0".into(),
+                ipv4: "192.168.1.20".parse().unwrap(),
+            },
+            NetIface {
+                name: "tailscale0".into(),
+                ipv4: "100.101.4.7".parse().unwrap(),
+            },
+        ]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|w| w.render(&c))
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["LAN 192.168.1.20".to_string(), "100.101.4.7".to_string()]
+        );
+
+        // no interfaces + default lan down_format -> lan_ip skipped, tailscale shows down text
+        let widgets = reg.resolve(&["lan_ip".into(), "tailscale_ip".into()]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|w| w.render(&ctx(vec![])))
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(texts, vec!["TS off".to_string()]);
     }
 }
