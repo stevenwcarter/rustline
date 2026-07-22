@@ -98,6 +98,45 @@ bind -T root MouseDown1Status {
     block
 }
 
+/// Marker lines bracketing the rustline-managed region in `~/.tmux.conf`, so
+/// re-running `rustline init` replaces that region instead of appending a
+/// duplicate.
+pub const TMUX_BEGIN: &str = "# >>> rustline >>>";
+pub const TMUX_END: &str = "# <<< rustline <<<";
+
+/// Remove an existing `TMUX_BEGIN..=TMUX_END` region (if present), returning the
+/// surrounding content joined and right-trimmed.
+fn strip_region(s: &str) -> String {
+    if let (Some(b), Some(e)) = (s.find(TMUX_BEGIN), s.find(TMUX_END))
+        && e >= b
+    {
+        let end = e + TMUX_END.len();
+        let before = s[..b].trim_end();
+        let after = &s[end..];
+        return format!("{before}{after}");
+    }
+    s.to_string()
+}
+
+/// Insert or replace the rustline-managed block in an existing `~/.tmux.conf`.
+/// Idempotent: `upsert(upsert(x, b), b) == upsert(x, b)`. Content outside the
+/// markers is preserved; the block is separated from prior content by a blank
+/// line.
+#[allow(dead_code)] // wired into `rustline init`'s idempotent-write path by a later task
+pub fn upsert_tmux_block(existing: &str, block: &str) -> String {
+    let base = strip_region(existing);
+    let wrapped = format!(
+        "{TMUX_BEGIN}\n{}\n{TMUX_END}\n",
+        block.trim_end_matches('\n')
+    );
+    let base = base.trim_end_matches('\n');
+    if base.trim().is_empty() {
+        wrapped
+    } else {
+        format!("{base}\n\n{wrapped}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +283,43 @@ mod tests {
             b.contains("refresh-client -S"),
             "refreshes after toggle: {b}"
         );
+    }
+
+    #[test]
+    fn upsert_appends_when_no_markers() {
+        let out = upsert_tmux_block("set -g mouse on\n", "BLOCK");
+        assert!(out.contains("set -g mouse on"), "keeps user content: {out}");
+        assert!(out.contains(TMUX_BEGIN) && out.contains(TMUX_END));
+        assert!(out.contains("\nBLOCK\n"), "wraps block: {out}");
+    }
+
+    #[test]
+    fn upsert_into_empty_is_just_the_wrapped_block() {
+        let out = upsert_tmux_block("", "BLOCK");
+        assert_eq!(out, format!("{TMUX_BEGIN}\nBLOCK\n{TMUX_END}\n"));
+    }
+
+    #[test]
+    fn upsert_replaces_existing_region_and_preserves_surroundings() {
+        let first = upsert_tmux_block("user before\n", "OLD");
+        let second = upsert_tmux_block(&first, "NEW");
+        assert!(
+            second.contains("user before"),
+            "keeps content before markers"
+        );
+        assert!(
+            second.contains("NEW") && !second.contains("OLD"),
+            "replaced: {second}"
+        );
+        // exactly one marker pair
+        assert_eq!(second.matches(TMUX_BEGIN).count(), 1);
+        assert_eq!(second.matches(TMUX_END).count(), 1);
+    }
+
+    #[test]
+    fn upsert_is_idempotent() {
+        let once = upsert_tmux_block("user before\n", "BLOCK");
+        let twice = upsert_tmux_block(&once, "BLOCK");
+        assert_eq!(once, twice, "re-running with same block is a no-op");
     }
 }
