@@ -154,6 +154,16 @@ fn default_battery_format() -> String {
     "{icon} {percent}%".into()
 }
 
+/// Default battery `warn_percent`/`crit_percent`: lower is worse, so warn
+/// fires above crit.
+fn default_bat_warn() -> f64 {
+    20.0
+}
+
+fn default_bat_crit() -> f64 {
+    10.0
+}
+
 /// Options for the `battery` widget.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BatteryOpts {
@@ -163,6 +173,10 @@ pub struct BatteryOpts {
     pub down_format: String,
     #[serde(default)]
     pub alt_format: String,
+    #[serde(default = "default_bat_warn")]
+    pub warn_percent: f64,
+    #[serde(default = "default_bat_crit")]
+    pub crit_percent: f64,
 }
 
 impl Default for BatteryOpts {
@@ -171,6 +185,8 @@ impl Default for BatteryOpts {
             format: default_battery_format(),
             down_format: String::new(),
             alt_format: String::new(),
+            warn_percent: default_bat_warn(),
+            crit_percent: default_bat_crit(),
         }
     }
 }
@@ -190,6 +206,24 @@ fn default_bar_width() -> usize {
     8
 }
 
+/// Default cpu `warn_percent`/`crit_percent`.
+fn default_cpu_warn() -> f64 {
+    80.0
+}
+
+fn default_cpu_crit() -> f64 {
+    95.0
+}
+
+/// Default memory `warn_percent`/`crit_percent`.
+fn default_mem_warn() -> f64 {
+    80.0
+}
+
+fn default_mem_crit() -> f64 {
+    92.0
+}
+
 /// Options for the `cpu` widget.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CpuOpts {
@@ -201,6 +235,10 @@ pub struct CpuOpts {
     pub alt_format: String,
     #[serde(default = "default_bar_width")]
     pub bar_width: usize,
+    #[serde(default = "default_cpu_warn")]
+    pub warn_percent: f64,
+    #[serde(default = "default_cpu_crit")]
+    pub crit_percent: f64,
 }
 
 impl Default for CpuOpts {
@@ -210,6 +248,8 @@ impl Default for CpuOpts {
             down_format: String::new(),
             alt_format: String::new(),
             bar_width: default_bar_width(),
+            warn_percent: default_cpu_warn(),
+            crit_percent: default_cpu_crit(),
         }
     }
 }
@@ -225,6 +265,10 @@ pub struct MemoryOpts {
     pub alt_format: String,
     #[serde(default = "default_bar_width")]
     pub bar_width: usize,
+    #[serde(default = "default_mem_warn")]
+    pub warn_percent: f64,
+    #[serde(default = "default_mem_crit")]
+    pub crit_percent: f64,
 }
 
 impl Default for MemoryOpts {
@@ -234,6 +278,8 @@ impl Default for MemoryOpts {
             down_format: String::new(),
             alt_format: String::new(),
             bar_width: default_bar_width(),
+            warn_percent: default_mem_warn(),
+            crit_percent: default_mem_crit(),
         }
     }
 }
@@ -253,6 +299,15 @@ pub struct LoadAvgOpts {
     pub alt_format: String,
     #[serde(default)]
     pub down_format: String,
+    /// `load1` threshold to badge as a warning. `0.0` (the default) disables
+    /// this tier — load average has no fixed "healthy" ceiling across
+    /// machines, so alerting is opt-in here unlike cpu/memory/battery.
+    #[serde(default)]
+    pub warn_load: f64,
+    /// `load1` threshold to badge as critical. `0.0` (the default) disables
+    /// this tier.
+    #[serde(default)]
+    pub crit_load: f64,
 }
 
 impl Default for LoadAvgOpts {
@@ -261,6 +316,8 @@ impl Default for LoadAvgOpts {
             format: default_loadavg_format(),
             alt_format: String::new(),
             down_format: String::new(),
+            warn_load: 0.0,
+            crit_load: 0.0,
         }
     }
 }
@@ -925,5 +982,22 @@ hard_left = "X"
         assert_eq!(c.theme.soft_fg, Some(crate::Color::Indexed(99)));
         assert_eq!(c.theme.error, Some(crate::Color::Named("red".into())));
         assert_eq!(c.theme.hard_left.as_deref(), Some("X"));
+    }
+
+    #[test]
+    fn threshold_knobs_default_and_parse() {
+        let c = Config::default();
+        assert_eq!(c.widgets.cpu.warn_percent, 80.0);
+        assert_eq!(c.widgets.cpu.crit_percent, 95.0);
+        assert_eq!(c.widgets.memory.crit_percent, 92.0);
+        assert_eq!(c.widgets.battery.warn_percent, 20.0);
+        assert_eq!(c.widgets.loadavg.warn_load, 0.0); // off by default
+        let parsed: Config = toml::from_str(
+            "[widgets.cpu]\nwarn_percent = 70\n[widgets.loadavg]\ncrit_load = 8.0\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.widgets.cpu.warn_percent, 70.0);
+        assert_eq!(parsed.widgets.cpu.crit_percent, 95.0); // untouched default
+        assert_eq!(parsed.widgets.loadavg.crit_load, 8.0);
     }
 }

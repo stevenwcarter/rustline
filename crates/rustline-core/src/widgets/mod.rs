@@ -1,3 +1,4 @@
+mod alert;
 mod bar;
 pub mod battery;
 pub mod cpu;
@@ -27,6 +28,12 @@ pub use tailscale_ip::TailscaleIp;
 // (Task 4+) of the click-toggle plan.
 pub(crate) use toggle::{active_format, clickable_range};
 pub use windows::Windows;
+
+// Re-exported for the numeric widgets (cpu/memory/battery/loadavg, Tasks
+// 7-10) to render a threshold-alert badge; not yet called until those tasks
+// wire it into each widget's render/range_name.
+#[allow(unused_imports)]
+pub(crate) use alert::{AlertKind, alert_over, alert_style, alert_under};
 
 use crate::Config;
 use crate::widget::Registry;
