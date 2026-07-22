@@ -75,7 +75,7 @@ set-hook -g after-select-window "refresh-client -S"
 "##,
     );
     block.push_str(
-        r##"# rustline click-to-toggle a widget's alt view (requires tmux mouse mode enabled)
+        r##"# rustline click-to-toggle a widget's alt view (needs: set -g mouse on)
 bind -T root MouseDown1Status {
     if -F "#{==:#{mouse_status_range},window}" {
         select-window -t=
@@ -122,9 +122,19 @@ mod tests {
             "# rustline statusline\nset -g status on\nset -g status-interval 1\nset -g status-justify centre\n"
         ));
         assert!(b.contains("set -g status-style bg=colour234,fg=colour255\n"));
+        // The setter is emitted as its own line, `\nset -g mouse on\n`; the
+        // legacy discoverability comment reads `(needs: set -g mouse on)` —
+        // `(needs: ` before and `)` after — so anchoring on the surrounding
+        // newlines matches only the real, conditional setter, never the
+        // comment (a plain substring check would false-positive on the
+        // comment regardless of `opts.mouse`).
         assert!(
-            !b.contains("set -g mouse on"),
-            "mouse-off omits the setter: {b}"
+            !b.contains("\nset -g mouse on\n"),
+            "mouse-off omits the setter line: {b}"
+        );
+        assert!(
+            b.contains("# rustline click-to-toggle a widget's alt view (needs: set -g mouse on)\n"),
+            "legacy comment verbatim: {b}"
         );
         assert!(
             !b.contains("set -g status 2"),
@@ -228,14 +238,8 @@ mod tests {
             !b.contains("--range=#{mouse_status_range}"),
             "must q-escape: {b}"
         );
-        // discoverability hint (reworded from the legacy "set -g mouse on" phrasing
-        // so it doesn't collide with `one_line_default_is_byte_identical_to_legacy`'s
-        // `!contains("set -g mouse on")` assertion, which targets the real, conditional
-        // setter line, not this always-on comment — see task-1-report.md).
-        assert!(
-            b.contains("requires tmux mouse mode enabled"),
-            "mentions mouse hint: {b}"
-        );
+        // discoverability hint
+        assert!(b.contains("set -g mouse on"), "mentions mouse-on hint: {b}");
         assert!(
             b.contains("refresh-client -S"),
             "refreshes after toggle: {b}"
