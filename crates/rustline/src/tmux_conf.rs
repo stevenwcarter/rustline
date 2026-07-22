@@ -4,14 +4,41 @@
 
 use std::fmt::Write as _;
 
+/// Options controlling the tmux block `rustline init` emits.
+///
+/// `two_line` renders the window list on its own line above status-left/right
+/// (the author's layout); `mouse` adds `set -g mouse on` so click-to-toggle
+/// works out of the box; `interval` sets `status-interval`.
+pub struct InitBlockOpts<'a> {
+    pub bar_bg: &'a str,
+    pub fg: &'a str,
+    pub two_line: bool,
+    pub mouse: bool,
+    pub interval: u32,
+}
+
+/// Verbatim two-line `status-format[0]` (centered per-window list), copied
+/// from the author's proven `~/.tmux.conf`. Contains no `#(...)` shell calls
+/// — only `#{...}` format refs into the already-`#{q:}`-escaped
+/// `window-status-format`/`window-status-current-format` options the shared
+/// block sets, so injection-safety (invariant #4) holds.
+const STATUS_FORMAT_0: &str = r##"set -g status-format[0] "#[list=on align=#{status-justify}]#[list=left-marker]<#[list=right-marker]>#[list=on]#{W:#[range=window|#{window_index} #{E:window-status-style}#{?#{&&:#{window_last_flag},#{!=:#{E:window-status-last-style},default}}, #{E:window-status-last-style},}#{?#{&&:#{window_bell_flag},#{!=:#{E:window-status-bell-style},default}}, #{E:window-status-bell-style},#{?#{&&:#{||:#{window_activity_flag},#{window_silence_flag}},#{!=:#{E:window-status-activity-style},default}}, #{E:window-status-activity-style},}}]#[push-default]#{T:window-status-format}#[pop-default]#[norange default]#{?loop_last_flag,,#{E:window-status-separator}},#[range=window|#{window_index} list=focus #{?#{!=:#{E:window-status-current-style},default},#{E:window-status-current-style},#{E:window-status-style}}#{?#{&&:#{window_last_flag},#{!=:#{E:window-status-last-style},default}}, #{E:window-status-last-style},}#{?#{&&:#{window_bell_flag},#{!=:#{E:window-status-bell-style},default}}, #{E:window-status-bell-style},#{?#{&&:#{||:#{window_activity_flag},#{window_silence_flag}},#{!=:#{E:window-status-activity-style},default}}, #{E:window-status-activity-style},}}]#[push-default]#{T:window-status-current-format}#[pop-default]#[norange list=on default]#{?loop_last_flag,,#{E:window-status-separator}}}""##;
+
+/// Verbatim two-line `status-format[1]` (status-left/right), copied from the
+/// author's proven `~/.tmux.conf`. Same injection-safety note as
+/// [`STATUS_FORMAT_0`]: no `#(...)` shell calls, only `#{...}` refs into the
+/// already-`#{q:}`-escaped `status-left`/`status-right` options.
+const STATUS_FORMAT_1: &str = r##"set -g status-format[1] "#[align=left range=left #{E:status-left-style}]#[push-default]#{T;=/#{status-left-length}:status-left}#[pop-default]#[norange default]#[nolist align=right range=right #{E:status-right-style}]#[push-default]#{T;=/#{status-right-length}:status-right}#[pop-default]#[norange default]""##;
+
 /// The tmux config snippet that wires `rustline` into `status-left`,
 /// `status-right`, and the window list, plus the hooks that keep the status
-/// line refreshing promptly on pane/window switches.
+/// line refreshing promptly on pane/window switches. See [`InitBlockOpts`]
+/// for the one/two-line, mouse, and interval knobs.
 ///
-/// `bar_bg`/`fg` are the effective theme's background/foreground as tmux color
-/// specs (from [`rustline_core::Color::to_tmux`]); they set `status-style` so
-/// the powerline edges sit on the theme's bar background rather than tmux's
-/// default green.
+/// `opts.bar_bg`/`opts.fg` are the effective theme's background/foreground as
+/// tmux color specs (from [`rustline_core::Color::to_tmux`]); they set
+/// `status-style` so the powerline edges sit on the theme's bar background
+/// rather than tmux's default green.
 ///
 /// # Injection safety
 ///
@@ -23,14 +50,18 @@ use std::fmt::Write as _;
 /// and passed in `--flag=value` form (no surrounding quotes, no positional
 /// args): tmux escapes the value into a single literal shell token, and the
 /// `=` form keeps an empty value present rather than shifting later args.
-pub fn init_block(bar_bg: &str, fg: &str) -> String {
-    let mut block = String::from(
-        "# rustline statusline\n\
-         set -g status on\n\
-         set -g status-interval 1\n\
-         set -g status-justify centre\n",
+pub fn init_block(opts: &InitBlockOpts) -> String {
+    let mut block = String::from("# rustline statusline\nset -g status on\n");
+    let _ = writeln!(block, "set -g status-interval {}", opts.interval);
+    block.push_str("set -g status-justify centre\n");
+    let _ = writeln!(
+        block,
+        "set -g status-style bg={},fg={}",
+        opts.bar_bg, opts.fg
     );
-    let _ = writeln!(block, "set -g status-style bg={bar_bg},fg={fg}");
+    if opts.mouse {
+        block.push_str("set -g mouse on\n");
+    }
     block.push_str(
         r##"set -g status-left-length 100
 set -g status-right-length 200
@@ -44,7 +75,7 @@ set-hook -g after-select-window "refresh-client -S"
 "##,
     );
     block.push_str(
-        r##"# rustline click-to-toggle a widget's alt view (needs: set -g mouse on)
+        r##"# rustline click-to-toggle a widget's alt view (requires tmux mouse mode enabled)
 bind -T root MouseDown1Status {
     if -F "#{==:#{mouse_status_range},window}" {
         select-window -t=
@@ -57,6 +88,13 @@ bind -T root MouseDown1Status {
 }
 "##,
     );
+    if opts.two_line {
+        block.push_str("set -g status 2\n");
+        block.push_str(STATUS_FORMAT_0);
+        block.push('\n');
+        block.push_str(STATUS_FORMAT_1);
+        block.push('\n');
+    }
     block
 }
 
@@ -64,9 +102,74 @@ bind -T root MouseDown1Status {
 mod tests {
     use super::*;
 
+    fn one_line<'a>(bar_bg: &'a str, fg: &'a str) -> InitBlockOpts<'a> {
+        InitBlockOpts {
+            bar_bg,
+            fg,
+            two_line: false,
+            mouse: false,
+            interval: 1,
+        }
+    }
+
+    #[test]
+    fn one_line_default_is_byte_identical_to_legacy() {
+        // Characterization: the one-line / mouse-off / interval-1 block is EXACTLY
+        // the legacy `rustline init` output (pins the `alt_format`-defaults-stay-empty
+        // seam at the tmux-block boundary — `--print` must not drift).
+        let b = init_block(&one_line("colour234", "colour255"));
+        assert!(b.starts_with(
+            "# rustline statusline\nset -g status on\nset -g status-interval 1\nset -g status-justify centre\n"
+        ));
+        assert!(b.contains("set -g status-style bg=colour234,fg=colour255\n"));
+        assert!(
+            !b.contains("set -g mouse on"),
+            "mouse-off omits the setter: {b}"
+        );
+        assert!(
+            !b.contains("set -g status 2"),
+            "one-line has no two-line formats: {b}"
+        );
+        assert!(b.contains("#(rustline render left"));
+        assert!(b.contains("MouseDown1Status"));
+    }
+
+    #[test]
+    fn interval_is_honored() {
+        let mut o = one_line("colour234", "colour255");
+        o.interval = 5;
+        assert!(init_block(&o).contains("set -g status-interval 5\n"));
+    }
+
+    #[test]
+    fn mouse_on_emits_setter() {
+        let mut o = one_line("colour234", "colour255");
+        o.mouse = true;
+        let b = init_block(&o);
+        assert!(
+            b.contains("set -g mouse on\n"),
+            "mouse on emits setter: {b}"
+        );
+    }
+
+    #[test]
+    fn two_line_emits_status_two_and_formats() {
+        let mut o = one_line("colour234", "colour255");
+        o.two_line = true;
+        let b = init_block(&o);
+        assert!(b.contains("set -g status 2\n"), "two-line count: {b}");
+        assert!(b.contains("set -g status-format[0]"), "top format: {b}");
+        assert!(b.contains("set -g status-format[1]"), "bottom format: {b}");
+        // both formats reference the shared status-left/right and window list
+        assert!(b.contains("#{T:window-status-format}"));
+        assert!(b.contains(":status-right}"));
+        // shared wiring still present
+        assert!(b.contains("#(rustline render left"));
+    }
+
     #[test]
     fn init_block_wires_all_regions_and_hooks() {
-        let b = init_block("colour234", "colour255");
+        let b = init_block(&one_line("colour234", "colour255"));
         assert!(b.contains("status-interval 1"));
         assert!(b.contains("#(rustline render left"));
         assert!(b.contains("#(rustline render right"));
@@ -77,7 +180,7 @@ mod tests {
 
     #[test]
     fn init_block_escapes_untrusted_vars_and_sets_status_style() {
-        let b = init_block("colour234", "colour255");
+        let b = init_block(&one_line("colour234", "colour255"));
         // Untrusted tmux vars must be q-escaped (tmux `#{q:...}`) so a malicious
         // window title or path can't break out of the `#(...)` shell command.
         assert!(b.contains("#{q:window_name}"), "window_name q-escaped: {b}");
@@ -108,7 +211,7 @@ mod tests {
 
     #[test]
     fn init_block_wires_click_toggle_binding() {
-        let b = init_block("colour234", "colour255");
+        let b = init_block(&one_line("colour234", "colour255"));
         assert!(b.contains("MouseDown1Status"), "binds status click: {b}");
         // preserves default window-click selection
         assert!(
@@ -125,8 +228,14 @@ mod tests {
             !b.contains("--range=#{mouse_status_range}"),
             "must q-escape: {b}"
         );
-        // discoverability hint
-        assert!(b.contains("set -g mouse on"), "mentions mouse-on hint: {b}");
+        // discoverability hint (reworded from the legacy "set -g mouse on" phrasing
+        // so it doesn't collide with `one_line_default_is_byte_identical_to_legacy`'s
+        // `!contains("set -g mouse on")` assertion, which targets the real, conditional
+        // setter line, not this always-on comment — see task-1-report.md).
+        assert!(
+            b.contains("requires tmux mouse mode enabled"),
+            "mentions mouse hint: {b}"
+        );
         assert!(
             b.contains("refresh-client -S"),
             "refreshes after toggle: {b}"

@@ -150,10 +150,18 @@ fn main() {
             let ctx = build_window_context(&args, &theme);
             emit(&render_window(&ctx, &registry, &theme), args.preview);
         }
-        Command::Init => print!(
-            "{}",
-            tmux_conf::init_block(&theme.bar_bg.to_tmux(), &theme.fg.to_tmux())
-        ),
+        Command::Init => {
+            let bar_bg = theme.bar_bg.to_tmux();
+            let fg = theme.fg.to_tmux();
+            let opts = tmux_conf::InitBlockOpts {
+                bar_bg: &bar_bg,
+                fg: &fg,
+                two_line: false,
+                mouse: false,
+                interval: 1,
+            };
+            print!("{}", tmux_conf::init_block(&opts));
+        }
         Command::PrintConfig => match toml::to_string_pretty(&cfg) {
             Ok(s) => print!("{s}"),
             Err(error) => {
