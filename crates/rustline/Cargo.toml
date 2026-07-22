@@ -21,12 +21,16 @@ tracing-subscriber = { version = "0.3", features = ["registry", "fmt", "ansi"] }
 anyhow = "1"
 toml = "0.9"
 toml_edit = "0.25"
+comfy-table = { version = "7", optional = true }
 
 [features]
 # Opt-in positive end-to-end test that renders a real plugin through the bin
 # (register_plugins -> WasmWidget -> guest). Needs `just build-weather`; gated
 # so a plain `cargo test` stays hermetic.
 wasm-e2e = []
+# Opt-in `rustline bench` subcommand + its report deps. Off by default: the
+# shipping binary and its dep graph are unchanged.
+bench = ["dep:comfy-table"]
 
 [dev-dependencies]
 tempfile = "3"

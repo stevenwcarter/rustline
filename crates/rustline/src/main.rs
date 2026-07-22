@@ -1,4 +1,6 @@
 mod battery;
+#[cfg(feature = "bench")]
+mod bench;
 mod build_context;
 mod cli;
 mod cpu;
@@ -117,5 +119,7 @@ fn main() {
         },
         Command::Plugin(cmd) => plugin_cmd::run(cmd, &config_path()),
         Command::Click(args) => run_click(&args),
+        #[cfg(feature = "bench")]
+        Command::Bench(args) => bench::run(&args, &cfg),
     }
 }
