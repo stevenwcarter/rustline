@@ -23,7 +23,7 @@ lint:
     cargo clippy --all-targets -- -D warnings
 
 # Preview the rendered bar in colour (live tmux context inside tmux, else samples)
-preview:
+preview: build
     #!/usr/bin/env bash
     # Manual colour preview of the status bar. Powerline separators need a
     # Nerd/powerline-patched terminal font to show as arrows rather than boxes.
