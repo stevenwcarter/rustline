@@ -254,8 +254,8 @@ these shared types, not a design shortcut. Keep them serializable.
 
 `rustline` (bin):
 - `cli.rs` — `clap` derive. `render`, `plugin`, and `theme` are subcommand
-  *groups* (`ThemeCmd { List, Show { name }, Use { name }, New { name, from,
-  force } }`); `init` (`InitArgs { defaults, print }`, both plain flags) is the
+  *groups* (`ThemeCmd { List, Show { name }, Use { name }, Pick, New { name,
+  from, force } }`); `init` (`InitArgs { defaults, print }`, both plain flags) is the
   onboarding-wizard subcommand (see CLI below); `click` (`ClickArgs { range,
   button }`, both defaulted so an empty click is a parseable no-op) is a flat
   subcommand invoked by the tmux mouse binding.
@@ -312,7 +312,17 @@ these shared types, not a design shortcut. Keep them serializable.
   full `Theme`, converts it via `ThemeConfig::from_theme` to an all-`Some`
   config, and writes `<themes_dir>/<name>.toml` with a header comment
   (refuses to overwrite without `--force`; rejects a `name` containing `/`,
-  `\`, `..`, or empty).
+  `\`, `..`, or empty); `pick` is the interactive browse-and-set command,
+  layered on top of the same helpers: `picker_entries` builds the ordered,
+  name-deduped `PickEntry { name, active, from_file }` list (built-ins first,
+  then themes-dir-only stems), `parse_preview_input`/`parse_set_input` are
+  pure parsers for the two prompt loops, and `run_picker` (reader/writer-
+  generic over `BufRead`/`Write`, so it's unit-tested with byte-slice
+  reader/writer — no real TTY needed) drives preview-then-set and returns the
+  chosen name or `None` to keep the current theme; `pick` itself requires a
+  TTY (`stdin().is_terminal()`; a non-interactive invocation prints a hint
+  toward `theme show`/`theme use` and exits non-zero, writing nothing) and,
+  on a choice, reuses `use_theme` for the actual config write.
 - `tmux_conf.rs` — `init_block(&InitBlockOpts)` (`bar_bg`, `fg`, `two_line`,
   `mouse`, `interval`): the tmux config block `rustline init` emits, incl. a
   `bind -T root MouseDown1Status` block (see CLI below); one-line/mouse-off/
@@ -414,6 +424,12 @@ A global `-v`/`--verbose` (repeatable) raises the **file** log level:
 - `rustline theme new <name> [--from <seed>] [--force]` — scaffold
   `<themes_dir>/<name>.toml` as a complete, tweakable copy of `<seed>`
   (default `default`); refuses to overwrite an existing file without `--force`.
+- `rustline theme pick` — interactively list the themes (active marked,
+  themes-dir files tagged `(custom)`), preview any by number (or `a`/`all` for
+  every one), then prompt to set one by name or number (blank keeps the
+  current theme), writing `[theme].base` via the same path as `theme use`.
+  Requires a terminal — a non-TTY invocation prints a hint toward `theme
+  show`/`theme use` and exits non-zero without writing.
 - `rustline click --range=<name> [--button=left]` — flip `<name>`'s membership
   in the global toggle state file; invoked by the `init`-emitted tmux mouse
   binding. Only `left` acts today; other button values are reserved for a
@@ -628,8 +644,8 @@ bold) when a reading crosses a threshold; `0` (or `0.0`) disables a tier, and
 a widget with every tier disabled or every reading below threshold renders
 byte-identically to before this feature.
 
-Manage themes from the command line (`rustline theme list|show|use|new` — see
-CLI above) instead of hand-writing `[theme]`/theme files. See the
+Manage themes from the command line (`rustline theme list|show|use|new|pick` —
+see CLI above) instead of hand-writing `[theme]`/theme files. See the
 [design spec](docs/superpowers/specs/2026-07-21-rustline-themes-theme-picker-design.md)
 for the full layering rules, the six themes' exact color values, and the
 threshold-badge contrast rationale.
@@ -815,6 +831,11 @@ branch on platform.
   non-interactively and `--print` keeps the old raw-block-to-stdout behavior.
   See `docs/superpowers/specs/2026-07-22-rustline-init-onboarding-wizard-design.md`
   / `docs/superpowers/plans/2026-07-22-rustline-init-onboarding-wizard.md`.
+- Done: `rustline theme pick` — an interactive browse-and-set command
+  (`theme_cmd.rs`'s `run_picker`, reader/writer-generic and unit-tested,
+  reusing `use_theme` for the write); requires a TTY. See
+  `docs/superpowers/specs/2026-07-22-rustline-theme-pick-design.md` /
+  `docs/superpowers/plans/2026-07-22-rustline-theme-pick.md`.
 - Historical sparkline (last-X-seconds graph) for `cpu`/`memory` — today's
   reads are single-shot, stateless snapshots; a sparkline needs
   cross-invocation sample persistence, deferred to its own spec.

@@ -276,7 +276,14 @@ rustline theme list                  # built-ins + your themes-dir files, active
 rustline theme show pastel-rainbow   # ANSI preview (with sample alert badges)
 rustline theme use nord              # sets [theme].base = "nord" in config.toml
 rustline theme new my-nord --from nord   # scaffold a tweakable copy to edit by hand
+rustline theme pick                  # interactively browse previews, then set one
 ```
+
+`theme pick` lists the themes (active marked, themes-dir files tagged
+`(custom)`), lets you preview any by number (or `a`/`all` for every one), then
+prompts you to set one by name or number (blank keeps the current theme). It
+needs a terminal — a non-interactive invocation prints a hint to use
+`theme show`/`theme use` instead and exits non-zero without writing anything.
 
 `theme new` writes a complete, commented theme file to
 `$XDG_CONFIG_HOME/rustline/themes/<name>.toml` (fallback
