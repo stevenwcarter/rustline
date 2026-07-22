@@ -266,12 +266,15 @@ pub fn run(
         );
         std::process::exit(2);
     };
-    apply(&answers, config_path, themes_dir, tmux_conf_path);
+    apply(&answers, config_path, tmux_conf_path);
 }
 
 /// Write `config.toml` (non-destructive) and upsert the tmux block, backing up
-/// each existing file first. Prints a summary + next step to stderr.
-fn apply(a: &InitAnswers, config_path: &Path, _themes_dir: &Path, tmux_conf_path: &Path) {
+/// each existing file first. Prints a summary + next step to stderr. A present
+/// but unreadable `tmux_conf_path` (e.g. non-UTF8 contents) aborts rather than
+/// collapsing the read error to empty, which would silently skip the backup
+/// and overwrite the file the caller couldn't safely read.
+fn apply(a: &InitAnswers, config_path: &Path, tmux_conf_path: &Path) {
     match write_config(a, config_path) {
         Ok(bak) => {
             eprint!("Wrote {}", config_path.display());
@@ -296,7 +299,17 @@ fn apply(a: &InitAnswers, config_path: &Path, _themes_dir: &Path, tmux_conf_path
         mouse: a.mouse,
         interval: a.interval,
     });
-    let existing = fs::read_to_string(tmux_conf_path).unwrap_or_default();
+    let existing = match fs::read_to_string(tmux_conf_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            eprintln!(
+                "failed to read {}: {e}; refusing to overwrite",
+                tmux_conf_path.display()
+            );
+            std::process::exit(1);
+        }
+    };
     if !existing.is_empty() {
         let mut bak = tmux_conf_path.as_os_str().to_owned();
         bak.push(".rustline.bak");

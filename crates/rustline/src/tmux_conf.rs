@@ -224,6 +224,21 @@ mod tests {
     }
 
     #[test]
+    fn two_line_formats_contain_no_shell_calls() {
+        // invariant #4 in two-line mode: the status-format strings are pure tmux
+        // format refs (#{...}/#[...]) into already-#{q:}-escaped options — never a
+        // #(...) shell call. A later edit that sneaks one in must fail here.
+        assert!(
+            !STATUS_FORMAT_0.contains("#("),
+            "STATUS_FORMAT_0 has no shell call"
+        );
+        assert!(
+            !STATUS_FORMAT_1.contains("#("),
+            "STATUS_FORMAT_1 has no shell call"
+        );
+    }
+
+    #[test]
     fn init_block_wires_all_regions_and_hooks() {
         let b = init_block(&one_line("colour234", "colour255"));
         assert!(b.contains("status-interval 1"));

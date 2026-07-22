@@ -111,6 +111,40 @@ fn init_print_honors_configured_theme() {
 }
 
 #[test]
+fn init_defaults_does_not_clobber_unreadable_tmux_conf() {
+    // A present-but-unreadable ~/.tmux.conf (e.g. non-UTF8 contents) must abort
+    // rather than collapsing the read error to empty, which would silently
+    // skip the backup and overwrite the file `apply` couldn't safely read.
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let tmux_path = home.join(".tmux.conf");
+    let original = [0xff_u8, 0xfe, 0x00];
+    fs::write(&tmux_path, original).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.arg("init").arg("--defaults");
+    cmd.env("HOME", &home)
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+        .env_remove("RUST_LOG");
+    let out = cmd.output().unwrap();
+
+    assert!(
+        !out.status.success(),
+        "must not succeed when tmux.conf can't be read; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // config.toml may have been written already (it's written before the tmux
+    // step) — only the tmux.conf file's untouched-ness is under test here.
+    assert_eq!(
+        fs::read(&tmux_path).unwrap(),
+        original,
+        "unreadable tmux.conf must be left byte-for-byte untouched"
+    );
+}
+
+#[test]
 fn init_defaults_writes_config_and_tmux_marker_block() {
     let tmp = tempdir().unwrap();
     let home = tmp.path().join("home");
