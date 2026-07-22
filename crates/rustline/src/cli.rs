@@ -66,6 +66,8 @@ pub enum ThemeCmd {
     Show { name: String },
     /// Select a theme by writing `[theme].base` into the config file.
     Use { name: String },
+    /// Interactively browse theme previews and set one.
+    Pick,
     /// Scaffold a new tweakable theme file seeded from an existing theme.
     New {
         name: String,
