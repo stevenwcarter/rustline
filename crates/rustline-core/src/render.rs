@@ -550,6 +550,9 @@ mod tests {
         let c = t.colors();
         assert_eq!(c.fg, t.fg);
         assert_eq!(c.bar_bg, t.bar_bg);
+        assert_eq!(c.success, t.success);
+        assert_eq!(c.info, t.info);
+        assert_eq!(c.warning, t.warning);
         assert_eq!(c.error, t.error);
     }
 }

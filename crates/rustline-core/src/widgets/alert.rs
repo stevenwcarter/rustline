@@ -65,6 +65,7 @@ mod tests {
         assert_eq!(alert_over(95.0, 80.0, 95.0), AlertKind::Crit); // crit beats warn
         assert_eq!(alert_over(99.0, 0.0, 0.0), AlertKind::None); // both disabled
         assert_eq!(alert_over(99.0, 0.0, 95.0), AlertKind::Crit); // warn off, crit on
+        assert_eq!(alert_over(85.0, 80.0, 0.0), AlertKind::Warn); // crit off, warn on
     }
 
     #[test]

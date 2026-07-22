@@ -44,22 +44,25 @@ fn resolve_plugin_dir(flag: Option<&str>, cfg: &Config) -> PathBuf {
     rustline_wasm::default_plugin_dir()
 }
 
-/// Resolve the config file path: `$XDG_CONFIG_HOME/rustline/config.toml`,
-/// falling back to `$HOME/.config/rustline/config.toml` when unset.
-fn config_path() -> PathBuf {
+/// The rustline config base dir: `$XDG_CONFIG_HOME/rustline`, falling back to
+/// `$HOME/.config/rustline`.
+fn config_base() -> PathBuf {
     let base = env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env::var("HOME").unwrap_or_default()).join(".config"));
-    base.join("rustline").join("config.toml")
+    base.join("rustline")
+}
+
+/// Resolve the config file path: `$XDG_CONFIG_HOME/rustline/config.toml`,
+/// falling back to `$HOME/.config/rustline/config.toml` when unset.
+fn config_path() -> PathBuf {
+    config_base().join("config.toml")
 }
 
 /// Resolve the themes dir: `$XDG_CONFIG_HOME/rustline/themes` (fallback
 /// `~/.config/rustline/themes`), parallel to `config_path`.
 fn themes_dir() -> PathBuf {
-    let base = env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env::var("HOME").unwrap_or_default()).join(".config"));
-    base.join("rustline").join("themes")
+    config_base().join("themes")
 }
 
 /// Resolve a base-theme name to a full `Theme`: a themes-dir `*.toml` file wins
