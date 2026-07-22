@@ -57,6 +57,12 @@ preview:
     printf 'CENTER : %s\n' "$center"
     printf 'RIGHT  : %s\n' "$right"
 
+# Benchmark the render pipeline (regions, widgets, data sources, plugins).
+# Pure passes use a fabricated Context (no OS reads); real-world passes pay the
+# real reads incl. read_cpu's ~120ms sample. See `rustline bench --help`.
+bench *ARGS: build-weather
+    cargo run -q --release --features bench -- bench {{ARGS}}
+
 # Build the example weather WASM plugin and install it into the plugin dir
 build-weather:
     #!/usr/bin/env bash
