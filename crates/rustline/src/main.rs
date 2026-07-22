@@ -5,6 +5,7 @@ mod cpu;
 mod logging;
 mod memory;
 mod plugin_cmd;
+mod theme_cmd;
 mod tmux_conf;
 mod toggles;
 
@@ -15,7 +16,8 @@ use build_context::{build_region_context, build_window_context};
 use clap::Parser;
 use cli::{Cli, Command, Render};
 use rustline_core::{
-    Config, Direction, Registry, render_named_region, render_window, tmux_to_ansi,
+    Config, Direction, Registry, Theme, ThemeConfig, builtin_theme, render_named_region,
+    render_window, tmux_to_ansi,
 };
 
 /// Print a rendered region to stdout: as ANSI-coloured text (with a trailing
@@ -51,6 +53,45 @@ fn config_path() -> PathBuf {
     base.join("rustline").join("config.toml")
 }
 
+/// Resolve the themes dir: `$XDG_CONFIG_HOME/rustline/themes` (fallback
+/// `~/.config/rustline/themes`), parallel to `config_path`.
+fn themes_dir() -> PathBuf {
+    let base = env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env::var("HOME").unwrap_or_default()).join(".config"));
+    base.join("rustline").join("themes")
+}
+
+/// Resolve a base-theme name to a full `Theme`: a themes-dir `*.toml` file wins
+/// over a same-named built-in (so a user file can shadow/override a built-in).
+fn resolve_base_theme(name: &str) -> Option<Theme> {
+    let file = themes_dir().join(format!("{name}.toml"));
+    if let Ok(text) = std::fs::read_to_string(&file) {
+        match toml::from_str::<ThemeConfig>(&text) {
+            Ok(tc) => {
+                let mut t = Theme::default();
+                tc.apply_to(&mut t);
+                return Some(t);
+            }
+            Err(e) => tracing::warn!("invalid theme file {}: {e}", file.display()),
+        }
+    }
+    builtin_theme(name)
+}
+
+/// Resolve the effective theme: default → base (file-first, then built-in) →
+/// inline `[theme]` overrides. An unresolvable base warns and falls back.
+fn resolve_theme(cfg: &Config) -> Theme {
+    let base = match cfg.theme.base.as_deref() {
+        Some(name) => resolve_base_theme(name).unwrap_or_else(|| {
+            tracing::warn!("unknown theme base {name:?}; using default");
+            Theme::default()
+        }),
+        None => Theme::default(),
+    };
+    cfg.to_theme_over(base)
+}
+
 /// Handle `rustline click`: on a left-click with a non-empty range, flip that
 /// widget's membership in the toggle state file. Any other button, or an
 /// empty range, is a no-op. Never fails the process (invariant: never break
@@ -77,7 +118,7 @@ fn main() {
     if let Some(msg) = load_warning {
         tracing::warn!("{msg}");
     }
-    let theme = cfg.to_theme();
+    let theme = resolve_theme(&cfg);
 
     match cli.command {
         Command::Render(Render::Left(args)) => {
@@ -116,6 +157,7 @@ fn main() {
             }
         },
         Command::Plugin(cmd) => plugin_cmd::run(cmd, &config_path()),
+        Command::Theme(cmd) => theme_cmd::run(cmd, &config_path(), &themes_dir()),
         Command::Click(args) => run_click(&args),
     }
 }
