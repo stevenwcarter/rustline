@@ -10,6 +10,7 @@ use rustline_core::{
     ThemeConfig, WindowCtx, builtin_theme, builtin_theme_names, render_named_region, render_window,
     tmux_to_ansi,
 };
+use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::cli::ThemeCmd;
 
@@ -18,13 +19,78 @@ pub fn run(cmd: ThemeCmd, config_path: &Path, themes_dir: &Path) {
     match cmd {
         ThemeCmd::List => list(config_path, themes_dir),
         ThemeCmd::Show { name } => show(&name, themes_dir),
-        ThemeCmd::Use { name } => {
-            let _ = (&name, config_path); // Task 13
-        }
+        ThemeCmd::Use { name } => use_theme(&name, config_path, themes_dir),
         ThemeCmd::New { name, from, force } => {
             let _ = (&name, &from, force, themes_dir); // Task 14
         }
     }
+}
+
+/// Whether `name` resolves to a themes-dir file or a built-in.
+fn resolvable(name: &str, themes_dir: &Path) -> bool {
+    themes_dir.join(format!("{name}.toml")).is_file() || builtin_theme(name).is_some()
+}
+
+/// Set `[theme].base = name` in `doc`, creating `[theme]` if absent. Other
+/// keys/comments are untouched. If `theme` exists but isn't a table (e.g. a
+/// stray `theme = "dark"` in a hand-edited config), reports the error and
+/// exits rather than panicking — same shape as `plugin_cmd::mutate`'s
+/// not-a-table guards.
+fn set_base(doc: &mut DocumentMut, name: &str) {
+    let theme = match doc
+        .entry("theme")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+    {
+        Some(t) => t,
+        None => {
+            eprintln!("config error: `theme` is not a table");
+            std::process::exit(1);
+        }
+    };
+    theme.set_implicit(false);
+    theme["base"] = value(name);
+}
+
+/// Set the config's active theme base to `name`, validating first that it
+/// resolves to a themes-dir file or a built-in. Mirrors `plugin_cmd::mutate`'s
+/// read/parse guard: a missing config starts fresh, but an unreadable or
+/// invalid one aborts *before* any write so `theme use` never truncates a
+/// config it merely failed to parse.
+fn use_theme(name: &str, config_path: &Path, themes_dir: &Path) {
+    if !resolvable(name, themes_dir) {
+        eprintln!(
+            "unknown theme: {name}\navailable built-ins: {}",
+            builtin_theme_names().join(", ")
+        );
+        std::process::exit(1);
+    }
+    let mut doc = match std::fs::read_to_string(config_path) {
+        Ok(text) => match text.parse::<DocumentMut>() {
+            Ok(doc) => doc,
+            Err(_) => {
+                eprintln!(
+                    "config error: {} is not valid TOML; refusing to overwrite",
+                    config_path.display()
+                );
+                std::process::exit(1);
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
+        Err(e) => {
+            eprintln!("config error: cannot read {}: {e}", config_path.display());
+            std::process::exit(1);
+        }
+    };
+    set_base(&mut doc, name);
+    if let Some(parent) = config_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(config_path, doc.to_string()) {
+        eprintln!("failed to write config: {e}");
+        std::process::exit(1);
+    }
+    println!("theme set to {name}");
 }
 
 /// Read the themes-dir `*.toml` stems (empty on any error).
@@ -243,5 +309,31 @@ mod tests {
         assert!(out.contains('\u{1b}'), "contains ANSI escape: {out:?}");
         assert!(out.contains("RIGHT"), "labels the right region");
         assert!(super::preview_ansi("nope").is_none());
+    }
+
+    #[test]
+    fn set_base_preserves_comments_and_creates_theme_table() {
+        use toml_edit::DocumentMut;
+        let mut doc = "# my config\n[layout]\nright = [\"datetime\"]\n"
+            .parse::<DocumentMut>()
+            .unwrap();
+        super::set_base(&mut doc, "nord");
+        let s = doc.to_string();
+        assert!(s.contains("# my config"), "comment preserved: {s}");
+        assert!(s.contains("[theme]"), "theme table created: {s}");
+        assert!(s.contains("base = \"nord\""), "base set: {s}");
+        // idempotent overwrite
+        super::set_base(&mut doc, "gruvbox");
+        assert!(doc.to_string().contains("base = \"gruvbox\""));
+        assert!(!doc.to_string().contains("nord"));
+    }
+
+    #[test]
+    fn resolvable_accepts_builtin_and_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("mine.toml"), "fg = { Indexed = 1 }\n").unwrap();
+        assert!(super::resolvable("nord", tmp.path()));
+        assert!(super::resolvable("mine", tmp.path()));
+        assert!(!super::resolvable("nope", tmp.path()));
     }
 }
