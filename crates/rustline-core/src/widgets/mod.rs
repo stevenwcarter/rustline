@@ -134,6 +134,8 @@ impl Registry {
                     alt_format: memory.alt_format.clone(),
                     down_format: memory.down_format.clone(),
                     bar_width: memory.bar_width,
+                    warn_percent: memory.warn_percent,
+                    crit_percent: memory.crit_percent,
                 })
             }),
         );

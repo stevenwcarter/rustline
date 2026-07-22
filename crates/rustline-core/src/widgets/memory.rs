@@ -10,6 +10,8 @@ pub struct MemoryWidget {
     pub alt_format: String,
     pub down_format: String,
     pub bar_width: usize,
+    pub warn_percent: f64,
+    pub crit_percent: f64,
 }
 
 impl MemoryWidget {
@@ -56,7 +58,15 @@ impl Widget for MemoryWidget {
                     .replace("{percent}", &percent.to_string())
                     .replace("{bar}", &bar::gauge_bar(fraction, self.bar_width))
                     .replace("{icon}", MEMORY_ICON);
-                vec![Segment::new(text)]
+                let kind = crate::widgets::alert_over(
+                    fraction * 100.0,
+                    self.warn_percent,
+                    self.crit_percent,
+                );
+                match crate::widgets::alert_style(kind, &ctx.colors) {
+                    Some(style) => vec![Segment::styled(text, style)],
+                    None => vec![Segment::new(text)],
+                }
             }
             None => {
                 if self.down_format.is_empty() {
@@ -125,6 +135,8 @@ mod tests {
             alt_format: String::new(),
             down_format: down.into(),
             bar_width: 8,
+            warn_percent: 80.0,
+            crit_percent: 92.0,
         }
     }
 
@@ -182,6 +194,8 @@ mod tests {
             alt_format: "{icon} {bar}".into(),
             down_format: String::new(),
             bar_width: 8,
+            warn_percent: 80.0,
+            crit_percent: 92.0,
         }
         .render(&c);
         assert_eq!(out[0].text, "\u{f035b} ████░░░░");
@@ -194,17 +208,37 @@ mod tests {
             alt_format: String::new(),
             down_format: String::new(),
             bar_width: 8,
+            warn_percent: 80.0,
+            crit_percent: 92.0,
         };
         assert_eq!(base.range_name(), None);
         let alt = MemoryWidget {
             alt_format: "{bar}".into(),
-            ..MemoryWidget {
-                format: "x".into(),
-                alt_format: String::new(),
-                down_format: String::new(),
-                bar_width: 8,
-            }
+            format: "x".into(),
+            down_format: String::new(),
+            bar_width: 8,
+            warn_percent: 80.0,
+            crit_percent: 92.0,
         };
         assert_eq!(alt.range_name(), Some("memory"));
+    }
+
+    #[test]
+    fn below_threshold_plain_over_threshold_badge() {
+        let g = 1024u64.pow(3);
+        // 8/16 = 50% -> plain
+        let out = w("{percent}%", "").render(&ctx(mem(16 * g, 8 * g, 8 * g)));
+        assert_eq!(out[0].style, crate::Style::default());
+        // 15/16 ~= 94% -> crit
+        let mut c = ctx(mem(16 * g, 15 * g, g));
+        c.colors = crate::ThemeColors {
+            error: crate::Color::Indexed(196),
+            warning: crate::Color::Indexed(214),
+            bar_bg: crate::Color::Indexed(234),
+            ..Default::default()
+        };
+        let out = w("{percent}%", "").render(&c);
+        assert_eq!(out[0].style.bg, Some(crate::Color::Indexed(196)));
+        assert!(out[0].style.bold);
     }
 }
