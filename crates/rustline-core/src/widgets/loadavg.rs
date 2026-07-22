@@ -10,6 +10,8 @@ pub struct LoadAvg {
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
+    pub warn_load: f64,
+    pub crit_load: f64,
 }
 
 impl LoadAvg {
@@ -23,7 +25,12 @@ impl Widget for LoadAvg {
             Some(vals) => {
                 let fmt =
                     crate::widgets::active_format(ctx, Self::NAME, &self.format, &self.alt_format);
-                vec![Segment::new(substitute(fmt, Some(vals)))]
+                let text = substitute(fmt, Some(vals));
+                let kind = crate::widgets::alert_over(vals[0], self.warn_load, self.crit_load);
+                match crate::widgets::alert_style(kind, &ctx.colors) {
+                    Some(style) => vec![Segment::styled(text, style)],
+                    None => vec![Segment::new(text)],
+                }
             }
             None => {
                 if self.down_format.is_empty() {
@@ -137,6 +144,8 @@ mod tests {
             format: format.into(),
             alt_format: alt.into(),
             down_format: down.into(),
+            warn_load: 0.0,
+            crit_load: 0.0,
         }
     }
 
@@ -250,5 +259,29 @@ mod tests {
     fn range_name_some_only_with_alt_format() {
         assert_eq!(w("{load1}", "{load1:.1}", "").range_name(), Some("loadavg"));
         assert_eq!(w("{load1}", "", "").range_name(), None);
+    }
+
+    #[test]
+    fn default_thresholds_off_no_style() {
+        // Load-bearing: default (0/0) -> plain segment, unchanged output.
+        let out = w("{load1}", "", "").render(&ctx_load(Some([9.9, 0.0, 0.0])));
+        assert_eq!(out[0].text, "9.90");
+        assert_eq!(out[0].style, crate::Style::default());
+    }
+
+    #[test]
+    fn configured_thresholds_alert_on_load1() {
+        let mut c = ctx_load(Some([6.0, 1.0, 1.0]));
+        c.colors = crate::ThemeColors {
+            warning: crate::Color::Indexed(214),
+            error: crate::Color::Indexed(196),
+            bar_bg: crate::Color::Indexed(234),
+            ..Default::default()
+        };
+        let mut widget = w("{load1}", "", "");
+        widget.warn_load = 4.0;
+        widget.crit_load = 8.0;
+        let out = widget.render(&c); // 6 >= warn(4) -> warn
+        assert_eq!(out[0].style.bg, Some(crate::Color::Indexed(214)));
     }
 }

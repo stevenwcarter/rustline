@@ -53,6 +53,8 @@ impl Registry {
                     format: loadavg.format.clone(),
                     alt_format: loadavg.alt_format.clone(),
                     down_format: loadavg.down_format.clone(),
+                    warn_load: loadavg.warn_load,
+                    crit_load: loadavg.crit_load,
                 })
             }),
         );
