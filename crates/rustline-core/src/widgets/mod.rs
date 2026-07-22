@@ -119,6 +119,8 @@ impl Registry {
                     alt_format: cpu.alt_format.clone(),
                     down_format: cpu.down_format.clone(),
                     bar_width: cpu.bar_width,
+                    warn_percent: cpu.warn_percent,
+                    crit_percent: cpu.crit_percent,
                 })
             }),
         );
