@@ -92,7 +92,7 @@ fn use_theme(name: &str, config_path: &Path, themes_dir: &Path) {
 }
 
 /// Read the themes-dir `*.toml` stems (empty on any error).
-fn theme_files(themes_dir: &Path) -> Vec<String> {
+pub(crate) fn theme_files(themes_dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(themes_dir) else {
         return Vec::new();
     };
@@ -218,6 +218,21 @@ fn preview_theme_ansi(theme: &Theme) -> String {
 /// `None` if unknown.
 fn preview_ansi(name: &str) -> Option<String> {
     Some(preview_theme_ansi(&builtin_theme(name)?))
+}
+
+/// Resolve and ANSI-render a preview for theme `name` (themes-dir file first,
+/// then built-in). `None` if unknown or the file is invalid.
+pub(crate) fn preview_named(name: &str, themes_dir: &Path) -> Option<String> {
+    let file = themes_dir.join(format!("{name}.toml"));
+    if let Ok(text) = std::fs::read_to_string(&file) {
+        if let Ok(tc) = toml::from_str::<ThemeConfig>(&text) {
+            let mut t = Theme::default();
+            tc.apply_to(&mut t);
+            return Some(preview_theme_ansi(&t));
+        }
+        return None;
+    }
+    preview_ansi(name)
 }
 
 /// Preview theme `name`: a themes-dir `<name>.toml` file shadows a same-named

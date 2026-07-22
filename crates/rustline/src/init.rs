@@ -4,9 +4,14 @@
 //! interactive prompt loop is a thin I/O shell over them.
 
 use std::fs;
+use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 
+use rustline_core::builtin_theme_names;
 use toml_edit::{Array, DocumentMut, Item, Table, value};
+
+use crate::cli::InitArgs;
+use crate::tmux_conf::{self, InitBlockOpts};
 
 /// The recommended starter config, embedded at build time.
 const STARTER_TEMPLATE: &str = include_str!("../assets/starter-config.toml");
@@ -218,6 +223,191 @@ pub fn defaults() -> InitAnswers {
         clock: ClockStyle::TwentyFour,
         interval: 1,
     }
+}
+
+/// Entry point for `rustline init`. `--print` wins (emit the legacy raw
+/// one-line block, write nothing). Else gather answers (`--defaults` or the
+/// interactive prompt), then write both files. A non-interactive invocation
+/// (stdin not a TTY) without a flag errors rather than writing silently.
+pub fn run(args: &InitArgs, config_path: &Path, themes_dir: &Path, tmux_conf_path: &Path) {
+    if args.print {
+        let theme = crate::resolve_base_theme("default").unwrap_or_default();
+        let bar_bg = theme.bar_bg.to_tmux();
+        let fg = theme.fg.to_tmux();
+        print!(
+            "{}",
+            tmux_conf::init_block(&InitBlockOpts {
+                bar_bg: &bar_bg,
+                fg: &fg,
+                two_line: false,
+                mouse: false,
+                interval: 1,
+            })
+        );
+        return;
+    }
+    let answers = if args.defaults {
+        defaults()
+    } else if std::io::stdin().is_terminal() {
+        prompt_answers(themes_dir)
+    } else {
+        eprintln!(
+            "rustline init needs a terminal for the interactive wizard.\n\
+             Use `rustline init --defaults` for recommended settings, or \
+             `rustline init --print` to emit the raw tmux block."
+        );
+        std::process::exit(2);
+    };
+    apply(&answers, config_path, themes_dir, tmux_conf_path);
+}
+
+/// Write `config.toml` (non-destructive) and upsert the tmux block, backing up
+/// each existing file first. Prints a summary + next step to stderr.
+fn apply(a: &InitAnswers, config_path: &Path, _themes_dir: &Path, tmux_conf_path: &Path) {
+    match write_config(a, config_path) {
+        Ok(bak) => {
+            eprint!("Wrote {}", config_path.display());
+            if !bak.as_os_str().is_empty() {
+                eprint!(" (backup: {})", bak.display());
+            }
+            eprintln!();
+        }
+        Err(e) => {
+            eprintln!("failed to write {}: {e}", config_path.display());
+            std::process::exit(1);
+        }
+    }
+
+    let theme = crate::resolve_base_theme(&a.theme).unwrap_or_default();
+    let bar_bg = theme.bar_bg.to_tmux();
+    let fg = theme.fg.to_tmux();
+    let block = tmux_conf::init_block(&InitBlockOpts {
+        bar_bg: &bar_bg,
+        fg: &fg,
+        two_line: a.two_line,
+        mouse: a.mouse,
+        interval: a.interval,
+    });
+    let existing = fs::read_to_string(tmux_conf_path).unwrap_or_default();
+    if !existing.is_empty() {
+        let mut bak = tmux_conf_path.as_os_str().to_owned();
+        bak.push(".rustline.bak");
+        if let Err(e) = fs::write(PathBuf::from(bak), &existing) {
+            eprintln!("failed to back up {}: {e}", tmux_conf_path.display());
+            std::process::exit(1);
+        }
+    }
+    let updated = tmux_conf::upsert_tmux_block(&existing, &block);
+    if let Err(e) = fs::write(tmux_conf_path, updated) {
+        eprintln!("failed to write {}: {e}", tmux_conf_path.display());
+        std::process::exit(1);
+    }
+    eprintln!(
+        "Updated {}. Reload tmux with:  tmux source-file {}",
+        tmux_conf_path.display(),
+        tmux_conf_path.display()
+    );
+}
+
+/// Read a line from stdin (untrimmed — callers trim via `parse_menu_choice`/
+/// `parse_yes_no`); empty string on EOF.
+fn read_line() -> String {
+    let mut s = String::new();
+    let _ = std::io::stdin().read_line(&mut s);
+    s
+}
+
+/// Prompt on stderr; loop the theme menu until a valid pick, then ask the
+/// remaining questions. I/O-heavy; the parsing/defaulting it delegates to is
+/// unit-tested (`parse_menu_choice`/`parse_yes_no`).
+fn prompt_answers(themes_dir: &Path) -> InitAnswers {
+    let mut a = defaults();
+    let stderr = std::io::stderr();
+
+    // Theme
+    let mut themes: Vec<String> = builtin_theme_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for f in crate::theme_cmd::theme_files(themes_dir) {
+        if !themes.contains(&f) {
+            themes.push(f);
+        }
+    }
+    loop {
+        let mut w = stderr.lock();
+        let _ = writeln!(w, "\nChoose a theme:");
+        for (i, name) in themes.iter().enumerate() {
+            let _ = writeln!(w, "  {}) {name}", i + 1);
+        }
+        let _ = write!(w, "Theme [1]: ");
+        let _ = w.flush();
+        drop(w);
+        if let Some(idx) = parse_menu_choice(&read_line(), themes.len(), 0) {
+            a.theme = themes[idx].clone();
+            if let Some(preview) = crate::theme_cmd::preview_named(&a.theme, themes_dir) {
+                eprintln!("\n{preview}\n");
+            }
+            if ask("Use this theme?", true) {
+                break;
+            }
+        } else {
+            eprintln!("Please enter a number from the list.");
+        }
+    }
+
+    a.two_line = ask("Two-line status (window list on its own line)?", false);
+    a.mouse = ask("Enable mouse for click-to-toggle widgets?", true);
+    a.battery = ask(
+        "Laptop — show battery?",
+        crate::battery::read_battery().is_some(),
+    );
+    a.tailscale = ask("On a Tailscale network — show Tailscale IP?", false);
+    a.lan_ip = ask("Show LAN IP?", false);
+
+    // Clock
+    let clocks = [
+        ("24-hour            (14:05)", ClockStyle::TwentyFour),
+        (
+            "24-hour + seconds  (14:05:09)",
+            ClockStyle::TwentyFourSeconds,
+        ),
+        ("12-hour            (02:05 PM)", ClockStyle::Twelve),
+        (
+            "12-hour + seconds  (02:05:09 PM)",
+            ClockStyle::TwelveSeconds,
+        ),
+    ];
+    loop {
+        let mut w = stderr.lock();
+        let _ = writeln!(w, "\nClock style:");
+        for (i, (label, _)) in clocks.iter().enumerate() {
+            let _ = writeln!(w, "  {}) {label}", i + 1);
+        }
+        let _ = write!(w, "Clock [1]: ");
+        let _ = w.flush();
+        drop(w);
+        if let Some(idx) = parse_menu_choice(&read_line(), clocks.len(), 0) {
+            a.clock = clocks[idx].1;
+            break;
+        }
+        eprintln!("Please enter a number from the list.");
+    }
+
+    a.interval = if ask("Fast refresh (1s)? (No = 5s)", true) {
+        1
+    } else {
+        5
+    };
+    a
+}
+
+/// Ask a yes/no on stderr with a shown default; returns the parsed answer.
+fn ask(question: &str, default: bool) -> bool {
+    let d = if default { "Y/n" } else { "y/N" };
+    eprint!("{question} [{d}]: ");
+    let _ = std::io::stderr().flush();
+    parse_yes_no(&read_line(), default)
 }
 
 #[cfg(test)]

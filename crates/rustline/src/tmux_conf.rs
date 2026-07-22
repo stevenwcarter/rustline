@@ -104,36 +104,43 @@ bind -T root MouseDown1Status {
 pub const TMUX_BEGIN: &str = "# >>> rustline >>>";
 pub const TMUX_END: &str = "# <<< rustline <<<";
 
-/// Remove an existing `TMUX_BEGIN..=TMUX_END` region (if present), returning the
-/// surrounding content joined and right-trimmed.
-fn strip_region(s: &str) -> String {
-    if let (Some(b), Some(e)) = (s.find(TMUX_BEGIN), s.find(TMUX_END))
-        && e >= b
-    {
-        let end = e + TMUX_END.len();
-        let before = s[..b].trim_end();
-        let after = &s[end..];
-        return format!("{before}{after}");
+/// Find an existing `TMUX_BEGIN..=TMUX_END` region in `s`, returning the exact
+/// text before/after it. The region's own trailing newline (if present) is
+/// folded into the split point rather than left in `after`, so a caller that
+/// splices `before`/`wrapped`/`after` back together never accumulates an extra
+/// blank line across repeated upserts. `None` if no complete region is found.
+fn find_region(s: &str) -> Option<(&str, &str)> {
+    let b = s.find(TMUX_BEGIN)?;
+    let e = s.find(TMUX_END)?;
+    if e < b {
+        return None;
     }
-    s.to_string()
+    let mut end = e + TMUX_END.len();
+    if s[end..].starts_with('\n') {
+        end += 1;
+    }
+    Some((&s[..b], &s[end..]))
 }
 
 /// Insert or replace the rustline-managed block in an existing `~/.tmux.conf`.
-/// Idempotent: `upsert(upsert(x, b), b) == upsert(x, b)`. Content outside the
-/// markers is preserved; the block is separated from prior content by a blank
-/// line.
-#[allow(dead_code)] // wired into `rustline init`'s idempotent-write path by a later task
+/// Idempotent: `upsert(upsert(x, b), b) == upsert(x, b)`. An existing region is
+/// replaced strictly in place (the surrounding text is untouched, whatever its
+/// whitespace), so re-running with an unchanged `block` is a true byte-for-byte
+/// no-op. Only the no-markers-yet (first-time) case normalizes spacing: prior
+/// content is separated from the newly appended block by exactly one blank line.
 pub fn upsert_tmux_block(existing: &str, block: &str) -> String {
-    let base = strip_region(existing);
     let wrapped = format!(
         "{TMUX_BEGIN}\n{}\n{TMUX_END}\n",
         block.trim_end_matches('\n')
     );
-    let base = base.trim_end_matches('\n');
-    if base.trim().is_empty() {
+    if let Some((before, after)) = find_region(existing) {
+        return format!("{before}{wrapped}{after}");
+    }
+    let trimmed = existing.trim_end_matches('\n');
+    if trimmed.trim().is_empty() {
         wrapped
     } else {
-        format!("{base}\n\n{wrapped}")
+        format!("{trimmed}\n\n{wrapped}")
     }
 }
 

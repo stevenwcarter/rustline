@@ -4,9 +4,6 @@ mod bench;
 mod build_context;
 mod cli;
 mod cpu;
-// Wired into the CLI by a later task in the `rustline init` onboarding-wizard
-// plan; until then its pub items are reachable only from its own tests.
-#[allow(dead_code)]
 mod init;
 mod logging;
 mod memory;
@@ -71,9 +68,14 @@ fn themes_dir() -> PathBuf {
     config_base().join("themes")
 }
 
+/// The user's tmux config file: `$HOME/.tmux.conf`.
+fn tmux_conf_path() -> PathBuf {
+    PathBuf::from(env::var("HOME").unwrap_or_default()).join(".tmux.conf")
+}
+
 /// Resolve a base-theme name to a full `Theme`: a themes-dir `*.toml` file wins
 /// over a same-named built-in (so a user file can shadow/override a built-in).
-fn resolve_base_theme(name: &str) -> Option<Theme> {
+pub(crate) fn resolve_base_theme(name: &str) -> Option<Theme> {
     let file = themes_dir().join(format!("{name}.toml"));
     if let Ok(text) = std::fs::read_to_string(&file) {
         match toml::from_str::<ThemeConfig>(&text) {
@@ -154,17 +156,8 @@ fn main() {
             let ctx = build_window_context(&args, &theme);
             emit(&render_window(&ctx, &registry, &theme), args.preview);
         }
-        Command::Init => {
-            let bar_bg = theme.bar_bg.to_tmux();
-            let fg = theme.fg.to_tmux();
-            let opts = tmux_conf::InitBlockOpts {
-                bar_bg: &bar_bg,
-                fg: &fg,
-                two_line: false,
-                mouse: false,
-                interval: 1,
-            };
-            print!("{}", tmux_conf::init_block(&opts));
+        Command::Init(args) => {
+            init::run(&args, &config_path(), &themes_dir(), &tmux_conf_path());
         }
         Command::PrintConfig => match toml::to_string_pretty(&cfg) {
             Ok(s) => print!("{s}"),
