@@ -181,6 +181,45 @@ pub fn write_config(a: &InitAnswers, config_path: &Path) -> std::io::Result<Path
     }
 }
 
+/// Parse a 1-based menu selection into a 0-based index. Blank → `default`
+/// (already 0-based); out-of-range or non-numeric → `None` (caller re-asks).
+pub fn parse_menu_choice(input: &str, n: usize, default: usize) -> Option<usize> {
+    let t = input.trim();
+    if t.is_empty() {
+        return Some(default);
+    }
+    match t.parse::<usize>() {
+        Ok(k) if (1..=n).contains(&k) => Some(k - 1),
+        _ => None,
+    }
+}
+
+/// Parse a yes/no answer by its first letter (case-insensitive). Blank or
+/// unrecognized → `default`.
+pub fn parse_yes_no(input: &str, default: bool) -> bool {
+    match input.trim().chars().next().map(|c| c.to_ascii_lowercase()) {
+        Some('y') => true,
+        Some('n') => false,
+        _ => default,
+    }
+}
+
+/// The recommended answer set used by `--defaults` (and as interactive
+/// prompt defaults, except the battery question, which is pre-filled from
+/// hardware detection by the interactive path).
+pub fn defaults() -> InitAnswers {
+    InitAnswers {
+        theme: "default".into(),
+        two_line: false,
+        mouse: true,
+        battery: false,
+        tailscale: false,
+        lan_ip: false,
+        clock: ClockStyle::TwentyFour,
+        interval: 1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,5 +394,38 @@ format = "USER {percent}%"
         );
         let bak = super::backup_path(&path);
         assert!(!bak.exists(), "no backup should be written: {bak:?}");
+    }
+
+    #[test]
+    fn menu_choice_blank_is_default_else_one_based() {
+        assert_eq!(parse_menu_choice("", 6, 2), Some(2)); // blank → default (0-based)
+        assert_eq!(parse_menu_choice("  ", 6, 0), Some(0));
+        assert_eq!(parse_menu_choice("1", 6, 0), Some(0)); // 1-based input → 0-based
+        assert_eq!(parse_menu_choice("6", 6, 0), Some(5));
+        assert_eq!(parse_menu_choice("7", 6, 0), None); // out of range
+        assert_eq!(parse_menu_choice("0", 6, 0), None);
+        assert_eq!(parse_menu_choice("x", 6, 0), None);
+    }
+
+    #[test]
+    fn yes_no_reads_first_letter_else_default() {
+        assert!(parse_yes_no("y", false));
+        assert!(parse_yes_no("Yes", false));
+        assert!(!parse_yes_no("n", true));
+        assert!(!parse_yes_no("NO", true));
+        assert!(parse_yes_no("", true)); // blank → default
+        assert!(!parse_yes_no("  ", false));
+        assert!(parse_yes_no("garbage", true)); // unrecognized → default
+    }
+
+    #[test]
+    fn defaults_are_recommended_set() {
+        let d = defaults();
+        assert_eq!(d.theme, "default");
+        assert!(!d.two_line);
+        assert!(d.mouse);
+        assert!(!d.battery && !d.tailscale && !d.lan_ip);
+        assert_eq!(d.clock, ClockStyle::TwentyFour);
+        assert_eq!(d.interval, 1);
     }
 }
