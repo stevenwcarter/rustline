@@ -2,6 +2,7 @@
 
 mod fixture;
 mod harness;
+mod plugins;
 mod render_passes;
 mod report;
 mod sources;
@@ -44,6 +45,15 @@ pub fn run(args: &BenchArgs, cfg: &Config) {
 
     if want("sources") {
         groups.push(sources::bench_sources(args.real_iters, 2));
+    }
+
+    if want("plugins") {
+        groups.push(plugins::bench_plugins(
+            cfg,
+            args,
+            args.iters,
+            args.real_iters,
+        ));
     }
 
     let markdown = args.format == "markdown";
