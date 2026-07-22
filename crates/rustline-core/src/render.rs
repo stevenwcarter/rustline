@@ -38,6 +38,12 @@ pub struct Theme {
     /// Fill/text colors for inactive window pills.
     pub win_inactive_bg: Color,
     pub win_inactive_fg: Color,
+    /// Semantic colors, available to widgets/plugins via `Context.colors` and
+    /// used by threshold-aware widgets for alert badges.
+    pub success: Color,
+    pub info: Color,
+    pub warning: Color,
+    pub error: Color,
 }
 
 impl Default for Theme {
@@ -57,6 +63,10 @@ impl Default for Theme {
             win_current_fg: Color::Indexed(255),
             win_inactive_bg: Color::Indexed(236),
             win_inactive_fg: Color::Indexed(250),
+            success: Color::Indexed(35),
+            info: Color::Indexed(39),
+            warning: Color::Indexed(214),
+            error: Color::Indexed(196),
         }
     }
 }
@@ -75,6 +85,18 @@ impl Theme {
         match dir {
             Direction::Left => &self.soft_left,
             Direction::Right => &self.soft_right,
+        }
+    }
+
+    /// Bundle the theme-derived colors a widget/plugin may consume.
+    pub fn colors(&self) -> crate::ThemeColors {
+        crate::ThemeColors {
+            fg: self.fg.clone(),
+            bar_bg: self.bar_bg.clone(),
+            success: self.success.clone(),
+            info: self.info.clone(),
+            warning: self.warning.clone(),
+            error: self.error.clone(),
         }
     }
 }
@@ -294,6 +316,10 @@ mod tests {
             win_current_fg: Color::Indexed(255),
             win_inactive_bg: Color::Indexed(236),
             win_inactive_fg: Color::Indexed(250),
+            success: Color::Indexed(35),
+            info: Color::Indexed(39),
+            warning: Color::Indexed(214),
+            error: Color::Indexed(196),
         }
     }
 
@@ -512,5 +538,18 @@ mod tests {
             open < sep && sep < close,
             "internal separator inside range: {out}"
         );
+    }
+
+    #[test]
+    fn theme_default_has_semantic_colors_and_colors_bundle() {
+        let t = Theme::default();
+        assert_eq!(t.success, Color::Indexed(35));
+        assert_eq!(t.info, Color::Indexed(39));
+        assert_eq!(t.warning, Color::Indexed(214));
+        assert_eq!(t.error, Color::Indexed(196));
+        let c = t.colors();
+        assert_eq!(c.fg, t.fg);
+        assert_eq!(c.bar_bg, t.bar_bg);
+        assert_eq!(c.error, t.error);
     }
 }
