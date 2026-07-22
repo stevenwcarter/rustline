@@ -6,6 +6,8 @@ pub struct BatteryWidget {
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
+    pub warn_percent: f64,
+    pub crit_percent: f64,
 }
 
 impl BatteryWidget {
@@ -53,7 +55,19 @@ impl Widget for BatteryWidget {
                     .replace("{icon}", battery_icon(&b))
                     .replace("{percent}", &b.percent.to_string())
                     .replace("{state}", state_word(b.state));
-                vec![Segment::new(text)]
+                let kind = if b.state == BatteryState::Discharging {
+                    crate::widgets::alert_under(
+                        b.percent as f64,
+                        self.warn_percent,
+                        self.crit_percent,
+                    )
+                } else {
+                    crate::widgets::AlertKind::None
+                };
+                match crate::widgets::alert_style(kind, &ctx.colors) {
+                    Some(style) => vec![Segment::styled(text, style)],
+                    None => vec![Segment::new(text)],
+                }
             }
             None => {
                 if self.down_format.is_empty() {
@@ -102,6 +116,7 @@ mod tests {
             os: String::new(),
             arch: String::new(),
             toggled: Default::default(),
+            colors: Default::default(),
         }
     }
 
@@ -114,6 +129,8 @@ mod tests {
             format: "{icon} {percent}%".into(),
             alt_format: String::new(),
             down_format: String::new(),
+            warn_percent: 20.0,
+            crit_percent: 10.0,
         }
     }
 
@@ -123,6 +140,8 @@ mod tests {
             format: "{icon} {percent}% {state}".into(),
             alt_format: String::new(),
             down_format: String::new(),
+            warn_percent: 20.0,
+            crit_percent: 10.0,
         };
         let out = widget.render(&ctx(bat(73, BatteryState::Discharging)));
         assert_eq!(out[0].text, "\u{f0080} 73% discharging");
@@ -221,6 +240,8 @@ mod tests {
             format: "{icon} {percent}%".into(),
             alt_format: String::new(),
             down_format: "no-batt {percent}{icon}{state}".into(),
+            warn_percent: 20.0,
+            crit_percent: 10.0,
         };
         let out = widget.render(&ctx(None));
         assert_eq!(out[0].text, "no-batt ");
@@ -234,6 +255,8 @@ mod tests {
             format: "{percent}%".into(),
             alt_format: "{icon} {percent}% {state}".into(),
             down_format: String::new(),
+            warn_percent: 20.0,
+            crit_percent: 10.0,
         }
         .render(&c);
         assert_eq!(out[0].text, "\u{f0080} 73% discharging");
@@ -246,6 +269,8 @@ mod tests {
                 format: "x".into(),
                 alt_format: String::new(),
                 down_format: String::new(),
+                warn_percent: 20.0,
+                crit_percent: 10.0,
             }
             .range_name(),
             None
@@ -255,9 +280,34 @@ mod tests {
                 format: "x".into(),
                 alt_format: "{state}".into(),
                 down_format: String::new(),
+                warn_percent: 20.0,
+                crit_percent: 10.0,
             }
             .range_name(),
             Some("battery")
         );
+    }
+
+    #[test]
+    fn low_discharging_alerts_but_charging_does_not() {
+        let mut c = ctx(bat(15, BatteryState::Discharging));
+        c.colors = crate::ThemeColors {
+            warning: crate::Color::Indexed(214),
+            error: crate::Color::Indexed(196),
+            bar_bg: crate::Color::Indexed(234),
+            ..Default::default()
+        };
+        let out = w().render(&c); // 15% <= warn(20) -> warn
+        assert_eq!(out[0].style.bg, Some(crate::Color::Indexed(214)));
+
+        let mut c2 = ctx(bat(15, BatteryState::Charging));
+        c2.colors = c.colors.clone();
+        let out = w().render(&c2); // charging -> no alert
+        assert_eq!(out[0].style, crate::Style::default());
+
+        let mut c3 = ctx(bat(8, BatteryState::Discharging));
+        c3.colors = c.colors.clone();
+        let out = w().render(&c3); // 8% <= crit(10) -> crit
+        assert_eq!(out[0].style.bg, Some(crate::Color::Indexed(196)));
     }
 }

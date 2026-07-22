@@ -104,6 +104,12 @@ pub struct Context {
     /// toggling by checking its own name.
     #[serde(default)]
     pub toggled: BTreeSet<String>,
+    /// Theme-derived colors (default text fg, bar background, and the four
+    /// semantic colors) copied from the resolved theme at build time, so
+    /// widgets and WASM guests can style consistently. `#[serde(default)]` keeps
+    /// deserialization total across host/guest version skew (invariant #2).
+    #[serde(default)]
+    pub colors: crate::ThemeColors,
 }
 
 #[cfg(test)]
@@ -142,6 +148,7 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
             toggled: BTreeSet::new(),
+            colors: Default::default(),
         }
     }
 
@@ -222,5 +229,31 @@ mod tests {
         );
         let back2: Context = serde_json::from_str(&without).unwrap();
         assert!(back2.toggled.is_empty());
+    }
+
+    #[test]
+    fn context_colors_survive_serde_and_default_when_absent() {
+        use crate::ThemeColors;
+        let mut ctx = sample();
+        ctx.colors = ThemeColors {
+            error: crate::Color::Rgb(1, 2, 3),
+            ..ThemeColors::default()
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: Context = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.colors.error, crate::Color::Rgb(1, 2, 3));
+
+        // A Context JSON omitting `colors` deserializes to the default bundle
+        // (host/guest version skew must stay total — invariant #2).
+        let without = json.replace(
+            &format!(
+                ",\"colors\":{}",
+                serde_json::to_string(&ctx.colors).unwrap()
+            ),
+            "",
+        );
+        assert_ne!(without, json, "sanity: the colors key was present to strip");
+        let back2: Context = serde_json::from_str(&without).unwrap();
+        assert_eq!(back2.colors, ThemeColors::default());
     }
 }

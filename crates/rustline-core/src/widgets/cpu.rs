@@ -10,6 +10,8 @@ pub struct CpuWidget {
     pub alt_format: String,
     pub down_format: String,
     pub bar_width: usize,
+    pub warn_percent: f64,
+    pub crit_percent: f64,
 }
 
 impl CpuWidget {
@@ -31,7 +33,15 @@ impl Widget for CpuWidget {
                         &bar::gauge_bar(c.percent as f64 / 100.0, self.bar_width),
                     )
                     .replace("{icon}", CPU_ICON);
-                vec![Segment::new(text)]
+                let kind = crate::widgets::alert_over(
+                    c.percent as f64,
+                    self.warn_percent,
+                    self.crit_percent,
+                );
+                match crate::widgets::alert_style(kind, &ctx.colors) {
+                    Some(style) => vec![Segment::styled(text, style)],
+                    None => vec![Segment::new(text)],
+                }
             }
             None => {
                 if self.down_format.is_empty() {
@@ -79,6 +89,7 @@ mod tests {
             os: String::new(),
             arch: String::new(),
             toggled: Default::default(),
+            colors: Default::default(),
         }
     }
 
@@ -88,6 +99,8 @@ mod tests {
             alt_format: String::new(),
             down_format: down.into(),
             bar_width: 8,
+            warn_percent: 80.0,
+            crit_percent: 95.0,
         }
     }
 
@@ -97,6 +110,8 @@ mod tests {
             alt_format: alt.into(),
             down_format: down.into(),
             bar_width: 8,
+            warn_percent: 80.0,
+            crit_percent: 95.0,
         }
     }
 
@@ -142,5 +157,43 @@ mod tests {
     fn none_down_format_collapses_placeholders() {
         let out = w("{percent}%", "cpu? {percent}{bar}{icon}").render(&ctx(None));
         assert_eq!(out[0].text, "cpu? ");
+    }
+
+    #[test]
+    fn below_threshold_is_plain_segment() {
+        // Characterization: no alert -> default (unstyled) segment, as before.
+        let out = w("{percent}%", "").render(&ctx(Some(CpuUsage { percent: 50.0 })));
+        assert_eq!(out[0].text, "50%");
+        assert_eq!(out[0].style, crate::Style::default());
+    }
+
+    #[test]
+    fn warn_and_crit_apply_badge_style() {
+        let mut c = ctx(Some(CpuUsage { percent: 85.0 }));
+        c.colors = crate::ThemeColors {
+            warning: crate::Color::Indexed(214),
+            error: crate::Color::Indexed(196),
+            bar_bg: crate::Color::Indexed(234),
+            ..Default::default()
+        };
+        let out = w("{percent}%", "").render(&c);
+        assert_eq!(out[0].style.bg, Some(crate::Color::Indexed(214))); // warn
+        assert_eq!(out[0].style.fg, Some(crate::Color::Indexed(234)));
+        assert!(out[0].style.bold);
+
+        c.cpu = Some(CpuUsage { percent: 96.0 });
+        let out = w("{percent}%", "").render(&c);
+        assert_eq!(out[0].style.bg, Some(crate::Color::Indexed(196))); // crit
+    }
+
+    #[test]
+    fn thresholds_disabled_never_alert() {
+        let mut c = ctx(Some(CpuUsage { percent: 100.0 }));
+        c.colors = crate::ThemeColors::default();
+        let mut widget = w("{percent}%", "");
+        widget.warn_percent = 0.0;
+        widget.crit_percent = 0.0;
+        let out = widget.render(&c);
+        assert_eq!(out[0].style, crate::Style::default());
     }
 }

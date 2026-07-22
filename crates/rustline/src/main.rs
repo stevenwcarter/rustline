@@ -5,6 +5,7 @@ mod cpu;
 mod logging;
 mod memory;
 mod plugin_cmd;
+mod theme_cmd;
 mod tmux_conf;
 mod toggles;
 
@@ -15,7 +16,8 @@ use build_context::{build_region_context, build_window_context};
 use clap::Parser;
 use cli::{Cli, Command, Render};
 use rustline_core::{
-    Config, Direction, Registry, render_named_region, render_window, tmux_to_ansi,
+    Config, Direction, Registry, Theme, ThemeConfig, builtin_theme, render_named_region,
+    render_window, tmux_to_ansi,
 };
 
 /// Print a rendered region to stdout: as ANSI-coloured text (with a trailing
@@ -42,13 +44,55 @@ fn resolve_plugin_dir(flag: Option<&str>, cfg: &Config) -> PathBuf {
     rustline_wasm::default_plugin_dir()
 }
 
-/// Resolve the config file path: `$XDG_CONFIG_HOME/rustline/config.toml`,
-/// falling back to `$HOME/.config/rustline/config.toml` when unset.
-fn config_path() -> PathBuf {
+/// The rustline config base dir: `$XDG_CONFIG_HOME/rustline`, falling back to
+/// `$HOME/.config/rustline`.
+fn config_base() -> PathBuf {
     let base = env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env::var("HOME").unwrap_or_default()).join(".config"));
-    base.join("rustline").join("config.toml")
+    base.join("rustline")
+}
+
+/// Resolve the config file path: `$XDG_CONFIG_HOME/rustline/config.toml`,
+/// falling back to `$HOME/.config/rustline/config.toml` when unset.
+fn config_path() -> PathBuf {
+    config_base().join("config.toml")
+}
+
+/// Resolve the themes dir: `$XDG_CONFIG_HOME/rustline/themes` (fallback
+/// `~/.config/rustline/themes`), parallel to `config_path`.
+fn themes_dir() -> PathBuf {
+    config_base().join("themes")
+}
+
+/// Resolve a base-theme name to a full `Theme`: a themes-dir `*.toml` file wins
+/// over a same-named built-in (so a user file can shadow/override a built-in).
+fn resolve_base_theme(name: &str) -> Option<Theme> {
+    let file = themes_dir().join(format!("{name}.toml"));
+    if let Ok(text) = std::fs::read_to_string(&file) {
+        match toml::from_str::<ThemeConfig>(&text) {
+            Ok(tc) => {
+                let mut t = Theme::default();
+                tc.apply_to(&mut t);
+                return Some(t);
+            }
+            Err(e) => tracing::warn!("invalid theme file {}: {e}", file.display()),
+        }
+    }
+    builtin_theme(name)
+}
+
+/// Resolve the effective theme: default → base (file-first, then built-in) →
+/// inline `[theme]` overrides. An unresolvable base warns and falls back.
+fn resolve_theme(cfg: &Config) -> Theme {
+    let base = match cfg.theme.base.as_deref() {
+        Some(name) => resolve_base_theme(name).unwrap_or_else(|| {
+            tracing::warn!("unknown theme base {name:?}; using default");
+            Theme::default()
+        }),
+        None => Theme::default(),
+    };
+    cfg.to_theme_over(base)
 }
 
 /// Handle `rustline click`: on a left-click with a non-empty range, flip that
@@ -77,14 +121,14 @@ fn main() {
     if let Some(msg) = load_warning {
         tracing::warn!("{msg}");
     }
-    let theme = cfg.to_theme();
+    let theme = resolve_theme(&cfg);
 
     match cli.command {
         Command::Render(Render::Left(args)) => {
             let plugin_dir = resolve_plugin_dir(args.plugin_dir.as_deref(), &cfg);
             let mut registry = Registry::with_builtins(&cfg);
             rustline_wasm::register_plugins(&mut registry, &cfg, &plugin_dir, &cfg.layout.left);
-            let ctx = build_region_context(&args, &cfg.layout.left);
+            let ctx = build_region_context(&args, &cfg.layout.left, &theme);
             let out =
                 render_named_region(Direction::Left, &cfg.layout.left, &ctx, &registry, &theme);
             emit(&out, args.preview);
@@ -93,7 +137,7 @@ fn main() {
             let plugin_dir = resolve_plugin_dir(args.plugin_dir.as_deref(), &cfg);
             let mut registry = Registry::with_builtins(&cfg);
             rustline_wasm::register_plugins(&mut registry, &cfg, &plugin_dir, &cfg.layout.right);
-            let ctx = build_region_context(&args, &cfg.layout.right);
+            let ctx = build_region_context(&args, &cfg.layout.right, &theme);
             let out =
                 render_named_region(Direction::Right, &cfg.layout.right, &ctx, &registry, &theme);
             emit(&out, args.preview);
@@ -101,7 +145,7 @@ fn main() {
         Command::Render(Render::Window(args)) => {
             // Windows don't run plugins in v1: builtins only.
             let registry = Registry::with_builtins(&cfg);
-            let ctx = build_window_context(&args);
+            let ctx = build_window_context(&args, &theme);
             emit(&render_window(&ctx, &registry, &theme), args.preview);
         }
         Command::Init => print!(
@@ -116,6 +160,7 @@ fn main() {
             }
         },
         Command::Plugin(cmd) => plugin_cmd::run(cmd, &config_path()),
+        Command::Theme(cmd) => theme_cmd::run(cmd, &config_path(), &themes_dir()),
         Command::Click(args) => run_click(&args),
     }
 }

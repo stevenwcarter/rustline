@@ -35,8 +35,32 @@ pub enum Command {
     /// Manage plugins and their capability allowlists.
     #[command(subcommand)]
     Plugin(PluginCmd),
+    /// List, preview, select, or scaffold themes.
+    #[command(subcommand)]
+    Theme(ThemeCmd),
     /// Toggle a widget's alt view (invoked by the tmux MouseDown1Status binding).
     Click(ClickArgs),
+}
+
+/// Manage themes: list, preview, select, and scaffold new ones.
+#[derive(Subcommand)]
+pub enum ThemeCmd {
+    /// List built-in and themes-dir themes (marks the active one).
+    List,
+    /// Print an ANSI colour preview of a theme.
+    Show { name: String },
+    /// Select a theme by writing `[theme].base` into the config file.
+    Use { name: String },
+    /// Scaffold a new tweakable theme file seeded from an existing theme.
+    New {
+        name: String,
+        /// Seed theme to copy from (built-in or themes-dir stem). Default: `default`.
+        #[arg(long, default_value = "default")]
+        from: String,
+        /// Overwrite an existing theme file.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Manage discovered plugins and their capability allowlists.

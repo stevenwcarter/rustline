@@ -131,6 +131,7 @@ mod tests {
             os: String::new(),
             arch: String::new(),
             toggled: Default::default(),
+            colors: Default::default(),
         }
     }
 
@@ -257,6 +258,28 @@ mod tests {
             out.contains("scadrial"),
             "surviving widget still renders: {out}"
         );
+    }
+
+    #[test]
+    fn render_right_region_shows_alert_badge_markup() {
+        // Cross-module integration: Context.colors -> the cpu widget's
+        // alert_over/alert_style -> a styled Segment -> assign_palette
+        // (which must skip a segment's explicit bg) -> render_region_ranged
+        // markup. Pins that a crit-tier reading actually surfaces as tmux
+        // badge markup end to end, not just that the pure helpers agree.
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        let theme = cfg.to_theme();
+        let mut c = ctx();
+        c.cpu = Some(crate::CpuUsage { percent: 96.0 }); // >= default crit 95 -> error tier
+        c.colors = crate::ThemeColors {
+            error: crate::Color::Indexed(196),
+            bar_bg: crate::Color::Indexed(234),
+            ..Default::default()
+        };
+        let out = render_named_region(Direction::Right, &["cpu".to_string()], &c, &reg, &theme);
+        assert!(out.contains("bg=colour196"), "alert badge bg: {out}");
+        assert!(out.contains("bold"), "alert badge bold: {out}");
     }
 
     #[test]
