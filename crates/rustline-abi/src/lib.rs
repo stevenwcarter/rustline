@@ -22,6 +22,34 @@ impl Color {
     }
 }
 
+/// The theme-derived colors a widget or WASM plugin may use to style output
+/// consistently with the active theme: the default text `fg`, the bar
+/// background `bar_bg`, and the four semantic colors. Carried on `Context`
+/// (serde `default`) so it crosses the WASM boundary. Defaults match
+/// `rustline_core::Theme::default()`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemeColors {
+    pub fg: Color,
+    pub bar_bg: Color,
+    pub success: Color,
+    pub info: Color,
+    pub warning: Color,
+    pub error: Color,
+}
+
+impl Default for ThemeColors {
+    fn default() -> Self {
+        Self {
+            fg: Color::Indexed(255),
+            bar_bg: Color::Indexed(234),
+            success: Color::Indexed(35),
+            info: Color::Indexed(39),
+            warning: Color::Indexed(214),
+            error: Color::Indexed(196),
+        }
+    }
+}
+
 /// Visual styling for a [`Segment`]: foreground/background color and
 /// boldness.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,5 +101,19 @@ mod tests {
         let s = Segment::new("hi");
         assert_eq!(s.text, "hi");
         assert_eq!(s.style, Style::default());
+    }
+
+    #[test]
+    fn theme_colors_default_and_serde_round_trip() {
+        let d = ThemeColors::default();
+        assert_eq!(d.fg, Color::Indexed(255));
+        assert_eq!(d.bar_bg, Color::Indexed(234));
+        assert_eq!(d.success, Color::Indexed(35));
+        assert_eq!(d.info, Color::Indexed(39));
+        assert_eq!(d.warning, Color::Indexed(214));
+        assert_eq!(d.error, Color::Indexed(196));
+        let json = serde_json::to_string(&d).unwrap();
+        let back: ThemeColors = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, d);
     }
 }
