@@ -493,6 +493,30 @@ fn click_toggles_state_file() {
     assert!(!toggles.contains("cpu"), "cpu toggled off: {toggles:?}");
 }
 
+#[test]
+fn theme_pick_non_tty_errors_and_writes_nothing() {
+    let tmp = tempdir().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.arg("theme").arg("pick");
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    let out = cmd.output().unwrap(); // no TTY under Command
+    assert!(!out.status.success(), "non-TTY `theme pick` must error");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("theme show") || err.contains("theme use"),
+        "hints the non-interactive alternatives: {err}"
+    );
+    assert!(
+        !tmp.path()
+            .join("cfg")
+            .join("rustline")
+            .join("config.toml")
+            .exists(),
+        "must not write config on the non-TTY path"
+    );
+}
+
 /// A `rustline` invocation with an isolated HOME/XDG environment so logging
 /// and config read/write a throwaway tree, never the developer's real dirs.
 fn isolated_cmd(home: &Path, xdg_data: &Path, xdg_config: &Path) -> Command {

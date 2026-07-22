@@ -2,6 +2,7 @@
 //! (`use`) go through `toml_edit` so comments/formatting survive, mirroring
 //! `plugin_cmd`.
 
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
 
 use chrono::Local;
@@ -20,6 +21,7 @@ pub fn run(cmd: ThemeCmd, config_path: &Path, themes_dir: &Path) {
         ThemeCmd::List => list(config_path, themes_dir),
         ThemeCmd::Show { name } => show(&name, themes_dir),
         ThemeCmd::Use { name } => use_theme(&name, config_path, themes_dir),
+        ThemeCmd::Pick => pick(config_path, themes_dir),
         ThemeCmd::New { name, from, force } => new_theme(&name, &from, force, themes_dir),
     }
 }
@@ -397,8 +399,195 @@ fn new_theme(name: &str, from: &str, force: bool, themes_dir: &Path) {
     println!("wrote {}", dest.display());
 }
 
+/// One selectable theme in the picker: its name, whether it's the active base,
+/// and whether it comes from a themes-dir file (which shadows a same-named
+/// built-in, since resolution is file-first).
+#[derive(Debug, PartialEq, Eq)]
+struct PickEntry {
+    name: String,
+    active: bool,
+    from_file: bool,
+}
+
+/// Ordered, name-unique picker entries: built-ins (in `builtins` order) first,
+/// then themes-dir stems not already among the built-ins. `active` marks the
+/// single entry whose name equals `active`; `from_file` marks any entry whose
+/// name appears in `files` (a file shadowing a built-in name is one entry with
+/// `from_file = true`).
+fn picker_entries(active: &str, builtins: &[&str], files: &[String]) -> Vec<PickEntry> {
+    let mut entries = Vec::new();
+    for name in builtins {
+        entries.push(PickEntry {
+            name: (*name).to_string(),
+            active: *name == active,
+            from_file: files.iter().any(|f| f == name),
+        });
+    }
+    for f in files {
+        if !builtins.iter().any(|b| b == f) {
+            entries.push(PickEntry {
+                name: f.clone(),
+                active: f == active,
+                from_file: true,
+            });
+        }
+    }
+    entries
+}
+
+/// A parsed preview-loop command.
+#[derive(Debug, PartialEq, Eq)]
+enum PreviewCmd {
+    Done,
+    All,
+    Preview(usize),
+    Invalid,
+}
+
+/// Parse a preview-loop answer: blank → `Done`; `a`/`all` (case-insensitive) →
+/// `All`; a number in `1..=n` → `Preview(k-1)`; anything else → `Invalid`.
+fn parse_preview_input(input: &str, n: usize) -> PreviewCmd {
+    let t = input.trim();
+    if t.is_empty() {
+        return PreviewCmd::Done;
+    }
+    let lower = t.to_ascii_lowercase();
+    if lower == "a" || lower == "all" {
+        return PreviewCmd::All;
+    }
+    match t.parse::<usize>() {
+        Ok(k) if (1..=n).contains(&k) => PreviewCmd::Preview(k - 1),
+        _ => PreviewCmd::Invalid,
+    }
+}
+
+/// A parsed set-step command.
+#[derive(Debug, PartialEq, Eq)]
+enum SetCmd {
+    Keep,
+    Index(usize),
+    Name(String),
+}
+
+/// Parse a set-step answer: blank → `Keep`; a number in `1..=n` → `Index(k-1)`;
+/// any other non-blank → `Name(trimmed)` (an out-of-range number lands here and
+/// is rejected by the caller's entry lookup).
+fn parse_set_input(input: &str, n: usize) -> SetCmd {
+    let t = input.trim();
+    if t.is_empty() {
+        return SetCmd::Keep;
+    }
+    if let Ok(k) = t.parse::<usize>()
+        && (1..=n).contains(&k)
+    {
+        return SetCmd::Index(k - 1);
+    }
+    SetCmd::Name(t.to_string())
+}
+
+/// Read one line from `reader` (empty string on EOF).
+fn read_line<R: BufRead>(reader: &mut R) -> String {
+    let mut s = String::new();
+    let _ = reader.read_line(&mut s);
+    s
+}
+
+/// Drive the interactive preview+set loop over a generic reader/writer,
+/// returning the chosen theme name to set, or `None` to keep the current one.
+/// Performs NO config write and never exits the process, so it is fully
+/// unit-testable with a byte-slice reader.
+fn run_picker<R: BufRead, W: Write>(
+    entries: &[PickEntry],
+    themes_dir: &Path,
+    reader: &mut R,
+    writer: &mut W,
+    active: &str,
+) -> Option<String> {
+    let _ = writeln!(writer, "Themes (* = active):");
+    for (i, e) in entries.iter().enumerate() {
+        let mark = if e.active { " *" } else { "" };
+        let tag = if e.from_file { "  (custom)" } else { "" };
+        let _ = writeln!(writer, "  {}) {}{mark}{tag}", i + 1, e.name);
+    }
+    loop {
+        let _ = write!(writer, "Preview # (number, a=all, enter=done): ");
+        let _ = writer.flush();
+        match parse_preview_input(&read_line(reader), entries.len()) {
+            PreviewCmd::Done => break,
+            PreviewCmd::All => {
+                for e in entries {
+                    let _ = writeln!(writer, "\n== {} ==", e.name);
+                    if let Some(p) = preview_named(&e.name, themes_dir) {
+                        let _ = writeln!(writer, "{p}");
+                    }
+                }
+            }
+            PreviewCmd::Preview(idx) => {
+                let name = &entries[idx].name;
+                let _ = writeln!(writer, "\n== {name} ==");
+                if let Some(p) = preview_named(name, themes_dir) {
+                    let _ = writeln!(writer, "{p}");
+                }
+            }
+            PreviewCmd::Invalid => {
+                let _ = writeln!(
+                    writer,
+                    "enter a number 1-{}, 'a' for all, or blank to finish",
+                    entries.len()
+                );
+            }
+        }
+    }
+    loop {
+        let _ = write!(
+            writer,
+            "Set which theme? [name or #, enter=keep {active}]: "
+        );
+        let _ = writer.flush();
+        match parse_set_input(&read_line(reader), entries.len()) {
+            SetCmd::Keep => return None,
+            SetCmd::Index(idx) => return Some(entries[idx].name.clone()),
+            SetCmd::Name(s) => {
+                if let Some(e) = entries.iter().find(|e| e.name == s) {
+                    return Some(e.name.clone());
+                }
+                let _ = writeln!(writer, "unknown theme: {s}");
+            }
+        }
+    }
+}
+
+/// `rustline theme pick`: interactively browse theme previews and set one.
+/// Requires a TTY; a non-interactive invocation prints a hint and exits.
+fn pick(config_path: &Path, themes_dir: &Path) {
+    if !std::io::stdin().is_terminal() {
+        eprintln!(
+            "theme pick is interactive and needs a terminal.\n\
+             Use `rustline theme show <name>` to preview or `rustline theme use <name>` to set non-interactively."
+        );
+        std::process::exit(2);
+    }
+    let cfg = Config::load(config_path);
+    let active = cfg
+        .theme
+        .base
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    let entries = picker_entries(&active, builtin_theme_names(), &theme_files(themes_dir));
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    let stderr = std::io::stderr();
+    let mut writer = stderr.lock();
+    match run_picker(&entries, themes_dir, &mut reader, &mut writer, &active) {
+        Some(name) => use_theme(&name, config_path, themes_dir),
+        None => println!("kept {active}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn list_lines_mark_active_and_shadowed() {
         // built-ins: default active; a "nord" file shadows the built-in nord.
@@ -504,5 +693,101 @@ mod tests {
         let mut t = rustline_core::Theme::default();
         tc.apply_to(&mut t);
         assert_eq!(t, rustline_core::builtin_theme("nord").unwrap());
+    }
+
+    #[test]
+    fn picker_entries_orders_dedups_and_marks() {
+        let builtins = ["default", "nord", "gruvbox"];
+        let files = vec!["nord".to_string(), "mine".to_string()]; // nord file shadows built-in
+        let e = picker_entries("nord", &builtins, &files);
+        assert_eq!(
+            e.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+            vec!["default", "nord", "gruvbox", "mine"] // built-ins in order, then file-only
+        );
+        // exactly the nord entry is active, and it's from_file (file-first resolution)
+        let nord = e.iter().find(|x| x.name == "nord").unwrap();
+        assert!(nord.active && nord.from_file);
+        assert_eq!(e.iter().filter(|x| x.active).count(), 1);
+        assert!(e.iter().find(|x| x.name == "mine").unwrap().from_file);
+        assert!(!e.iter().find(|x| x.name == "default").unwrap().from_file);
+    }
+
+    #[test]
+    fn parse_preview_input_cases() {
+        assert_eq!(parse_preview_input("", 6), PreviewCmd::Done);
+        assert_eq!(parse_preview_input("  ", 6), PreviewCmd::Done);
+        assert_eq!(parse_preview_input("a", 6), PreviewCmd::All);
+        assert_eq!(parse_preview_input("ALL", 6), PreviewCmd::All);
+        assert_eq!(parse_preview_input("1", 6), PreviewCmd::Preview(0));
+        assert_eq!(parse_preview_input("6", 6), PreviewCmd::Preview(5));
+        assert_eq!(parse_preview_input("0", 6), PreviewCmd::Invalid);
+        assert_eq!(parse_preview_input("7", 6), PreviewCmd::Invalid);
+        assert_eq!(parse_preview_input("x", 6), PreviewCmd::Invalid);
+    }
+
+    #[test]
+    fn parse_set_input_cases() {
+        assert_eq!(parse_set_input("", 6), SetCmd::Keep);
+        assert_eq!(parse_set_input("3", 6), SetCmd::Index(2));
+        assert_eq!(parse_set_input("nord", 6), SetCmd::Name("nord".to_string()));
+        assert_eq!(parse_set_input("99", 6), SetCmd::Name("99".to_string())); // out-of-range → name
+    }
+
+    #[test]
+    fn run_picker_previews_then_sets_by_index() {
+        let td = tempfile::tempdir().unwrap();
+        let entries = picker_entries("default", builtin_theme_names(), &[]);
+        let input = b"2\n\n1\n"; // preview #2, blank ends preview loop, set #1
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut out: Vec<u8> = Vec::new();
+        let choice = run_picker(&entries, td.path(), &mut reader, &mut out, "default");
+        assert_eq!(choice.as_deref(), Some(entries[0].name.as_str()));
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains(&format!("== {} ==", entries[1].name))
+        );
+    }
+
+    #[test]
+    fn run_picker_blank_keeps_current() {
+        let td = tempfile::tempdir().unwrap();
+        let entries = picker_entries("default", builtin_theme_names(), &[]);
+        let input = b"\n\n"; // no preview, blank set → keep
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut out: Vec<u8> = Vec::new();
+        assert_eq!(
+            run_picker(&entries, td.path(), &mut reader, &mut out, "default"),
+            None
+        );
+    }
+
+    #[test]
+    fn run_picker_all_then_set_by_name() {
+        let td = tempfile::tempdir().unwrap();
+        let entries = picker_entries("default", builtin_theme_names(), &[]);
+        let input = b"a\n\nnord\n"; // preview all, then set by name
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut out: Vec<u8> = Vec::new();
+        let choice = run_picker(&entries, td.path(), &mut reader, &mut out, "default");
+        assert_eq!(choice.as_deref(), Some("nord"));
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("== nord ==") && s.contains("== gruvbox =="));
+    }
+
+    #[test]
+    fn run_picker_reasks_on_unknown_name() {
+        let td = tempfile::tempdir().unwrap();
+        let entries = picker_entries("default", builtin_theme_names(), &[]);
+        let input = b"\nnope\nnord\n"; // blank preview-done; set "nope" (reask) then "nord"
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut out: Vec<u8> = Vec::new();
+        let choice = run_picker(&entries, td.path(), &mut reader, &mut out, "default");
+        assert_eq!(choice.as_deref(), Some("nord"));
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("unknown theme: nope")
+        );
     }
 }
