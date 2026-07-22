@@ -30,9 +30,7 @@ pub(crate) use toggle::{active_format, clickable_range};
 pub use windows::Windows;
 
 // Re-exported for the numeric widgets (cpu/memory/battery/loadavg, Tasks
-// 7-10) to render a threshold-alert badge; not yet called until those tasks
-// wire it into each widget's render/range_name.
-#[allow(unused_imports)]
+// 7-10) to render a threshold-alert badge.
 pub(crate) use alert::{AlertKind, alert_over, alert_style, alert_under};
 
 use crate::Config;
@@ -106,6 +104,8 @@ impl Registry {
                     format: battery.format.clone(),
                     alt_format: battery.alt_format.clone(),
                     down_format: battery.down_format.clone(),
+                    warn_percent: battery.warn_percent,
+                    crit_percent: battery.crit_percent,
                 })
             }),
         );

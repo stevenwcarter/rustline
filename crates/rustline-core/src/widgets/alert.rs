@@ -3,12 +3,6 @@
 //! badge: `bg = <semantic color>`, `fg = bar_bg` (dark in every theme, so the
 //! badge always contrasts), `bold`. A threshold of `0` (or less) disables that
 //! tier — so a widget with both tiers at `0` renders byte-identically to before.
-//!
-//! Not yet consumed by any widget: cpu/memory/battery/loadavg wire this in
-//! across their own follow-on tasks, landing after this shared helper.
-// Allow: this module is added standalone, ahead of the widgets (cpu/memory/
-// battery/loadavg) that will call it in their own follow-on tasks.
-#![allow(dead_code)]
 
 use crate::{Style, ThemeColors};
 
