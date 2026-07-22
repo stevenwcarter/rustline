@@ -83,6 +83,34 @@ fn init_print_emits_block_and_writes_nothing() {
 }
 
 #[test]
+fn init_print_honors_configured_theme() {
+    // `--print` must stay byte-identical to today's `rustline init`, which
+    // colored `status-style` from the user's FULLY RESOLVED theme
+    // (`resolve_theme(&cfg)`, applying `[theme].base` AND inline `[theme]`
+    // overrides) — not a hardcoded "default". A zero-config invocation can't
+    // distinguish the two, so this pins an inline override deterministically.
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("cfg").join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    fs::write(
+        cfgdir.join("config.toml"),
+        "[theme]\nbar_bg = { Indexed = 42 }\nfg = { Indexed = 43 }\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.arg("init").arg("--print");
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    let out = cmd.output().unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("status-style bg=colour42,fg=colour43"),
+        "print honors the configured theme override: {s}"
+    );
+}
+
+#[test]
 fn init_defaults_writes_config_and_tmux_marker_block() {
     let tmp = tempdir().unwrap();
     let home = tmp.path().join("home");

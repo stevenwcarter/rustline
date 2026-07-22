@@ -226,14 +226,22 @@ pub fn defaults() -> InitAnswers {
 }
 
 /// Entry point for `rustline init`. `--print` wins (emit the legacy raw
-/// one-line block, write nothing). Else gather answers (`--defaults` or the
-/// interactive prompt), then write both files. A non-interactive invocation
-/// (stdin not a TTY) without a flag errors rather than writing silently.
-pub fn run(args: &InitArgs, config_path: &Path, themes_dir: &Path, tmux_conf_path: &Path) {
+/// one-line block, write nothing) using the caller's already-resolved
+/// `current_theme` (`[theme].base` plus any inline `[theme]` overrides), so
+/// its `status-style` colors stay byte-identical to today's `rustline init`.
+/// Else gather answers (`--defaults` or the interactive prompt), then write
+/// both files. A non-interactive invocation (stdin not a TTY) without a flag
+/// errors rather than writing silently.
+pub fn run(
+    args: &InitArgs,
+    config_path: &Path,
+    themes_dir: &Path,
+    tmux_conf_path: &Path,
+    current_theme: &rustline_core::Theme,
+) {
     if args.print {
-        let theme = crate::resolve_base_theme("default").unwrap_or_default();
-        let bar_bg = theme.bar_bg.to_tmux();
-        let fg = theme.fg.to_tmux();
+        let bar_bg = current_theme.bar_bg.to_tmux();
+        let fg = current_theme.fg.to_tmux();
         print!(
             "{}",
             tmux_conf::init_block(&InitBlockOpts {

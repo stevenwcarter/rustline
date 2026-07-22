@@ -157,7 +157,13 @@ fn main() {
             emit(&render_window(&ctx, &registry, &theme), args.preview);
         }
         Command::Init(args) => {
-            init::run(&args, &config_path(), &themes_dir(), &tmux_conf_path());
+            init::run(
+                &args,
+                &config_path(),
+                &themes_dir(),
+                &tmux_conf_path(),
+                &theme,
+            );
         }
         Command::PrintConfig => match toml::to_string_pretty(&cfg) {
             Ok(s) => print!("{s}"),
