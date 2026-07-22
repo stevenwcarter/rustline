@@ -62,14 +62,149 @@ fn render_left_preview_emits_ansi_not_tmux_markup() {
 }
 
 #[test]
-fn init_prints_block() {
+fn init_print_emits_block_and_writes_nothing() {
     let tmp = tempdir().unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
-    cmd.arg("init");
+    cmd.arg("init").arg("--print");
     isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
     let out = cmd.output().unwrap();
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("status-interval 1"));
+    assert!(s.contains("#(rustline render left"), "prints block: {s}");
+    assert!(!s.contains("set -g status 2"), "one-line by default");
+    // wrote no config file
+    assert!(
+        !tmp.path()
+            .join("cfg")
+            .join("rustline")
+            .join("config.toml")
+            .exists()
+    );
+}
+
+#[test]
+fn init_print_honors_configured_theme() {
+    // `--print` must stay byte-identical to today's `rustline init`, which
+    // colored `status-style` from the user's FULLY RESOLVED theme
+    // (`resolve_theme(&cfg)`, applying `[theme].base` AND inline `[theme]`
+    // overrides) — not a hardcoded "default". A zero-config invocation can't
+    // distinguish the two, so this pins an inline override deterministically.
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("cfg").join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    fs::write(
+        cfgdir.join("config.toml"),
+        "[theme]\nbar_bg = { Indexed = 42 }\nfg = { Indexed = 43 }\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.arg("init").arg("--print");
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    let out = cmd.output().unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("status-style bg=colour42,fg=colour43"),
+        "print honors the configured theme override: {s}"
+    );
+}
+
+#[test]
+fn init_defaults_does_not_clobber_unreadable_tmux_conf() {
+    // A present-but-unreadable ~/.tmux.conf (e.g. non-UTF8 contents) must abort
+    // rather than collapsing the read error to empty, which would silently
+    // skip the backup and overwrite the file `apply` couldn't safely read.
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let tmux_path = home.join(".tmux.conf");
+    let original = [0xff_u8, 0xfe, 0x00];
+    fs::write(&tmux_path, original).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.arg("init").arg("--defaults");
+    cmd.env("HOME", &home)
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+        .env_remove("RUST_LOG");
+    let out = cmd.output().unwrap();
+
+    assert!(
+        !out.status.success(),
+        "must not succeed when tmux.conf can't be read; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // config.toml may have been written already (it's written before the tmux
+    // step) — only the tmux.conf file's untouched-ness is under test here.
+    assert_eq!(
+        fs::read(&tmux_path).unwrap(),
+        original,
+        "unreadable tmux.conf must be left byte-for-byte untouched"
+    );
+}
+
+#[test]
+fn init_defaults_writes_config_and_tmux_marker_block() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let run = |tmp: &Path| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+        cmd.arg("init").arg("--defaults");
+        cmd.env("HOME", &home)
+            .env("XDG_DATA_HOME", tmp.join("data"))
+            .env("XDG_CONFIG_HOME", tmp.join("cfg"))
+            .env_remove("RUST_LOG");
+        cmd.output().unwrap()
+    };
+    let out = run(tmp.path());
+    assert!(out.status.success(), "init --defaults ok: {out:?}");
+    let cfg_path = tmp.path().join("cfg").join("rustline").join("config.toml");
+    let cfg_text = fs::read_to_string(&cfg_path).expect("config written");
+    assert!(cfg_text.contains("[theme]"), "has theme: {cfg_text}");
+    let tmux_path = home.join(".tmux.conf");
+    let tmux_text = fs::read_to_string(&tmux_path).expect("tmux.conf written");
+    assert!(
+        tmux_text.contains("# >>> rustline >>>"),
+        "marker block: {tmux_text}"
+    );
+    assert!(tmux_text.contains("#(rustline render left"));
+
+    // Idempotent: a user edit outside the markers survives; the region is unchanged.
+    fs::write(&tmux_path, format!("# my own line\n{tmux_text}")).unwrap();
+    let before = fs::read_to_string(&tmux_path).unwrap();
+    let _ = run(tmp.path());
+    let after = fs::read_to_string(&tmux_path).unwrap();
+    assert!(after.contains("# my own line"), "user edit preserved");
+    assert_eq!(
+        after.matches("# >>> rustline >>>").count(),
+        1,
+        "no duplicate block"
+    );
+    assert_eq!(
+        before, after,
+        "second --defaults run is a no-op on tmux.conf"
+    );
+}
+
+#[test]
+fn init_non_tty_without_flags_errors() {
+    let tmp = tempdir().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.arg("init"); // stdin is not a TTY under Command
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    let out = cmd.output().unwrap();
+    assert!(
+        !out.status.success(),
+        "errors without a TTY and no --defaults/--print"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--defaults") || err.contains("--print"),
+        "hints flags: {err}"
+    );
 }
 
 #[test]

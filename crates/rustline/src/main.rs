@@ -4,6 +4,7 @@ mod bench;
 mod build_context;
 mod cli;
 mod cpu;
+mod init;
 mod logging;
 mod memory;
 mod plugin_cmd;
@@ -67,9 +68,14 @@ fn themes_dir() -> PathBuf {
     config_base().join("themes")
 }
 
+/// The user's tmux config file: `$HOME/.tmux.conf`.
+fn tmux_conf_path() -> PathBuf {
+    PathBuf::from(env::var("HOME").unwrap_or_default()).join(".tmux.conf")
+}
+
 /// Resolve a base-theme name to a full `Theme`: a themes-dir `*.toml` file wins
 /// over a same-named built-in (so a user file can shadow/override a built-in).
-fn resolve_base_theme(name: &str) -> Option<Theme> {
+pub(crate) fn resolve_base_theme(name: &str) -> Option<Theme> {
     let file = themes_dir().join(format!("{name}.toml"));
     if let Ok(text) = std::fs::read_to_string(&file) {
         match toml::from_str::<ThemeConfig>(&text) {
@@ -150,10 +156,15 @@ fn main() {
             let ctx = build_window_context(&args, &theme);
             emit(&render_window(&ctx, &registry, &theme), args.preview);
         }
-        Command::Init => print!(
-            "{}",
-            tmux_conf::init_block(&theme.bar_bg.to_tmux(), &theme.fg.to_tmux())
-        ),
+        Command::Init(args) => {
+            init::run(
+                &args,
+                &config_path(),
+                &themes_dir(),
+                &tmux_conf_path(),
+                &theme,
+            );
+        }
         Command::PrintConfig => match toml::to_string_pretty(&cfg) {
             Ok(s) => print!("{s}"),
             Err(error) => {

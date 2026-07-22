@@ -28,8 +28,9 @@ pub enum Command {
     /// Render a region or a single window segment.
     #[command(subcommand)]
     Render(Render),
-    /// Print the tmux.conf block to enable rustline.
-    Init,
+    /// Onboarding wizard: write config.toml + a tmux marker-block. `--defaults`
+    /// runs non-interactively; `--print` emits the raw tmux block (legacy).
+    Init(InitArgs),
     /// Print the effective config as TOML.
     PrintConfig,
     /// Manage plugins and their capability allowlists.
@@ -43,6 +44,17 @@ pub enum Command {
     /// Benchmark the render pipeline (feature `bench`).
     #[cfg(feature = "bench")]
     Bench(BenchArgs),
+}
+
+/// Arguments for `rustline init`.
+#[derive(Args, Default)]
+pub struct InitArgs {
+    /// Non-interactive: use recommended defaults and write both files.
+    #[arg(long)]
+    pub defaults: bool,
+    /// Print the raw one-line tmux block to stdout and write nothing (legacy).
+    #[arg(long)]
+    pub print: bool,
 }
 
 /// Manage themes: list, preview, select, and scaffold new ones.
