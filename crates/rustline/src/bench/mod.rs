@@ -4,6 +4,7 @@ mod fixture;
 mod harness;
 mod render_passes;
 mod report;
+mod sources;
 
 use rustline_core::Config;
 
@@ -39,6 +40,10 @@ pub fn run(args: &BenchArgs, cfg: &Config) {
         ));
         // Real passes: small fixed warmup (each `right` build pays ~120ms).
         groups.push(render_passes::bench_regions_real(cfg, args.real_iters, 2));
+    }
+
+    if want("sources") {
+        groups.push(sources::bench_sources(args.real_iters, 2));
     }
 
     let markdown = args.format == "markdown";

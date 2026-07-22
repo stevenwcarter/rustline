@@ -11,7 +11,7 @@ use rustline_core::{Context, NetIface, WindowCtx};
 /// Returns `None` if the platform call doesn't report all three samples
 /// (its documented failure mode), so a widget can fall back gracefully
 /// instead of showing bogus zeros.
-fn read_loadavg() -> Option<[f64; 3]> {
+pub(crate) fn read_loadavg() -> Option<[f64; 3]> {
     let mut out = [0f64; 3];
     // SAFETY: `out` is a valid, properly aligned buffer for 3 `f64`s, and
     // `getloadavg` is documented to write at most `out.len()` samples into it.
@@ -30,7 +30,7 @@ fn hostname() -> String {
 /// A failed read yields an empty `Vec` (the IP widgets then render nothing /
 /// their `down_format`), never a fabricated address — same spirit as
 /// `read_loadavg` returning `None`.
-fn read_interfaces() -> Vec<NetIface> {
+pub(crate) fn read_interfaces() -> Vec<NetIface> {
     let Ok(ifaces) = if_addrs::get_if_addrs() else {
         return Vec::new();
     };
