@@ -255,9 +255,10 @@ these shared types, not a design shortcut. Keep them serializable.
 `rustline` (bin):
 - `cli.rs` — `clap` derive. `render`, `plugin`, and `theme` are subcommand
   *groups* (`ThemeCmd { List, Show { name }, Use { name }, New { name, from,
-  force } }`); `click` (`ClickArgs { range, button }`, both defaulted so an
-  empty click is a parseable no-op) is a flat subcommand invoked by the tmux
-  mouse binding.
+  force } }`); `init` (`InitArgs { defaults, print }`, both plain flags) is the
+  onboarding-wizard subcommand (see CLI below); `click` (`ClickArgs { range,
+  button }`, both defaulted so an empty click is a parseable no-op) is a flat
+  subcommand invoked by the tmux mouse binding.
 - `battery.rs` — `read_battery()`, a `#[cfg(target_os)]` read surface (one of
   three — see `cpu.rs`/`memory.rs` below): a Linux sysfs
   (`/sys/class/power_supply/*/{capacity,status}`) arm and a macOS
@@ -312,9 +313,33 @@ these shared types, not a design shortcut. Keep them serializable.
   config, and writes `<themes_dir>/<name>.toml` with a header comment
   (refuses to overwrite without `--force`; rejects a `name` containing `/`,
   `\`, `..`, or empty).
-- `tmux_conf.rs` — `init_block(bar_bg, fg)`: the tmux config `rustline init`
-  emits, now including a `bind -T root MouseDown1Status` block (see CLI
-  below).
+- `tmux_conf.rs` — `init_block(&InitBlockOpts)` (`bar_bg`, `fg`, `two_line`,
+  `mouse`, `interval`): the tmux config block `rustline init` emits, incl. a
+  `bind -T root MouseDown1Status` block (see CLI below); one-line/mouse-off/
+  interval-1 output stays byte-identical to the pre-wizard block. `two_line`
+  additionally emits `set -g status 2` plus the author's verbatim two-line
+  `status-format[0]`/`[1]` (window list on its own line). `TMUX_BEGIN`/
+  `TMUX_END` (`# >>> rustline >>>` / `# <<< rustline <<<`) and
+  `upsert_tmux_block(existing, block) -> String`: idempotently insert/replace
+  the rustline-managed region in an existing `~/.tmux.conf`, leaving
+  surrounding user content untouched.
+- `init.rs` — the `rustline init` wizard shell: `InitAnswers`/`ClockStyle`
+  (the collected answers + four datetime presets), `starter_config_toml(&
+  InitAnswers) -> String` (mutates the embedded starter template — theme,
+  layout arrays, datetime format, pruning unselected optional widgets'
+  `[widgets.*]` sections), `merge_config(existing, generated, theme) ->
+  Result<String, String>` (non-destructive merge: `[theme].base` always set,
+  `[layout]`/each `[widgets.<name>]` added only if absent), `write_config`
+  (backs up an existing file to `<path>.rustline.bak` first), `defaults()`
+  (the `--defaults`/recommended answer set), `parse_menu_choice`/
+  `parse_yes_no` (pure prompt-parsing, unit-tested), and `run`/`prompt_answers`
+  (the I/O shell: `--print` wins and emits the legacy one-line block via the
+  caller's already-resolved theme; else `--defaults` or the interactive
+  prompt loop, erroring on non-TTY stdin without a flag). `assets/
+  starter-config.toml` (embedded via `include_str!`) is the recommended
+  starter template `init.rs` mutates — the shortened `alt_format`s and
+  curated layout it seeds live only here, **not** in any widget's code
+  `Default` (those stay `""`/unchanged; see Config below).
 - `logging.rs` — `init(&LogConfig, verbose)`: installs the two-sink `tracing`
   subscriber (rotated file + stderr), plus the pure helpers `verbosity_to_level`,
   `parse_level`, `resolve_file_level`/`resolve_stderr_level`, `should_rotate`,
@@ -333,10 +358,15 @@ these shared types, not a design shortcut. Keep them serializable.
   `~/.config/rustline/themes`), parallel to `config_path()`; `resolve_theme(&Config)
   -> Theme` is the file-aware layering used by `render`/`init` (`Theme::default()`
   → `resolve_base_theme` → inline `[theme]` overrides via `to_theme_over`), and
-  `resolve_base_theme(name) -> Option<Theme>` resolves a base name themes-dir-file
-  first, then built-in (an invalid/missing file falls through to the built-in
-  lookup with a `warn!`) — this is where a user's themes-dir file **shadows** a
-  same-named built-in (see Themes below).
+  `resolve_base_theme(name) -> Option<Theme>` (now `pub(crate)` so `init.rs` can
+  resolve the wizard's chosen theme into `bar_bg`/`fg` for the tmux block)
+  resolves a base name themes-dir-file first, then built-in (an
+  invalid/missing file falls through to the built-in lookup with a `warn!`) —
+  this is where a user's themes-dir file **shadows** a same-named built-in
+  (see Themes below). `tmux_conf_path()` resolves the user's tmux config
+  (`$HOME/.tmux.conf`), parallel to `config_path()`/`themes_dir()`; `Command::
+  Init` dispatches straight to `init::run` with all four resolved paths plus
+  the already-resolved `theme`.
 - `bench/` (`#[cfg(feature = "bench")]`) — the `rustline bench` subcommand:
   `harness.rs` (`summarize`/`measure`/`Stats`/`Row`/`Group`), `fixture.rs`
   (`fabricated_context` — the pure-pass mock seam), `render_passes.rs` (pure
@@ -354,8 +384,20 @@ A global `-v`/`--verbose` (repeatable) raises the **file** log level:
 - `rustline render left|right [--session= --window= --pane= --pane-path=] [--preview] [--plugin-dir=]`
 - `rustline render window [--current] --index= [--name=] [--flags=] [--preview]`
   (no `--plugin-dir` — windows don't run plugins in v1)
-- `rustline init` — prints the tmux config block (uses `theme.bar_bg`/`fg` for
-  `status-style`).
+- `rustline init` — interactive onboarding wizard (needs a TTY): asks theme
+  (with preview), one-/two-line status, mouse/click-to-toggle, machine-type
+  widgets (laptop → `battery`, Tailscale → `tailscale_ip`, LAN → `lan_ip`),
+  clock style (12h/24h ± seconds), and refresh interval, then writes
+  `~/.config/rustline/config.toml` (non-destructive merge — `[theme].base` is
+  always set; existing `[layout]`/`[widgets.*]` are left alone; a
+  `<path>.rustline.bak` backup is written first if the file already existed)
+  and upserts an idempotent `# >>> rustline >>>` / `# <<< rustline <<<` block
+  into `~/.tmux.conf` (also backed up first, to `~/.tmux.conf.rustline.bak`).
+  A non-TTY invocation without a flag errors with a hint instead of writing
+  silently. `rustline init --defaults` runs the same two writes
+  non-interactively with recommended answers. `rustline init --print` is the
+  legacy behavior: prints just the raw one-line tmux block to stdout (using
+  `theme.bar_bg`/`fg` for `status-style`) and writes nothing.
 - `rustline print-config` — effective config as TOML.
 - `rustline plugin list` — discovered/configured plugins with their source,
   allowlists, and state quota.
@@ -393,17 +435,19 @@ tmux consumes (stdout is the status line — logs always go to stderr).
 
 ## tmux integration model
 
-Shell-out per region on `status-interval` (no daemon in v1). `rustline init`
-wires `status-left`/`status-right`/`window-status-format` to `#(rustline render …)`
-and adds `after-select-pane`/`after-select-window` → `refresh-client -S` hooks
-for instant updates. It also emits a `bind -T root MouseDown1Status` block: a
+Shell-out per region on `status-interval` (no daemon in v1). The block
+`rustline init` writes (via `init_block`) wires `status-left`/`status-right`/
+`window-status-format` to `#(rustline render …)` and adds
+`after-select-pane`/`after-select-window` → `refresh-client -S` hooks for
+instant updates. It also emits a `bind -T root MouseDown1Status` block: a
 window-name click still runs the default `select-window`, and any other
 non-empty `#{mouse_status_range}` runs `rustline click --range=… --button=left`
 then `refresh-client -S`. This requires **tmux ≥ 3.1** (that's when
 `range=user|X` status ranges and the `mouse_status_range` format variable were
-added) and, at the tmux-config level, `set -g mouse on` — `init` does not set
-that itself (it respects whatever the user already has) but leaves a comment
-hinting at it.
+added) and, at the tmux-config level, `set -g mouse on` — the wizard's mouse
+question (`InitAnswers.mouse`) can add that setter for you (`--print` never
+does; it always emits the mouse-off, one-line legacy block regardless of
+config).
 
 **Injection safety (critical):** tmux expands `#{…}` inside `#(…)` *before*
 `/bin/sh -c` and does not shell-escape. So the `init` block passes every tmux var
@@ -763,6 +807,14 @@ branch on platform.
   passes, real preserved plugin state. See
   `docs/superpowers/specs/2026-07-21-rustline-bench-tool-design.md` /
   `docs/superpowers/plans/2026-07-21-rustline-bench-tool.md`.
+- Done: `rustline init` onboarding wizard — an interactive prompt (theme with
+  preview, one-/two-line status, mouse/click-to-toggle, machine-type widgets,
+  clock style, refresh interval) that writes a tailored, non-destructively
+  merged `config.toml` plus an idempotent marker-block upsert into
+  `~/.tmux.conf` (each backed up first); `--defaults` for the same writes
+  non-interactively and `--print` keeps the old raw-block-to-stdout behavior.
+  See `docs/superpowers/specs/2026-07-22-rustline-init-onboarding-wizard-design.md`
+  / `docs/superpowers/plans/2026-07-22-rustline-init-onboarding-wizard.md`.
 - Historical sparkline (last-X-seconds graph) for `cpu`/`memory` — today's
   reads are single-shot, stateless snapshots; a sparkline needs
   cross-invocation sample persistence, deferred to its own spec.

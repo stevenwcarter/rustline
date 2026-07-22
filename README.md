@@ -43,27 +43,43 @@ cp target/release/rustline ~/.local/bin/rustline
 
 ## Enable in tmux
 
+Run the onboarding wizard — it asks a few questions (theme, one- or two-line
+status, mouse/click-to-toggle, which widgets, clock style, refresh rate), then
+writes `~/.config/rustline/config.toml` and adds a managed block to
+`~/.tmux.conf` (backed up first):
+
 ```bash
-rustline init >> ~/.tmux.conf
+rustline init
 tmux source-file ~/.tmux.conf
 ```
 
-`rustline init` prints a tmux config block that wires `rustline render` into
-`status-left` / `status-right` and the window list, sets `status-interval 1`,
-adds `after-select-pane` / `after-select-window` hooks that call
-`refresh-client -S` so the bar updates immediately when you switch panes or
-windows, not just on the next tick, and binds a left click on any clickable
-widget to toggle its `alt_format` (see [Click-to-toggle widget
-views](#click-to-toggle-widget-views) below).
+The wizard wires `rustline render` into `status-left` / `status-right` and the
+window list, sets `status-interval` (1s or 5s, your choice), adds
+`after-select-pane` / `after-select-window` hooks that call `refresh-client -S`
+so the bar updates immediately when you switch panes or windows, and — if you
+opt in — binds a left click on any clickable widget to toggle its `alt_format`
+(see [Click-to-toggle widget views](#click-to-toggle-widget-views) below) and
+turns on `set -g mouse on` for you.
+
+- `rustline init --defaults` — non-interactive; recommended settings.
+- `rustline init --print` — just print the raw one-line tmux block to stdout
+  and write nothing (the pre-wizard behavior, handy for scripting:
+  `rustline init --print >> ~/.tmux.conf`).
+
+The tmux block is wrapped in `# >>> rustline >>>` / `# <<< rustline <<<`
+markers, so re-running `rustline init` replaces that region instead of
+appending a duplicate; your edits outside the markers are preserved. The
+generated `config.toml` is merged non-destructively too: `[theme].base` is
+always set to your pick, but existing `[layout]`/`[widgets.*]` sections you've
+already customized are left alone.
 
 > **Font requirement:** the powerline separators are drawn with Powerline
 > glyphs (U+E0B0–U+E0B3). Use a Nerd Font or another powerline-patched font
 > in your terminal, or the separators will show as boxes/blanks.
 >
 > **tmux requirement:** click-to-toggle needs tmux **≥ 3.1** (status-line
-> click ranges) and `set -g mouse on` in your tmux config — `rustline init`
-> does not turn mouse mode on itself, it only binds the click once mouse mode
-> is enabled.
+> click ranges) and `set -g mouse on` in your tmux config — the wizard's mouse
+> question can turn that on for you, or you can set it yourself.
 
 ## Default layout
 
@@ -225,8 +241,9 @@ alt_format = "{icon} {bar} {percent}%"   # left-click toggles to this
 ```
 
 This needs **tmux ≥ 3.1** and `set -g mouse on` (see [Enable in
-tmux](#enable-in-tmux) above) — `rustline init` wires the click handler but
-never turns mouse mode on itself. Which widgets are currently toggled is
+tmux](#enable-in-tmux) above) — the `rustline init` wizard can turn mouse mode
+on for you if you opt in, or `rustline init --print` just wires the click
+handler and leaves mouse mode to you. Which widgets are currently toggled is
 tracked globally (not per pane/session) in a small state file under
 `$XDG_DATA_HOME/rustline`, written by the `rustline click` subcommand the tmux
 binding invokes. WASM plugins can support this too: a plugin is clickable when
