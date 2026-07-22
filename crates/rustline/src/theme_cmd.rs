@@ -6,11 +6,11 @@ use std::path::Path;
 
 use chrono::Local;
 use rustline_core::{
-    Battery, BatteryState, Config, Context, CpuUsage, Direction, MemInfo, Registry, Theme,
+    Battery, BatteryState, Color, Config, Context, CpuUsage, Direction, MemInfo, Registry, Theme,
     ThemeConfig, WindowCtx, builtin_theme, builtin_theme_names, render_named_region, render_window,
     tmux_to_ansi,
 };
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value as EditValue, value};
 
 use crate::cli::ThemeCmd;
 
@@ -20,9 +20,7 @@ pub fn run(cmd: ThemeCmd, config_path: &Path, themes_dir: &Path) {
         ThemeCmd::List => list(config_path, themes_dir),
         ThemeCmd::Show { name } => show(&name, themes_dir),
         ThemeCmd::Use { name } => use_theme(&name, config_path, themes_dir),
-        ThemeCmd::New { name, from, force } => {
-            let _ = (&name, &from, force, themes_dir); // Task 14
-        }
+        ThemeCmd::New { name, from, force } => new_theme(&name, &from, force, themes_dir),
     }
 }
 
@@ -253,6 +251,137 @@ fn show(name: &str, themes_dir: &Path) {
     }
 }
 
+/// A theme name is a bare filename stem: non-empty, no path separators or `..`.
+fn valid_theme_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+}
+
+/// A `Color` as a `toml_edit` inline value in the documented enum form, e.g.
+/// `{ Rgb = [42, 42, 54] }`, `{ Indexed = 31 }`, `{ Named = "cyan" }`.
+fn color_value(c: &Color) -> EditValue {
+    let mut t = InlineTable::new();
+    match c {
+        Color::Named(n) => {
+            t.insert("Named", n.as_str().into());
+        }
+        Color::Indexed(i) => {
+            t.insert("Indexed", (*i as i64).into());
+        }
+        Color::Rgb(r, g, b) => {
+            let mut arr = Array::new();
+            arr.push(*r as i64);
+            arr.push(*g as i64);
+            arr.push(*b as i64);
+            t.insert("Rgb", EditValue::Array(arr));
+        }
+    }
+    EditValue::InlineTable(t)
+}
+
+/// Build the full theme-file TOML text for `theme`, with a header comment.
+fn scaffold_toml(name: &str, from: &str, theme: &Theme) -> String {
+    let tc = ThemeConfig::from_theme(theme);
+    let mut doc = DocumentMut::new();
+    // Colors as inline tables; strings/arrays as their natural forms.
+    macro_rules! put_color {
+        ($k:literal, $v:expr) => {
+            if let Some(c) = &$v {
+                doc[$k] = Item::Value(color_value(c));
+            }
+        };
+    }
+    macro_rules! put_str {
+        ($k:literal, $v:expr) => {
+            if let Some(s) = &$v {
+                doc[$k] = value(s.as_str());
+            }
+        };
+    }
+    if let Some(palette) = &tc.palette {
+        let mut arr = Array::new();
+        for c in palette {
+            arr.push(color_value(c));
+        }
+        doc["palette"] = Item::Value(EditValue::Array(arr));
+    }
+    put_color!("fg", tc.fg);
+    put_color!("bar_bg", tc.bar_bg);
+    put_str!("hard_left", tc.hard_left);
+    put_str!("hard_right", tc.hard_right);
+    put_str!("soft_left", tc.soft_left);
+    put_str!("soft_right", tc.soft_right);
+    put_color!("soft_fg", tc.soft_fg);
+    put_str!("win_cap_left", tc.win_cap_left);
+    put_str!("win_cap_right", tc.win_cap_right);
+    put_color!("win_current_bg", tc.win_current_bg);
+    put_color!("win_current_fg", tc.win_current_fg);
+    put_color!("win_inactive_bg", tc.win_inactive_bg);
+    put_color!("win_inactive_fg", tc.win_inactive_fg);
+    put_color!("success", tc.success);
+    put_color!("info", tc.info);
+    put_color!("warning", tc.warning);
+    put_color!("error", tc.error);
+    format!(
+        "# rustline theme \"{name}\" (seeded from \"{from}\")\n# select with: rustline theme use {name}\n{doc}"
+    )
+}
+
+/// Scaffold `<themes_dir>/<name>.toml` seeded from theme `from` (a themes-dir
+/// file first, then a built-in). Refuses an invalid `name`, an unknown seed,
+/// or overwriting an existing file unless `force`.
+fn new_theme(name: &str, from: &str, force: bool, themes_dir: &Path) {
+    if !valid_theme_name(name) {
+        eprintln!("invalid theme name: {name:?} (no empty, `/`, `\\`, or `..`)");
+        std::process::exit(1);
+    }
+    // Resolve the seed: themes-dir file first, then built-in.
+    let seed = {
+        let file = themes_dir.join(format!("{from}.toml"));
+        if let Ok(text) = std::fs::read_to_string(&file) {
+            match toml::from_str::<ThemeConfig>(&text) {
+                Ok(tc) => {
+                    let mut t = Theme::default();
+                    tc.apply_to(&mut t);
+                    t
+                }
+                Err(e) => {
+                    eprintln!("invalid seed theme file {}: {e}", file.display());
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            match builtin_theme(from) {
+                Some(t) => t,
+                None => {
+                    eprintln!("unknown seed theme: {from}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+    let dest = themes_dir.join(format!("{name}.toml"));
+    if dest.exists() && !force {
+        eprintln!(
+            "{} already exists (use --force to overwrite)",
+            dest.display()
+        );
+        std::process::exit(1);
+    }
+    if let Err(e) = std::fs::create_dir_all(themes_dir) {
+        eprintln!("cannot create themes dir {}: {e}", themes_dir.display());
+        std::process::exit(1);
+    }
+    if let Err(e) = std::fs::write(&dest, scaffold_toml(name, from, &seed)) {
+        eprintln!("failed to write {}: {e}", dest.display());
+        std::process::exit(1);
+    }
+    println!("wrote {}", dest.display());
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -335,5 +464,30 @@ mod tests {
         assert!(super::resolvable("nord", tmp.path()));
         assert!(super::resolvable("mine", tmp.path()));
         assert!(!super::resolvable("nope", tmp.path()));
+    }
+
+    #[test]
+    fn valid_name_rejects_path_traversal() {
+        assert!(super::valid_theme_name("my-pastel"));
+        assert!(!super::valid_theme_name(""));
+        assert!(!super::valid_theme_name("a/b"));
+        assert!(!super::valid_theme_name(".."));
+        assert!(!super::valid_theme_name("a\\b"));
+    }
+
+    #[test]
+    fn scaffold_round_trips_to_seed_theme() {
+        // The written file re-parses to a ThemeConfig whose apply_to(default)
+        // reproduces the seed built-in theme.
+        let toml = super::scaffold_toml(
+            "my-nord",
+            "nord",
+            &rustline_core::builtin_theme("nord").unwrap(),
+        );
+        assert!(toml.starts_with("# rustline theme"), "has header: {toml}");
+        let tc: rustline_core::ThemeConfig = toml::from_str(&toml).unwrap();
+        let mut t = rustline_core::Theme::default();
+        tc.apply_to(&mut t);
+        assert_eq!(t, rustline_core::builtin_theme("nord").unwrap());
     }
 }
