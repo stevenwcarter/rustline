@@ -44,14 +44,23 @@ pub fn render_report(groups: &[Group], markdown: bool) -> String {
         });
         table.set_header(["pass", "n", "min", "median", "mean", "p95", "max"]);
         for row in &g.rows {
+            // A zero-sample row (e.g. a plugin that failed to instantiate) has
+            // no measurement — show "-" rather than a misleading "0 ns".
+            let cell = |d: Duration| {
+                if row.stats.n == 0 {
+                    "-".to_string()
+                } else {
+                    fmt_dur(d)
+                }
+            };
             table.add_row([
                 row.label.clone(),
                 row.stats.n.to_string(),
-                fmt_dur(row.stats.min),
-                fmt_dur(row.stats.median),
-                fmt_dur(row.stats.mean),
-                fmt_dur(row.stats.p95),
-                fmt_dur(row.stats.max),
+                cell(row.stats.min),
+                cell(row.stats.median),
+                cell(row.stats.mean),
+                cell(row.stats.p95),
+                cell(row.stats.max),
             ]);
         }
         out.push_str(&table.to_string());
@@ -95,5 +104,24 @@ mod tests {
     fn markdown_preset_uses_pipes() {
         let out = render_report(&[group()], true);
         assert!(out.contains('|'));
+    }
+
+    #[test]
+    fn zero_sample_row_shows_dash_not_zero_ns() {
+        // A failed-to-instantiate plugin row carries no samples (n == 0); its
+        // timing cells must read "-", never "0 ns" (which reads as "instant").
+        let g = Group {
+            title: "Plugins".into(),
+            note: None,
+            rows: vec![Row {
+                label: "weather (failed to instantiate — skipped)".into(),
+                stats: summarize(&[]),
+            }],
+        };
+        // Pretty preset draws borders with box characters, so the only ASCII
+        // '-' in the output comes from our zero-sample cells.
+        let out = render_report(&[g], false);
+        assert!(!out.contains("0 ns"), "zero-sample row must not show 0 ns");
+        assert!(out.contains('-'), "zero-sample cells should render '-'");
     }
 }
