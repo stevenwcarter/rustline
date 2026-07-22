@@ -337,6 +337,13 @@ these shared types, not a design shortcut. Keep them serializable.
   first, then built-in (an invalid/missing file falls through to the built-in
   lookup with a `warn!`) — this is where a user's themes-dir file **shadows** a
   same-named built-in (see Themes below).
+- `bench/` (`#[cfg(feature = "bench")]`) — the `rustline bench` subcommand:
+  `harness.rs` (`summarize`/`measure`/`Stats`/`Row`/`Group`), `fixture.rs`
+  (`fabricated_context` — the pure-pass mock seam), `render_passes.rs` (pure
+  widget + pure/real region passes), `sources.rs` (per-read timing + the
+  source registry), `plugins.rs` (real-preserved-state plugin timing), and
+  `report.rs` (comfy-table pretty/markdown). Gated behind the `bench` cargo
+  feature; the default binary is unchanged.
 
 ## CLI
 
@@ -369,6 +376,13 @@ A global `-v`/`--verbose` (repeatable) raises the **file** log level:
   in the global toggle state file; invoked by the `init`-emitted tmux mouse
   binding. Only `left` acts today; other button values are reserved for a
   future `left_click`/`right_click` script-handler mechanism.
+- `rustline bench [--only regions|widgets|sources|plugins|all] [--iters N]
+  [--real-iters N] [--warmup N] [--cold] [--format table|markdown]
+  [--output FILE] [--plugin-dir DIR] [--state-dir DIR]` — feature-gated
+  (`--features bench`) benchmark of the render pipeline: a pure pass
+  (fabricated `Context`, no reads) vs a real-world pass (real reads + render),
+  plus per-widget, per-read, and per-plugin timing. Plugin passes run against
+  real preserved state so cached fast-paths are measured honestly.
 
 `--plugin-dir` overrides plugin discovery for that invocation (see Config
 below for the full resolution order).
@@ -686,7 +700,9 @@ branch on platform.
   `wasm32-unknown-unknown` and installs `weather.wasm` into the plugin dir),
   `just test-wasm` (opt-in: builds the weather plugin, then runs the
   feature-gated `rustline-wasm` e2e test and the bin's `wasm_wiring` test —
-  needs the wasm target; `just test` never requires it).
+  needs the wasm target; `just test` never requires it), `just bench [ARGS]`
+  (builds the weather plugin, then runs the real `rustline bench` tool via
+  `cargo run --release --features bench -- bench {{ARGS}}`).
 - Toolchain: Rust 1.97, **edition 2024** in every crate (incl. `rustline-abi`
   and the excluded `plugins/weather`); `rustfmt.toml` is edition 2024. Keep all
   crate editions equal to `rustfmt.toml`.
@@ -742,6 +758,11 @@ branch on platform.
   and WASM guests, threshold-aware alert badges on `cpu`/`memory`/`battery`/
   `loadavg` (`widgets/alert.rs`), and `rustline theme list|show|use|new`
   (`theme_cmd.rs`).
+- Done: `rustline bench` benchmarking tool — feature-gated subcommand timing
+  regions/widgets/data-sources/plugins, pure (fabricated Context) vs real-world
+  passes, real preserved plugin state. See
+  `docs/superpowers/specs/2026-07-21-rustline-bench-tool-design.md` /
+  `docs/superpowers/plans/2026-07-21-rustline-bench-tool.md`.
 - Historical sparkline (last-X-seconds graph) for `cpu`/`memory` — today's
   reads are single-shot, stateless snapshots; a sparkline needs
   cross-invocation sample persistence, deferred to its own spec.

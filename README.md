@@ -332,6 +332,23 @@ just preview
 
 Other recipes: `just build`, `just test`, `just lint`.
 
+## Benchmarking
+
+`rustline bench` (build with `--features bench`, or run `just bench`) times the
+render pipeline: a **pure** pass on a fabricated `Context` (no OS reads, so no
+`read_cpu` ~120 ms sample) versus a **real-world** pass that pays the real
+reads, plus per-widget, per-data-source, and per-plugin breakdowns as tables.
+
+```sh
+just bench                       # all groups
+just bench --only widgets        # just the per-widget render costs
+cargo run --features bench -- bench --format markdown --output bench.md
+```
+
+Plugin passes run against the real, preserved plugin state/cache, so a cached
+plugin (e.g. `weather`) is measured on its fast cached path rather than
+re-fetching every iteration.
+
 ## Plugins
 
 Third-party widgets can be added as WASM plugins. A plugin is a small wasm

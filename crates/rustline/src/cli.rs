@@ -40,6 +40,9 @@ pub enum Command {
     Theme(ThemeCmd),
     /// Toggle a widget's alt view (invoked by the tmux MouseDown1Status binding).
     Click(ClickArgs),
+    /// Benchmark the render pipeline (feature `bench`).
+    #[cfg(feature = "bench")]
+    Bench(BenchArgs),
 }
 
 /// Manage themes: list, preview, select, and scaffold new ones.
@@ -159,4 +162,38 @@ pub struct ClickArgs {
     /// Which mouse button (currently only `left` acts; others are reserved).
     #[arg(long, default_value = "left")]
     pub button: String,
+}
+
+/// Arguments for `rustline bench` (feature `bench`).
+#[cfg(feature = "bench")]
+#[derive(Args, Debug)]
+pub struct BenchArgs {
+    /// Which group to bench: regions|widgets|sources|plugins|all.
+    #[arg(long, default_value = "all")]
+    pub only: String,
+    /// Samples for the fast/pure passes.
+    #[arg(long, default_value_t = 1000)]
+    pub iters: usize,
+    /// Samples for the real-I/O passes (reads, real-world regions, plugin per-tick).
+    #[arg(long = "real-iters", default_value_t = 25)]
+    pub real_iters: usize,
+    /// Warmup iterations (discarded) for the pure passes.
+    #[arg(long, default_value_t = 50)]
+    pub warmup: usize,
+    /// Include plugin cold-start (clears the plugin's cache; may hit the network).
+    #[arg(long)]
+    pub cold: bool,
+    /// Output format: table|markdown.
+    #[arg(long, default_value = "table")]
+    pub format: String,
+    /// Write the report to a file instead of stdout.
+    #[arg(long)]
+    pub output: Option<String>,
+    /// Override the plugin discovery directory (same resolution as render).
+    #[arg(long = "plugin-dir")]
+    pub plugin_dir: Option<String>,
+    /// Override the plugin state/cache root (default: real state_root());
+    /// does not affect plugin discovery.
+    #[arg(long = "state-dir")]
+    pub state_dir: Option<String>,
 }
