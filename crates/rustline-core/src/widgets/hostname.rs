@@ -42,6 +42,7 @@ mod tests {
             os: String::new(),
             arch: String::new(),
             toggled: Default::default(),
+            colors: Default::default(),
         }
     }
 

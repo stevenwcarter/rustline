@@ -4,7 +4,7 @@
 use std::env;
 
 use crate::cli::{RegionArgs, WindowArgs};
-use rustline_core::{Context, NetIface, WindowCtx};
+use rustline_core::{Context, NetIface, Theme, WindowCtx};
 
 /// Read the 1/5/15-minute load average via `getloadavg(3)`.
 ///
@@ -54,7 +54,7 @@ fn read_interfaces() -> Vec<NetIface> {
 /// (`read_cpu` sleeps ~120ms on Linux; `read_memory` on macOS spawns `vm_stat`)
 /// are taken ONLY when that region actually renders them — the same
 /// "pay only for what the region references" gating `register_plugins` uses.
-pub fn build_region_context(args: &RegionArgs, layout: &[String]) -> Context {
+pub fn build_region_context(args: &RegionArgs, layout: &[String], theme: &Theme) -> Context {
     Context {
         session_name: args.session.clone().unwrap_or_default(),
         window_index: args.window.clone().unwrap_or_default(),
@@ -80,6 +80,7 @@ pub fn build_region_context(args: &RegionArgs, layout: &[String]) -> Context {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         toggled: crate::toggles::read_toggles(),
+        colors: theme.colors(),
     }
 }
 
@@ -87,10 +88,10 @@ pub fn build_region_context(args: &RegionArgs, layout: &[String]) -> Context {
 /// [`build_region_context`] for the host/pane-agnostic fields (there is no
 /// pane in play for a window segment) and layers on the window-specific
 /// fields from `args`.
-pub fn build_window_context(args: &WindowArgs) -> Context {
+pub fn build_window_context(args: &WindowArgs, theme: &Theme) -> Context {
     // Windows render only the window pill (builtins, never cpu/memory), so pass
     // an empty layout: no cpu/memory sampling, no per-window `read_cpu` sleep.
-    let mut ctx = build_region_context(&RegionArgs::default(), &[]);
+    let mut ctx = build_region_context(&RegionArgs::default(), &[], theme);
     ctx.window = Some(WindowCtx {
         index: args.index.clone(),
         name: args.name.clone(),
@@ -107,7 +108,7 @@ mod tests {
     #[test]
     fn home_from_env_used_when_present() {
         // build_context reads $HOME; assert the field is populated non-empty
-        let ctx = build_region_context(&RegionArgs::default(), &[]);
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default());
         assert!(!ctx.home.is_empty() || std::env::var("HOME").is_err());
     }
 
@@ -122,7 +123,7 @@ mod tests {
             "loopback IPv4 must be filtered: {ifaces:?}"
         );
         // And build_region_context wires it in (field is populated by the same read).
-        let ctx = build_region_context(&RegionArgs::default(), &[]);
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default());
         assert!(
             ctx.interfaces
                 .iter()
@@ -155,7 +156,7 @@ mod tests {
         unsafe {
             std::env::set_var("XDG_DATA_HOME", tmp.path());
         }
-        let ctx = build_region_context(&RegionArgs::default(), &[]);
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default());
         // SAFETY: matches the set above; restores the process env for other tests.
         unsafe {
             std::env::remove_var("XDG_DATA_HOME");
@@ -167,16 +168,19 @@ mod tests {
     fn cpu_memory_sampled_only_when_region_names_them() {
         // Empty layout: neither expensive read runs, so both stay None — this is
         // what spares `render left` / `render window` the read_cpu sleep.
-        let ctx = build_region_context(&RegionArgs::default(), &[]);
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default());
         assert!(ctx.cpu.is_none() && ctx.memory.is_none());
         // The window path uses an empty layout too.
-        let wctx = build_window_context(&WindowArgs {
-            current: false,
-            index: String::new(),
-            name: String::new(),
-            flags: String::new(),
-            preview: false,
-        });
+        let wctx = build_window_context(
+            &WindowArgs {
+                current: false,
+                index: String::new(),
+                name: String::new(),
+                flags: String::new(),
+                preview: false,
+            },
+            &Theme::default(),
+        );
         assert!(wctx.cpu.is_none() && wctx.memory.is_none());
     }
 }
