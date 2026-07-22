@@ -1,3 +1,4 @@
+mod alert;
 mod bar;
 pub mod battery;
 pub mod cpu;
@@ -28,6 +29,10 @@ pub use tailscale_ip::TailscaleIp;
 pub(crate) use toggle::{active_format, clickable_range};
 pub use windows::Windows;
 
+// Re-exported for the numeric widgets (cpu/memory/battery/loadavg, Tasks
+// 7-10) to render a threshold-alert badge.
+pub(crate) use alert::{AlertKind, alert_over, alert_style, alert_under};
+
 use crate::Config;
 use crate::widget::Registry;
 
@@ -48,6 +53,8 @@ impl Registry {
                     format: loadavg.format.clone(),
                     alt_format: loadavg.alt_format.clone(),
                     down_format: loadavg.down_format.clone(),
+                    warn_load: loadavg.warn_load,
+                    crit_load: loadavg.crit_load,
                 })
             }),
         );
@@ -99,6 +106,8 @@ impl Registry {
                     format: battery.format.clone(),
                     alt_format: battery.alt_format.clone(),
                     down_format: battery.down_format.clone(),
+                    warn_percent: battery.warn_percent,
+                    crit_percent: battery.crit_percent,
                 })
             }),
         );
@@ -112,6 +121,8 @@ impl Registry {
                     alt_format: cpu.alt_format.clone(),
                     down_format: cpu.down_format.clone(),
                     bar_width: cpu.bar_width,
+                    warn_percent: cpu.warn_percent,
+                    crit_percent: cpu.crit_percent,
                 })
             }),
         );
@@ -125,6 +136,8 @@ impl Registry {
                     alt_format: memory.alt_format.clone(),
                     down_format: memory.down_format.clone(),
                     bar_width: memory.bar_width,
+                    warn_percent: memory.warn_percent,
+                    crit_percent: memory.crit_percent,
                 })
             }),
         );
@@ -160,6 +173,7 @@ mod tests {
             os: String::new(),
             arch: String::new(),
             toggled: Default::default(),
+            colors: Default::default(),
         }
     }
 

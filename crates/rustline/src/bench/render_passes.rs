@@ -100,21 +100,21 @@ pub fn bench_regions_real(cfg: &Config, real_iters: usize, warmup: usize) -> Gro
     rows.push(Row {
         label: "left".into(),
         stats: summarize(&measure(warmup, real_iters, || {
-            let ctx = build_region_context(&region_args, &left);
+            let ctx = build_region_context(&region_args, &left, &theme);
             let _ = render_named_region(Direction::Left, &left, &ctx, &registry, &theme);
         })),
     });
     rows.push(Row {
         label: "right".into(),
         stats: summarize(&measure(warmup, real_iters, || {
-            let ctx = build_region_context(&region_args, &right);
+            let ctx = build_region_context(&region_args, &right, &theme);
             let _ = render_named_region(Direction::Right, &right, &ctx, &registry, &theme);
         })),
     });
     rows.push(Row {
         label: "window".into(),
         stats: summarize(&measure(warmup, real_iters, || {
-            let ctx = build_window_context(&win_args);
+            let ctx = build_window_context(&win_args, &theme);
             let _ = render_window(&ctx, &registry, &theme);
         })),
     });

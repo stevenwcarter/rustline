@@ -154,6 +154,16 @@ fn default_battery_format() -> String {
     "{icon} {percent}%".into()
 }
 
+/// Default battery `warn_percent`/`crit_percent`: lower is worse, so warn
+/// fires above crit.
+fn default_bat_warn() -> f64 {
+    20.0
+}
+
+fn default_bat_crit() -> f64 {
+    10.0
+}
+
 /// Options for the `battery` widget.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BatteryOpts {
@@ -163,6 +173,10 @@ pub struct BatteryOpts {
     pub down_format: String,
     #[serde(default)]
     pub alt_format: String,
+    #[serde(default = "default_bat_warn")]
+    pub warn_percent: f64,
+    #[serde(default = "default_bat_crit")]
+    pub crit_percent: f64,
 }
 
 impl Default for BatteryOpts {
@@ -171,6 +185,8 @@ impl Default for BatteryOpts {
             format: default_battery_format(),
             down_format: String::new(),
             alt_format: String::new(),
+            warn_percent: default_bat_warn(),
+            crit_percent: default_bat_crit(),
         }
     }
 }
@@ -190,6 +206,24 @@ fn default_bar_width() -> usize {
     8
 }
 
+/// Default cpu `warn_percent`/`crit_percent`.
+fn default_cpu_warn() -> f64 {
+    80.0
+}
+
+fn default_cpu_crit() -> f64 {
+    95.0
+}
+
+/// Default memory `warn_percent`/`crit_percent`.
+fn default_mem_warn() -> f64 {
+    80.0
+}
+
+fn default_mem_crit() -> f64 {
+    92.0
+}
+
 /// Options for the `cpu` widget.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CpuOpts {
@@ -201,6 +235,10 @@ pub struct CpuOpts {
     pub alt_format: String,
     #[serde(default = "default_bar_width")]
     pub bar_width: usize,
+    #[serde(default = "default_cpu_warn")]
+    pub warn_percent: f64,
+    #[serde(default = "default_cpu_crit")]
+    pub crit_percent: f64,
 }
 
 impl Default for CpuOpts {
@@ -210,6 +248,8 @@ impl Default for CpuOpts {
             down_format: String::new(),
             alt_format: String::new(),
             bar_width: default_bar_width(),
+            warn_percent: default_cpu_warn(),
+            crit_percent: default_cpu_crit(),
         }
     }
 }
@@ -225,6 +265,10 @@ pub struct MemoryOpts {
     pub alt_format: String,
     #[serde(default = "default_bar_width")]
     pub bar_width: usize,
+    #[serde(default = "default_mem_warn")]
+    pub warn_percent: f64,
+    #[serde(default = "default_mem_crit")]
+    pub crit_percent: f64,
 }
 
 impl Default for MemoryOpts {
@@ -234,6 +278,8 @@ impl Default for MemoryOpts {
             down_format: String::new(),
             alt_format: String::new(),
             bar_width: default_bar_width(),
+            warn_percent: default_mem_warn(),
+            crit_percent: default_mem_crit(),
         }
     }
 }
@@ -253,6 +299,15 @@ pub struct LoadAvgOpts {
     pub alt_format: String,
     #[serde(default)]
     pub down_format: String,
+    /// `load1` threshold to badge as a warning. `0.0` (the default) disables
+    /// this tier — load average has no fixed "healthy" ceiling across
+    /// machines, so alerting is opt-in here unlike cpu/memory/battery.
+    #[serde(default)]
+    pub warn_load: f64,
+    /// `load1` threshold to badge as critical. `0.0` (the default) disables
+    /// this tier.
+    #[serde(default)]
+    pub crit_load: f64,
 }
 
 impl Default for LoadAvgOpts {
@@ -261,6 +316,8 @@ impl Default for LoadAvgOpts {
             format: default_loadavg_format(),
             alt_format: String::new(),
             down_format: String::new(),
+            warn_load: 0.0,
+            crit_load: 0.0,
         }
     }
 }
@@ -286,16 +343,33 @@ pub struct WidgetOpts {
     pub loadavg: LoadAvgOpts,
 }
 
-/// Optional theme overrides layered onto [`Theme::default`] by
-/// [`Config::to_theme`]; `None` means "keep the default value".
+/// Optional theme overrides layered onto a base [`Theme`] by
+/// [`ThemeConfig::apply_to`]; `None` means "keep the base value". A complete
+/// mirror of every [`Theme`] field, plus `base` (a selector, not a color).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ThemeConfig {
+    /// Name of a base theme to start from (a built-in, or a `*.toml` stem in the
+    /// themes dir). Only meaningful in the main config's `[theme]`; ignored
+    /// inside a theme file. Resolution is done by the binary (themes-dir first,
+    /// then built-ins); core's `to_theme` resolves built-ins only.
+    #[serde(default)]
+    pub base: Option<String>,
     #[serde(default)]
     pub palette: Option<Vec<Color>>,
     #[serde(default)]
     pub fg: Option<Color>,
     #[serde(default)]
     pub bar_bg: Option<Color>,
+    #[serde(default)]
+    pub hard_left: Option<String>,
+    #[serde(default)]
+    pub hard_right: Option<String>,
+    #[serde(default)]
+    pub soft_left: Option<String>,
+    #[serde(default)]
+    pub soft_right: Option<String>,
+    #[serde(default)]
+    pub soft_fg: Option<Color>,
     #[serde(default)]
     pub win_cap_left: Option<String>,
     #[serde(default)]
@@ -308,6 +382,72 @@ pub struct ThemeConfig {
     pub win_inactive_bg: Option<Color>,
     #[serde(default)]
     pub win_inactive_fg: Option<Color>,
+    #[serde(default)]
+    pub success: Option<Color>,
+    #[serde(default)]
+    pub info: Option<Color>,
+    #[serde(default)]
+    pub warning: Option<Color>,
+    #[serde(default)]
+    pub error: Option<Color>,
+}
+
+impl ThemeConfig {
+    /// Apply each `Some` field onto `theme`, leaving unset fields unchanged.
+    /// `base` is a selector, not a color, so it is not applied here.
+    pub fn apply_to(&self, theme: &mut Theme) {
+        macro_rules! set {
+            ($field:ident) => {
+                if let Some(v) = &self.$field {
+                    theme.$field = v.clone();
+                }
+            };
+        }
+        set!(palette);
+        set!(fg);
+        set!(bar_bg);
+        set!(hard_left);
+        set!(hard_right);
+        set!(soft_left);
+        set!(soft_right);
+        set!(soft_fg);
+        set!(win_cap_left);
+        set!(win_cap_right);
+        set!(win_current_bg);
+        set!(win_current_fg);
+        set!(win_inactive_bg);
+        set!(win_inactive_fg);
+        set!(success);
+        set!(info);
+        set!(warning);
+        set!(error);
+    }
+
+    /// An all-`Some` config mirroring `theme` (with `base = None`). Used to
+    /// scaffold a fully-populated theme file (`rustline theme new`).
+    pub fn from_theme(theme: &Theme) -> ThemeConfig {
+        ThemeConfig {
+            base: None,
+            palette: Some(theme.palette.clone()),
+            fg: Some(theme.fg.clone()),
+            bar_bg: Some(theme.bar_bg.clone()),
+            hard_left: Some(theme.hard_left.clone()),
+            hard_right: Some(theme.hard_right.clone()),
+            soft_left: Some(theme.soft_left.clone()),
+            soft_right: Some(theme.soft_right.clone()),
+            soft_fg: Some(theme.soft_fg.clone()),
+            win_cap_left: Some(theme.win_cap_left.clone()),
+            win_cap_right: Some(theme.win_cap_right.clone()),
+            win_current_bg: Some(theme.win_current_bg.clone()),
+            win_current_fg: Some(theme.win_current_fg.clone()),
+            win_inactive_bg: Some(theme.win_inactive_bg.clone()),
+            win_inactive_fg: Some(theme.win_inactive_fg.clone()),
+            success: Some(theme.success.clone()),
+            info: Some(theme.info.clone()),
+            warning: Some(theme.warning.clone()),
+            error: Some(theme.error.clone()),
+        }
+    }
 }
 
 /// Logging configuration: per-sink level thresholds and an optional log-file
@@ -448,38 +588,25 @@ impl Config {
         }
     }
 
-    /// Build a [`Theme`] by layering this config's overrides onto
-    /// [`Theme::default`]; unset fields keep the default value.
-    pub fn to_theme(&self) -> Theme {
-        let mut theme = Theme::default();
-        if let Some(palette) = &self.theme.palette {
-            theme.palette = palette.clone();
-        }
-        if let Some(fg) = &self.theme.fg {
-            theme.fg = fg.clone();
-        }
-        if let Some(bar_bg) = &self.theme.bar_bg {
-            theme.bar_bg = bar_bg.clone();
-        }
-        if let Some(v) = &self.theme.win_cap_left {
-            theme.win_cap_left = v.clone();
-        }
-        if let Some(v) = &self.theme.win_cap_right {
-            theme.win_cap_right = v.clone();
-        }
-        if let Some(v) = &self.theme.win_current_bg {
-            theme.win_current_bg = v.clone();
-        }
-        if let Some(v) = &self.theme.win_current_fg {
-            theme.win_current_fg = v.clone();
-        }
-        if let Some(v) = &self.theme.win_inactive_bg {
-            theme.win_inactive_bg = v.clone();
-        }
-        if let Some(v) = &self.theme.win_inactive_fg {
-            theme.win_inactive_fg = v.clone();
-        }
+    /// Apply this config's inline `[theme]` overrides on top of an
+    /// already-resolved `base` theme.
+    pub fn to_theme_over(&self, base: Theme) -> Theme {
+        let mut theme = base;
+        self.theme.apply_to(&mut theme);
         theme
+    }
+
+    /// Resolve the effective theme using BUILT-IN themes only (no themes-dir
+    /// lookup). Callers with a themes dir (the binary) resolve the base
+    /// themselves and use `to_theme_over`.
+    pub fn to_theme(&self) -> Theme {
+        let base = self
+            .theme
+            .base
+            .as_deref()
+            .and_then(crate::builtin_theme)
+            .unwrap_or_default();
+        self.to_theme_over(base)
     }
 }
 
@@ -488,6 +615,25 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn to_theme_resolves_builtin_base_and_inline_override_wins() {
+        use crate::Color;
+        // base only
+        let mut cfg = Config::default();
+        cfg.theme.base = Some("nord".into());
+        let t = cfg.to_theme();
+        assert_eq!(t, crate::builtin_theme("nord").unwrap()); // no inline overrides -> exactly nord
+        // base + override
+        cfg.theme.error = Some(Color::Rgb(1, 2, 3));
+        let t = cfg.to_theme();
+        assert_eq!(t.error, Color::Rgb(1, 2, 3));
+        assert_eq!(t.fg, crate::builtin_theme("nord").unwrap().fg);
+        // unknown base -> default (total)
+        let mut bad = Config::default();
+        bad.theme.base = Some("nope".into());
+        assert_eq!(bad.to_theme().bar_bg, crate::Theme::default().bar_bg);
+    }
 
     #[test]
     fn to_theme_maps_window_pill_overrides() {
@@ -499,6 +645,8 @@ mod tests {
         cfg.theme.win_inactive_fg = Some(Color::Indexed(63));
         cfg.theme.win_cap_left = Some("L".into());
         cfg.theme.win_cap_right = Some("R".into());
+        cfg.theme.soft_fg = Some(Color::Indexed(77));
+        cfg.theme.error = Some(Color::Indexed(88));
         let t = cfg.to_theme();
         assert_eq!(t.win_current_bg, Color::Indexed(60));
         assert_eq!(t.win_inactive_bg, Color::Indexed(61));
@@ -506,6 +654,8 @@ mod tests {
         assert_eq!(t.win_inactive_fg, Color::Indexed(63));
         assert_eq!(t.win_cap_left, "L");
         assert_eq!(t.win_cap_right, "R");
+        assert_eq!(t.soft_fg, Color::Indexed(77));
+        assert_eq!(t.error, Color::Indexed(88));
     }
 
     #[test]
@@ -776,5 +926,78 @@ alt_format = "{load1} {load5} {load15}"
         let c = Config::load(&p);
         assert_eq!(c.widgets.loadavg.format, "{load1} {load5} {load15}");
         assert_eq!(c.layout.left, Config::default().layout.left);
+    }
+
+    #[test]
+    fn theme_config_full_mirror_apply_and_from_theme_round_trip() {
+        use crate::Color;
+        // apply_to sets only Some fields, leaving others at the base value.
+        let cfg = ThemeConfig {
+            error: Some(Color::Rgb(9, 9, 9)),
+            soft_fg: Some(Color::Indexed(99)),
+            ..Default::default()
+        };
+        let mut t = crate::Theme::default();
+        cfg.apply_to(&mut t);
+        assert_eq!(t.error, Color::Rgb(9, 9, 9));
+        assert_eq!(t.soft_fg, Color::Indexed(99));
+        assert_eq!(t.fg, crate::Theme::default().fg); // untouched
+
+        // from_theme is all-Some and round-trips through apply_to onto default.
+        let src = crate::Theme::default();
+        let mirror = ThemeConfig::from_theme(&src);
+        assert!(mirror.palette.is_some() && mirror.warning.is_some() && mirror.hard_left.is_some());
+        let mut rebuilt = crate::Theme::default();
+        mirror.apply_to(&mut rebuilt);
+        assert_eq!(rebuilt.warning, src.warning);
+        assert_eq!(rebuilt.win_current_bg, src.win_current_bg);
+    }
+
+    #[test]
+    fn to_theme_over_applies_inline_overrides_onto_base() {
+        use crate::Color;
+        let mut cfg = Config::default();
+        cfg.theme.error = Some(Color::Rgb(1, 2, 3));
+        let base = crate::Theme {
+            fg: Color::Indexed(200),
+            error: Color::Indexed(160),
+            ..crate::Theme::default()
+        };
+        let t = cfg.to_theme_over(base);
+        assert_eq!(t.fg, Color::Indexed(200)); // from base, no inline override
+        assert_eq!(t.error, Color::Rgb(1, 2, 3)); // inline override wins
+    }
+
+    #[test]
+    fn theme_config_parses_base_separators_and_semantics() {
+        let toml = r#"
+[theme]
+base = "nord"
+soft_fg = { Indexed = 99 }
+error = { Named = "red" }
+hard_left = "X"
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.theme.base.as_deref(), Some("nord"));
+        assert_eq!(c.theme.soft_fg, Some(crate::Color::Indexed(99)));
+        assert_eq!(c.theme.error, Some(crate::Color::Named("red".into())));
+        assert_eq!(c.theme.hard_left.as_deref(), Some("X"));
+    }
+
+    #[test]
+    fn threshold_knobs_default_and_parse() {
+        let c = Config::default();
+        assert_eq!(c.widgets.cpu.warn_percent, 80.0);
+        assert_eq!(c.widgets.cpu.crit_percent, 95.0);
+        assert_eq!(c.widgets.memory.crit_percent, 92.0);
+        assert_eq!(c.widgets.battery.warn_percent, 20.0);
+        assert_eq!(c.widgets.loadavg.warn_load, 0.0); // off by default
+        let parsed: Config = toml::from_str(
+            "[widgets.cpu]\nwarn_percent = 70\n[widgets.loadavg]\ncrit_load = 8.0\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.widgets.cpu.warn_percent, 70.0);
+        assert_eq!(parsed.widgets.cpu.crit_percent, 95.0); // untouched default
+        assert_eq!(parsed.widgets.loadavg.crit_load, 8.0);
     }
 }

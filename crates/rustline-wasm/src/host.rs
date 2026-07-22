@@ -184,6 +184,7 @@ mod tests {
             os: String::new(),
             arch: String::new(),
             toggled: std::collections::BTreeSet::from([name.to_string()]),
+            colors: Default::default(),
         }
     }
 

@@ -5,7 +5,9 @@
 //! pure pass simply by filling its field here.
 
 use chrono::{Local, TimeZone};
-use rustline_core::{Battery, BatteryState, Context, CpuUsage, MemInfo, NetIface, WindowCtx};
+use rustline_core::{
+    Battery, BatteryState, Context, CpuUsage, MemInfo, NetIface, ThemeColors, WindowCtx,
+};
 
 /// A representative, fully-populated `Context`. Every widget renders its real
 /// `format` branch on it (see the completeness test) — so no widget degrades to
@@ -56,5 +58,9 @@ pub fn fabricated_context() -> Context {
         os: "linux".into(),
         arch: "x86_64".into(),
         toggled: Default::default(),
+        // Theme-derived colors added when the theme feature landed on main; the
+        // fixture's readings sit below every alert threshold, so no widget takes
+        // its alert-badge path — default colors keep the pure pass representative.
+        colors: ThemeColors::default(),
     }
 }
