@@ -34,7 +34,7 @@ fn resolvable(name: &str, themes_dir: &Path) -> bool {
 /// stray `theme = "dark"` in a hand-edited config), reports the error and
 /// exits rather than panicking — same shape as `plugin_cmd::mutate`'s
 /// not-a-table guards.
-fn set_base(doc: &mut DocumentMut, name: &str) {
+pub(crate) fn set_base(doc: &mut DocumentMut, name: &str) {
     let theme = match doc
         .entry("theme")
         .or_insert(Item::Table(Table::new()))

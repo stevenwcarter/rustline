@@ -3,7 +3,10 @@
 //! (template mutation, config merge, prompt parsing) are unit-tested; the
 //! interactive prompt loop is a thin I/O shell over them.
 
-use toml_edit::{Array, DocumentMut, value};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 /// The recommended starter config, embedded at build time.
 const STARTER_TEMPLATE: &str = include_str!("../assets/starter-config.toml");
@@ -95,6 +98,75 @@ pub fn starter_config_toml(a: &InitAnswers) -> String {
     doc.to_string()
 }
 
+/// Merge the generated starter into an existing config **non-destructively**:
+/// `[theme].base` is always (re)set to `theme`; `[layout]` and each
+/// `[widgets.<name>]` table are added only if absent. Returns the merged TOML,
+/// or `Err` if `existing` is not valid TOML (caller must not overwrite it).
+pub fn merge_config(existing: &str, generated: &str, theme: &str) -> Result<String, String> {
+    let mut doc: DocumentMut = existing
+        .parse()
+        .map_err(|e| format!("existing config is not valid TOML: {e}"))?;
+    let generated_doc: DocumentMut = generated
+        .parse()
+        .map_err(|e| format!("generated config invalid (bug): {e}"))?;
+
+    crate::theme_cmd::set_base(&mut doc, theme);
+
+    if doc.get("layout").is_none()
+        && let Some(layout) = generated_doc.get("layout")
+    {
+        doc["layout"] = layout.clone();
+    }
+
+    if let Some(generated_widgets) = generated_doc.get("widgets").and_then(Item::as_table) {
+        let existing_widgets = doc.entry("widgets").or_insert(Item::Table(Table::new()));
+        if let Some(existing_widgets) = existing_widgets.as_table_mut() {
+            existing_widgets.set_implicit(false);
+            for (name, table) in generated_widgets.iter() {
+                if !existing_widgets.contains_key(name) {
+                    existing_widgets.insert(name, table.clone());
+                }
+            }
+        }
+    }
+
+    Ok(doc.to_string())
+}
+
+/// Sibling backup path `<config_path>.rustline.bak`, e.g.
+/// `config.toml.rustline.bak`.
+fn backup_path(config_path: &Path) -> PathBuf {
+    let mut name = config_path.as_os_str().to_owned();
+    name.push(".rustline.bak");
+    PathBuf::from(name)
+}
+
+/// Write the tailored config to `config_path`. A fresh file gets the full
+/// generated starter (parent dirs created as needed). An existing file is
+/// first backed up to `<config_path>.rustline.bak`, then overwritten with the
+/// non-destructive merge (see [`merge_config`]). Returns the backup path
+/// written, or an empty `PathBuf` when there was no pre-existing file.
+pub fn write_config(a: &InitAnswers, config_path: &Path) -> std::io::Result<PathBuf> {
+    let generated = starter_config_toml(a);
+    match fs::read_to_string(config_path) {
+        Ok(existing) => {
+            let merged = merge_config(&existing, &generated, &a.theme)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            let backup = backup_path(config_path);
+            fs::write(&backup, &existing)?;
+            fs::write(config_path, merged)?;
+            Ok(backup)
+        }
+        Err(_) => {
+            if let Some(parent) = config_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(config_path, generated)?;
+            Ok(PathBuf::new())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +250,65 @@ mod tests {
         );
         // required widget sections remain
         assert!(toml.contains("[widgets.cpu]"));
+    }
+
+    #[test]
+    fn merge_into_empty_uses_generated_and_sets_theme() {
+        let generated = starter_config_toml(&base_answers());
+        let out = merge_config("", &generated, "nord").unwrap();
+        let cfg: Config = toml::from_str(&out).unwrap();
+        assert_eq!(cfg.theme.base.as_deref(), Some("nord"));
+        assert_eq!(cfg.widgets.cpu.alt_format, "{icon} {percent}%");
+    }
+
+    #[test]
+    fn merge_preserves_user_widget_and_layout_but_overrides_theme() {
+        let existing = r#"
+[layout]
+right = ["datetime"]
+[theme]
+base = "gruvbox"
+[widgets.cpu]
+format = "USER {percent}%"
+"#;
+        let generated = starter_config_toml(&base_answers());
+        let out = merge_config(existing, &generated, "tokyo-night").unwrap();
+        let cfg: Config = toml::from_str(&out).unwrap();
+        // theme.base is actively re-set to the chosen theme
+        assert_eq!(cfg.theme.base.as_deref(), Some("tokyo-night"));
+        // user's existing layout + cpu format are preserved (not clobbered)
+        assert_eq!(cfg.layout.right, vec!["datetime"]);
+        assert_eq!(cfg.widgets.cpu.format, "USER {percent}%");
+        // a widget section the user lacked (memory) is added from the starter
+        assert_eq!(cfg.widgets.memory.alt_format, "{icon} {used}");
+    }
+
+    #[test]
+    fn merge_rejects_invalid_existing_config() {
+        let out = merge_config("this is = = not valid [[[", "", "nord");
+        assert!(out.is_err());
+    }
+
+    #[test]
+    fn write_config_fresh_creates_file_no_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rustline").join("config.toml");
+        let bak = write_config(&base_answers(), &path).unwrap();
+        assert!(path.is_file());
+        assert_eq!(bak, std::path::PathBuf::new(), "no backup for a fresh file");
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.theme.base.as_deref(), Some("nord"));
+    }
+
+    #[test]
+    fn write_config_existing_backs_up_and_merges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "[widgets.cpu]\nformat = \"USER\"\n").unwrap();
+        let bak = write_config(&base_answers(), &path).unwrap();
+        assert!(bak.is_file(), "backup written: {bak:?}");
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.widgets.cpu.format, "USER"); // preserved
+        assert_eq!(cfg.theme.base.as_deref(), Some("nord")); // set
     }
 }
