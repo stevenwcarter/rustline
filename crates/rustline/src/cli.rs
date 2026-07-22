@@ -168,7 +168,8 @@ pub struct BenchArgs {
     /// Override the plugin discovery directory (same resolution as render).
     #[arg(long = "plugin-dir")]
     pub plugin_dir: Option<String>,
-    /// Override the plugin state root (default: real state_root()).
+    /// Override the plugin state/cache root (default: real state_root());
+    /// does not affect plugin discovery.
     #[arg(long = "state-dir")]
     pub state_dir: Option<String>,
 }

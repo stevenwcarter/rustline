@@ -14,6 +14,12 @@ use harness::Group;
 
 /// Entry point for `rustline bench`.
 pub fn run(args: &BenchArgs, cfg: &Config) {
+    // Resolve the plugin *discovery* dir under the original environment,
+    // before any `--state-dir` override below — discovery must stay on the
+    // real `$XDG_DATA_HOME`/config/`--plugin-dir` resolution regardless of
+    // where `--state-dir` relocates the state/cache root.
+    let plugin_dir = crate::resolve_plugin_dir(args.plugin_dir.as_deref(), cfg);
+
     // `--state-dir` relocates state_root()/data_root() (both key off
     // XDG_DATA_HOME). Set before any read/plugin instantiation.
     if let Some(dir) = &args.state_dir {
@@ -50,6 +56,7 @@ pub fn run(args: &BenchArgs, cfg: &Config) {
     if want("plugins") {
         groups.push(plugins::bench_plugins(
             cfg,
+            &plugin_dir,
             args,
             args.iters,
             args.real_iters,

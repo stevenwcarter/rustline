@@ -9,7 +9,7 @@
 //!
 //! `--cold` additionally clears the plugin's state dir to force a genuine miss.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rustline_core::{Config, Registry};
 
@@ -34,9 +34,20 @@ fn discover_wasm_stems(dir: &Path) -> Vec<String> {
 }
 
 /// Bench each discovered plugin. Skips with a note when none are present.
-pub fn bench_plugins(cfg: &Config, args: &BenchArgs, iters: usize, real_iters: usize) -> Group {
-    let plugin_dir: PathBuf = crate::resolve_plugin_dir(args.plugin_dir.as_deref(), cfg);
-    let stems = discover_wasm_stems(&plugin_dir);
+///
+/// `plugin_dir` is the already-resolved discovery directory (see
+/// `crate::resolve_plugin_dir`), resolved by the caller *before* any
+/// `--state-dir` env override so plugin discovery never follows `--state-dir`
+/// — only the state/cache root (`rustline_wasm::state_root()`, used inside
+/// `register_plugins`) does.
+pub fn bench_plugins(
+    cfg: &Config,
+    plugin_dir: &Path,
+    args: &BenchArgs,
+    iters: usize,
+    real_iters: usize,
+) -> Group {
+    let stems = discover_wasm_stems(plugin_dir);
     if stems.is_empty() {
         return Group {
             title: "Plugins".into(),
@@ -49,7 +60,7 @@ pub fn bench_plugins(cfg: &Config, args: &BenchArgs, iters: usize, real_iters: u
     }
 
     let mut registry = Registry::new();
-    rustline_wasm::register_plugins(&mut registry, cfg, &plugin_dir, &stems);
+    rustline_wasm::register_plugins(&mut registry, cfg, plugin_dir, &stems);
     let ctx = fabricated_context();
     let mut rows = Vec::new();
 
@@ -117,7 +128,7 @@ pub fn bench_plugins(cfg: &Config, args: &BenchArgs, iters: usize, real_iters: u
 mod tests {
     use super::*;
 
-    fn bench_args_with_plugin_dir(dir: &str) -> BenchArgs {
+    fn bench_args_with_state_dir(state_dir: Option<&str>) -> BenchArgs {
         BenchArgs {
             only: "plugins".into(),
             iters: 1,
@@ -126,17 +137,47 @@ mod tests {
             cold: false,
             format: "table".into(),
             output: None,
-            plugin_dir: Some(dir.into()),
-            state_dir: None,
+            plugin_dir: None,
+            state_dir: state_dir.map(Into::into),
         }
     }
 
     #[test]
     fn empty_plugin_dir_is_skipped_with_note() {
         let tmp = tempfile::tempdir().unwrap();
-        let args = bench_args_with_plugin_dir(tmp.path().to_str().unwrap());
-        let g = bench_plugins(&Config::default(), &args, 1, 1);
+        let args = bench_args_with_state_dir(None);
+        let g = bench_plugins(&Config::default(), tmp.path(), &args, 1, 1);
         assert!(g.rows.is_empty());
         assert!(g.note.as_deref().unwrap().contains("no *.wasm"));
+    }
+
+    /// `bench_plugins` takes the discovery dir as an explicit parameter, not
+    /// derived from `args.state_dir` — so discovery finds a plugin dropped in
+    /// the passed dir even when `args.state_dir` points elsewhere entirely.
+    /// This is the regression test for the bug where `--state-dir`'s
+    /// `XDG_DATA_HOME` override leaked into plugin discovery.
+    #[test]
+    fn discovery_uses_passed_plugin_dir_independent_of_state_dir() {
+        let plugin_tmp = tempfile::tempdir().unwrap();
+        let state_tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            plugin_tmp.path().join("foo.wasm"),
+            b"not a real wasm module",
+        )
+        .unwrap();
+
+        let args = bench_args_with_state_dir(Some(state_tmp.path().to_str().unwrap()));
+        let g = bench_plugins(&Config::default(), plugin_tmp.path(), &args, 1, 1);
+
+        assert!(
+            g.note.is_none(),
+            "expected discovery to find foo.wasm in the passed plugin dir, got skip note: {:?}",
+            g.note
+        );
+        assert!(
+            g.rows.iter().any(|r| r.label.starts_with("foo")),
+            "expected a row for the discovered `foo` plugin, got rows: {:?}",
+            g.rows.iter().map(|r| &r.label).collect::<Vec<_>>()
+        );
     }
 }
