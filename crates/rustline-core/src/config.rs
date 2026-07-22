@@ -543,8 +543,13 @@ impl Config {
     /// lookup). Callers with a themes dir (the binary) resolve the base
     /// themselves and use `to_theme_over`.
     pub fn to_theme(&self) -> Theme {
-        // Task 5 wires the built-in `base` here; until then, default base.
-        self.to_theme_over(Theme::default())
+        let base = self
+            .theme
+            .base
+            .as_deref()
+            .and_then(crate::builtin_theme)
+            .unwrap_or_default();
+        self.to_theme_over(base)
     }
 }
 
@@ -553,6 +558,25 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn to_theme_resolves_builtin_base_and_inline_override_wins() {
+        use crate::Color;
+        // base only
+        let mut cfg = Config::default();
+        cfg.theme.base = Some("nord".into());
+        let t = cfg.to_theme();
+        assert_eq!(t, crate::builtin_theme("nord").unwrap()); // no inline overrides -> exactly nord
+        // base + override
+        cfg.theme.error = Some(Color::Rgb(1, 2, 3));
+        let t = cfg.to_theme();
+        assert_eq!(t.error, Color::Rgb(1, 2, 3));
+        assert_eq!(t.fg, crate::builtin_theme("nord").unwrap().fg);
+        // unknown base -> default (total)
+        let mut bad = Config::default();
+        bad.theme.base = Some("nope".into());
+        assert_eq!(bad.to_theme().bar_bg, crate::Theme::default().bar_bg);
+    }
 
     #[test]
     fn to_theme_maps_window_pill_overrides() {

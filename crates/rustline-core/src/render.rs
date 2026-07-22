@@ -17,7 +17,7 @@ pub enum Direction {
 /// Visual theme for a rendered region: the color palette, default foreground,
 /// bar background, and the four powerline separator glyphs (hard/soft for each
 /// direction) plus the color used to draw soft separators.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Theme {
     pub palette: Vec<Color>,
     pub fg: Color,
