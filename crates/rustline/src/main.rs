@@ -4,6 +4,10 @@ mod bench;
 mod build_context;
 mod cli;
 mod cpu;
+// Wired into the CLI by a later task in the `rustline init` onboarding-wizard
+// plan; until then its pub items are reachable only from its own tests.
+#[allow(dead_code)]
+mod init;
 mod logging;
 mod memory;
 mod plugin_cmd;
