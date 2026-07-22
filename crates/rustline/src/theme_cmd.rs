@@ -548,7 +548,7 @@ fn run_picker<R: BufRead, W: Write>(
             SetCmd::Keep => return None,
             SetCmd::Index(idx) => return Some(entries[idx].name.clone()),
             SetCmd::Name(s) => {
-                if let Some(e) = entries.iter().find(|e| e.name == s) {
+                if let Some(e) = entries.iter().find(|e| e.name.eq_ignore_ascii_case(&s)) {
                     return Some(e.name.clone());
                 }
                 let _ = writeln!(writer, "unknown theme: {s}");
@@ -789,5 +789,16 @@ mod tests {
                 .unwrap()
                 .contains("unknown theme: nope")
         );
+    }
+
+    #[test]
+    fn run_picker_set_name_is_case_insensitive() {
+        let td = tempfile::tempdir().unwrap();
+        let entries = picker_entries("default", builtin_theme_names(), &[]);
+        let input = b"\nNORD\n"; // blank ends preview loop; set "NORD"
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut out: Vec<u8> = Vec::new();
+        let choice = run_picker(&entries, td.path(), &mut reader, &mut out, "default");
+        assert_eq!(choice.as_deref(), Some("nord"));
     }
 }

@@ -20,8 +20,9 @@ pane, window, host, and system info, with zero required configuration.
   left-clicking it in the status line swaps it to that view (e.g. a compact
   `cpu` reading toggling to one with a gauge bar).
 - Six built-in themes (a `default` plus five multi-accent, truecolor curated
-  themes) selectable via `rustline theme use`, plus a `theme new` scaffolder
-  for tweaking your own — see [Themes](#themes) below.
+  themes) selectable via `rustline theme use`, browsable interactively with
+  `rustline theme pick`, plus a `theme new` scaffolder for tweaking your own
+  — see [Themes](#themes) below.
 - Semantic colors (`success`/`info`/`warning`/`error`) reach both built-in
   widgets and WASM plugins; `cpu`, `memory`, `battery`, and `loadavg` turn
   into an alert badge when a configurable threshold is crossed.
