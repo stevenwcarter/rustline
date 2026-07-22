@@ -19,6 +19,12 @@ pane, window, host, and system info, with zero required configuration.
 - Click-to-toggle widget alt views: give a widget an `alt_format` and
   left-clicking it in the status line swaps it to that view (e.g. a compact
   `cpu` reading toggling to one with a gauge bar).
+- Six built-in themes (a `default` plus five multi-accent, truecolor curated
+  themes) selectable via `rustline theme use`, plus a `theme new` scaffolder
+  for tweaking your own — see [Themes](#themes) below.
+- Semantic colors (`success`/`info`/`warning`/`error`) reach both built-in
+  widgets and WASM plugins; `cpu`, `memory`, `battery`, and `loadavg` turn
+  into an alert badge when a configurable threshold is crossed.
 - Instant refresh on pane/window switch via tmux hooks (no waiting for the
   next `status-interval` tick).
 
@@ -132,7 +138,9 @@ nothing by default.
 Takes a `format` where `{icon}`, `{percent}`, and `{state}` are replaced, and
 a `down_format` shown when there's no battery reading (default empty — same
 collapse-to-nothing behavior as the IP widgets' `down_format`), plus an
-`alt_format` for [click-to-toggle](#click-to-toggle-widget-views).
+`alt_format` for [click-to-toggle](#click-to-toggle-widget-views). It's also
+[threshold-aware](#themes): `warn_percent`/`crit_percent` (default 20/10)
+alert while discharging at or below those levels.
 
 ```toml
 [layout]
@@ -141,6 +149,8 @@ right = ["battery", "cwd", "loadavg", "datetime"]
 [widgets.battery]
 format = "{icon} {percent}%"   # {icon}, {percent}, {state}
 down_format = ""               # shown when no battery (desktops); default: nothing
+warn_percent = 20              # default; alert badge at/below this % while discharging
+crit_percent = 10              # default; 0 disables a tier
 ```
 
 ### CPU and memory widgets
@@ -158,16 +168,22 @@ each with a Unicode gauge bar.
 `down_format` (default empty) shown on an unsupported platform or a failed
 read — same collapse-to-nothing behavior as the `battery` widget's
 `down_format` — and an `alt_format` for
-[click-to-toggle](#click-to-toggle-widget-views).
+[click-to-toggle](#click-to-toggle-widget-views). Both are also
+[threshold-aware](#themes): `warn_percent`/`crit_percent` (cpu default 80/95,
+memory default 80/92) alert at or above those levels.
 
 ```toml
 [widgets.cpu]
 format = "{icon} {bar} {percent}%"   # default "{icon} {percent}%"
 bar_width = 8
+warn_percent = 80   # default; 0 disables a tier
+crit_percent = 95   # default
 
 [widgets.memory]
 format = "{icon} {used}/{total}"     # default; or "{icon} {bar} {percent}%"
 bar_width = 8
+warn_percent = 80   # default; 0 disables a tier
+crit_percent = 92   # default
 ```
 
 ### Load average widget
@@ -181,12 +197,17 @@ accepts an inline Rust-style precision spec `:.N` — `{load1:.1}` → `0.4`. A 
 `{load1}` is two decimals (so the default renders exactly like older versions),
 and `N` is clamped to 0–10. Also takes a `down_format` (default empty, shown
 when the load can't be read) and an `alt_format` for
-[click-to-toggle](#click-to-toggle-widget-views).
+[click-to-toggle](#click-to-toggle-widget-views). It's also
+[threshold-aware](#themes) on `load1` via `warn_load`/`crit_load` — unlike the
+other numeric widgets, both default to `0.0` (off), since an absolute load
+threshold depends on core count.
 
 ```toml
 [widgets.loadavg]
 format      = "{load1} {load5} {load15}"          # default
 alt_format  = "{load1:.1} {load5:.1} {load15:.1}" # left-click toggles to this
+warn_load   = 0.0   # default (off); e.g. 4.0 on a 4-core box
+crit_load   = 0.0   # default (off)
 ```
 
 ### Click-to-toggle widget views
@@ -214,6 +235,59 @@ for itself whether to honor a click by checking `context.toggled` — the
 bundled `weather` example does this via `options.alt_format`. Since a plugin's
 name becomes a tmux `range=user|<name>` argument verbatim, pick one that is
 ≤ 15 bytes, isn't the reserved name `window`, and sticks to `[A-Za-z0-9_-]`.
+
+## Themes
+
+rustline ships six built-in themes, selectable from the command line, plus
+per-widget threshold alerts that use each theme's semantic colors.
+
+> **Truecolor requirement:** the five curated themes (everything but
+> `default`) use truecolor (24-bit RGB) values. You need a truecolor-capable
+> terminal and tmux's `RGB`/`Tc` terminal feature enabled — e.g.
+> `set -as terminal-features ",xterm-256color:RGB"` (tmux ≥ 3.2), or
+> `set -ga terminal-overrides ",*256col*:Tc"` on older tmux — otherwise the
+> colors will be approximated or look wrong.
+
+- **`default`** — the original two-accent palette (unchanged).
+- **`pastel-rainbow`** — the flagship: a six-color pastel palette with dark
+  text.
+- **`nord`**, **`gruvbox`**, **`catppuccin-mocha`**, **`tokyo-night`** —
+  curated multi-accent ports of the popular color schemes.
+
+```bash
+rustline theme list                  # built-ins + your themes-dir files, active marked *
+rustline theme show pastel-rainbow   # ANSI preview (with sample alert badges)
+rustline theme use nord              # sets [theme].base = "nord" in config.toml
+rustline theme new my-nord --from nord   # scaffold a tweakable copy to edit by hand
+```
+
+`theme new` writes a complete, commented theme file to
+`$XDG_CONFIG_HOME/rustline/themes/<name>.toml` (fallback
+`~/.config/rustline/themes`) with every field set to the seed theme's values —
+edit any of them, then `rustline theme use <name>`. A themes-dir file always
+**shadows** a built-in of the same name, so `rustline theme new nord` followed
+by `rustline theme use nord` uses your tweaked copy.
+
+Under the hood, `[theme].base` in `config.toml` selects the starting theme;
+any individual `[theme]` field — the six window-pill fields (`win_current_bg`/
+`win_current_fg`/`win_inactive_bg`/`win_inactive_fg`/`win_cap_left`/
+`win_cap_right`), `palette`, `fg`, `bar_bg`, the separators, or the semantic
+colors below — still overrides on top:
+
+```toml
+[theme]
+base  = "nord"                 # a built-in name, or a *.toml stem in your themes dir
+warning = { Named = "yellow" } # per-field overrides still apply on top of base
+```
+
+Every theme defines four **semantic colors** — `success`, `info`, `warning`,
+`error` — available to widgets and WASM plugins alike. The `cpu`, `memory`,
+`battery`, and `loadavg` widgets use them for **threshold alerts**: cross a
+configured `warn_*`/`crit_*` level (see each widget's section above) and the
+whole segment flips to an inverse badge (bold text in the theme's `bar_bg`,
+background in the semantic color) — critical always wins over warning. Set a
+threshold to `0` to turn that tier off; `loadavg`'s thresholds default off
+since a meaningful absolute load number depends on your core count.
 
 ## Logging
 
@@ -321,7 +395,8 @@ See the full design specs:
 [WASM plugins](docs/superpowers/specs/2026-07-20-rustline-wasm-plugins-design.md),
 [IP widgets](docs/superpowers/specs/2026-07-20-rustline-ip-widgets-design.md),
 [CPU/memory widgets](docs/superpowers/specs/2026-07-21-rustline-cpu-memory-widgets-design.md),
-[click-to-toggle widgets](docs/superpowers/specs/2026-07-21-rustline-click-toggle-widgets-design.md).
+[click-to-toggle widgets](docs/superpowers/specs/2026-07-21-rustline-click-toggle-widgets-design.md),
+[themes/theme picker](docs/superpowers/specs/2026-07-21-rustline-themes-theme-picker-design.md).
 
 ## License
 
