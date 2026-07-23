@@ -201,7 +201,7 @@ mod tests {
         // 8/16 = 50% -> plain
         let out = w("{percent}%", "").render(&ctx(disk(16 * g, 8 * g, 8 * g)));
         assert_eq!(out[0].style, crate::Style::default());
-        // 15/16 ~= 94% -> crit (>= 95 default) -- bump to 96% to cross crit cleanly
+        // 96/100 = 96% -> crit (>= 95 default)
         let mut c = ctx(disk(100 * g, 96 * g, 4 * g));
         c.colors = crate::ThemeColors {
             error: crate::Color::Indexed(196),

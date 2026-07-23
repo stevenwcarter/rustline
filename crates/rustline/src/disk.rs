@@ -1,21 +1,24 @@
 //! Filesystem-usage read, isolated at the `Context`-build edge, mirroring
 //! `battery.rs`/`cpu.rs`/`memory.rs`/`git.rs`: `read_disk` calls `statvfs(2)`
-//! and `disk_info_from_statvfs` is a pure derivation, unit-tested
-//! independently of any real mount. `statvfs` itself is POSIX (available on
-//! both Linux and macOS), so unlike `battery`/`cpu`/`memory` there is no
-//! `#[cfg(target_os)]` split on the syscall — only the pure fn is
-//! test-gated, matching the platforms it's exercised on.
+//! on Linux/macOS and `disk_info_from_statvfs` is a pure derivation,
+//! unit-tested independently of any real mount. `statvfs` is POSIX
+//! (available on both Linux and macOS) so both platforms share one reader
+//! arm; any other platform degrades to `None` the same way `read_battery`/
+//! `read_cpu`/`read_memory` do.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::ffi::CString;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::mem::MaybeUninit;
 
 use rustline_core::DiskInfo;
 
-/// Read filesystem usage for `mount` via `statvfs(2)`, or `None` on any
-/// failure: `mount` contains a nul byte, or the call itself fails (e.g. the
-/// path doesn't exist) — never a fabricated `0` reading (invariant #6).
+/// Read filesystem usage for `mount`, or `None` if the platform is
+/// unsupported, `mount` contains a nul byte, or the call itself fails (e.g.
+/// the path doesn't exist) — never a fabricated `0` reading (invariant #6).
 /// Called once at Context-build time, only when the `disk` widget is in the
 /// active layout (see `build_context.rs`).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn read_disk(mount: &str) -> Option<DiskInfo> {
     let path = CString::new(mount).ok()?;
     let mut stat = MaybeUninit::<libc::statvfs>::zeroed();
@@ -41,6 +44,15 @@ pub fn read_disk(mount: &str) -> Option<DiskInfo> {
         stat.f_frsize as u64,
     );
     Some(disk_info_from_statvfs(blocks, bfree, bavail, frsize))
+}
+
+/// `statvfs(2)` (and thus `libc::statvfs`) isn't available on this platform,
+/// so filesystem usage is simply unsupported here — same `None` degradation
+/// as `read_battery`/`read_cpu`/`read_memory` on an unsupported platform,
+/// never a fabricated `0` reading (invariant #6).
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn read_disk(_mount: &str) -> Option<DiskInfo> {
+    None
 }
 
 /// Derive a [`DiskInfo`] from raw `statvfs(2)` fields, already widened to
