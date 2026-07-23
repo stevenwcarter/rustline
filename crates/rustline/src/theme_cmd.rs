@@ -6,11 +6,9 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
 use std::process::Command;
 
-use chrono::Local;
 use rustline_core::{
-    Battery, BatteryState, Color, Config, Context, CpuUsage, Direction, MemInfo, Registry, Theme,
-    ThemeConfig, WindowCtx, builtin_theme, builtin_theme_names, render_named_region, render_window,
-    tmux_to_ansi,
+    Color, Config, Context, Direction, Registry, Theme, ThemeConfig, WindowCtx, builtin_theme,
+    builtin_theme_names, render_named_region, render_window, tmux_to_ansi,
 };
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value as EditValue, value};
 
@@ -150,41 +148,17 @@ fn list(config_path: &Path, themes_dir: &Path) {
     }
 }
 
-/// A representative synthetic Context for previews. When `show_alerts` is set,
-/// cpu/memory/battery are pegged past their thresholds so the preview trips the
-/// warning+error badges and exercises the theme's semantic colors; otherwise
-/// they carry healthy readings, so the preview shows only the palette — what a
-/// normal bar actually looks like. `colors` come from `theme`.
+/// A representative synthetic Context for previews, built from the shared
+/// [`crate::sample_context::sample_context`] (W52). When `show_alerts` is
+/// set, cpu/memory/battery are pegged past their thresholds so the preview
+/// trips the warning+error badges and exercises the theme's semantic colors;
+/// otherwise they carry healthy readings, so the preview shows only the
+/// palette — what a normal bar actually looks like. `colors` come from
+/// `theme` (the one field the shared builder can't know).
 fn sample_context(theme: &Theme, show_alerts: bool) -> Context {
-    let gib = 1024u64.pow(3);
-    let (cpu_pct, mem_used_gib, mem_avail_gib, batt_pct) = if show_alerts {
-        (96.0, 14, 2, 15)
-    } else {
-        (12.0, 6, 10, 82)
-    };
     Context {
-        session_name: "0".into(),
-        window_index: "1".into(),
-        pane_index: "0".into(),
-        pane_current_path: "/home/steve/src/rustline".into(),
-        home: "/home/steve".into(),
-        hostname: "scadrial".into(),
-        loadavg: Some([0.42, 0.31, 0.30]),
-        now: Local::now(),
-        battery: Some(Battery {
-            percent: batt_pct,
-            state: BatteryState::Discharging,
-        }),
-        cpu: Some(CpuUsage { percent: cpu_pct }),
-        memory: Some(MemInfo {
-            total_bytes: 16 * gib,
-            used_bytes: mem_used_gib * gib,
-            available_bytes: mem_avail_gib * gib,
-        }),
-        os: "linux".into(),
-        arch: "x86_64".into(),
         colors: theme.colors(),
-        ..Default::default()
+        ..crate::sample_context::sample_context(show_alerts)
     }
 }
 
@@ -734,6 +708,50 @@ fn pick(config_path: &Path, themes_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mask the datetime widget's live `%H:%M` clock reading (the last
+    /// `" < "`-prefixed field in the default `"%a < %Y-%m-%d < %H:%M"`
+    /// format) with a fixed placeholder. `sample_context`'s `now` is always
+    /// `Local::now()` — true before AND after W52's consolidation — so the
+    /// minute is the one byte range the golden-file comparison below can
+    /// never pin exactly; every other byte, including the date, is still
+    /// compared exactly.
+    fn redact_clock_minutes(rendered: &str) -> String {
+        match rendered.rfind(" < ") {
+            Some(idx) => {
+                let clock_start = idx + " < ".len();
+                let mut out = rendered[..clock_start].to_string();
+                out.push_str("HH:MM");
+                out.push_str(&rendered[clock_start + 5..]);
+                out
+            }
+            None => rendered.to_string(),
+        }
+    }
+
+    /// Characterization pin for W52 (consolidating the three fabricated-
+    /// `Context` builders into one shared `sample_context`): golden copies of
+    /// the *pre-consolidation* `theme show`-style preview render, captured
+    /// from the original hand-rolled `sample_context` in this module. Must
+    /// keep passing byte-for-byte (modulo the live clock, see
+    /// `redact_clock_minutes`) once `preview_theme_ansi` is repointed at the
+    /// shared `crate::sample_context::sample_context` — that is the guard
+    /// that the consolidation changed nothing observable.
+    #[test]
+    fn sample_context_render_is_unchanged_by_consolidation() {
+        let golden_true = include_str!("../testdata/theme_preview_alerts_true.golden");
+        let golden_false = include_str!("../testdata/theme_preview_alerts_false.golden");
+        assert_eq!(
+            redact_clock_minutes(&super::preview_theme_ansi(&Theme::default(), true)),
+            redact_clock_minutes(golden_true),
+            "alerts-on preview must stay byte-identical"
+        );
+        assert_eq!(
+            redact_clock_minutes(&super::preview_theme_ansi(&Theme::default(), false)),
+            redact_clock_minutes(golden_false),
+            "alerts-off preview must stay byte-identical"
+        );
+    }
 
     #[test]
     fn list_lines_mark_active_and_shadowed() {

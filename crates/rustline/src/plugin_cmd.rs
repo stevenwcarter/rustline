@@ -9,11 +9,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
-use chrono::Local;
-use rustline_core::{
-    Battery, BatteryState, Config, Context as CoreContext, CpuUsage, DiskInfo, GitInfo, MemInfo,
-    NetIface, Segment, Widget, WindowCtx,
-};
+use rustline_core::{Config, Context as CoreContext, Segment, Widget};
 use rustline_wasm::{DenialKind, DenialObserver, PluginManifest, resolve_manifest};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
@@ -156,52 +152,17 @@ fn format_run_output(segments: &[Segment], denials: &[Denial]) -> String {
 /// A representative, fully-populated sample `Context` for `plugin run`'s
 /// one-off render — a fabricated stand-in for the real `Context` built at
 /// render time (invariant #1: a plugin's `render` only ever sees `Context`),
-/// so a plugin author can exercise `render` without a live tmux pane.
+/// so a plugin author can exercise `render` without a live tmux pane. Built
+/// from the shared [`crate::sample_context::sample_context`] (W52) with
+/// `hostname` and the real host `os`/`arch` swapped in, since a plugin author
+/// testing `render` locally likely wants their actual platform reported
+/// rather than a fixed one.
 fn sample_context() -> CoreContext {
     CoreContext {
-        session_name: "0".into(),
-        window_index: "1".into(),
-        pane_index: "0".into(),
-        pane_current_path: "/home/steve/src/rustline".into(),
-        home: "/home/steve".into(),
         hostname: "devbox".into(),
-        loadavg: Some([0.42, 0.37, 0.30]),
-        now: Local::now(),
-        window: Some(WindowCtx {
-            index: "1".into(),
-            name: "editor".into(),
-            flags: "*".into(),
-            is_current: true,
-        }),
-        interfaces: vec![NetIface {
-            name: "eth0".into(),
-            ipv4: "192.168.1.42".parse().expect("valid ipv4 literal"),
-        }],
-        battery: Some(Battery {
-            percent: 76,
-            state: BatteryState::Discharging,
-        }),
-        cpu: Some(CpuUsage { percent: 23.5 }),
-        memory: Some(MemInfo {
-            total_bytes: 16 * 1024 * 1024 * 1024,
-            used_bytes: 6 * 1024 * 1024 * 1024,
-            available_bytes: 10 * 1024 * 1024 * 1024,
-        }),
-        git: Some(GitInfo {
-            branch: "main".into(),
-            ahead: 1,
-            behind: 0,
-            staged: 1,
-            unstaged: 2,
-        }),
-        disk: Some(DiskInfo {
-            total_bytes: 512 * 1024 * 1024 * 1024,
-            used_bytes: 200 * 1024 * 1024 * 1024,
-            available_bytes: 300 * 1024 * 1024 * 1024,
-        }),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
-        ..Default::default()
+        ..crate::sample_context::sample_context(false)
     }
 }
 

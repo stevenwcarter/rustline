@@ -15,6 +15,7 @@ mod media;
 mod memory;
 mod plugin_cmd;
 mod plugin_install;
+mod sample_context;
 mod theme_cmd;
 mod tmux_conf;
 mod toggles;
