@@ -19,8 +19,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rustline_abi::ABI_VERSION;
-use rustline_core::{Config, RANGE_NAME_MAX_BYTES, Registry, WidgetDescriptor, WidgetSource};
+use rustline_core::{
+    Config, PluginConfig, RANGE_NAME_MAX_BYTES, Registry, WidgetDescriptor, WidgetSource,
+};
 
+pub use capability::{CapabilityCtx, DenialKind, DenialObserver};
 pub use host::{WasmWidget, build_plugin};
 pub use manifest::{PluginManifest, resolve_manifest};
 pub use paths::{data_root, default_plugin_dir, expand_tilde, state_root};
@@ -141,14 +144,58 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
     }
 }
 
+/// Instantiate exactly one named plugin from `plugin_dir` with a
+/// caller-supplied [`DenialObserver`] — e.g. a collecting observer for a local
+/// dev harness (`rustline plugin run`) — bypassing the `needed`-list discovery
+/// filter, the built-in-name-collision check, and the `name()`/ABI-export
+/// verification `register_plugins` does, since a one-off harness run doesn't
+/// need any of them. Returns `None` on any read/instantiation failure,
+/// mirroring `register_plugins`'s never-fatal behavior. Doesn't touch the
+/// `Registry` and doesn't disturb `register_plugins` itself.
+pub fn instantiate_named(
+    plugin_dir: &Path,
+    name: &str,
+    pc: &PluginConfig,
+    observer: Arc<dyn DenialObserver + Send + Sync>,
+) -> Option<WasmWidget> {
+    let wasm = std::fs::read(plugin_dir.join(format!("{name}.wasm"))).ok()?;
+    let ctx =
+        capability::CapabilityCtx::from_config(name, pc, state_root()).with_observer(observer);
+    let plugin = host::build_plugin(&wasm, ctx).ok()?;
+    let options = serde_json::to_value(&pc.options).unwrap_or_default();
+    Some(host::WasmWidget::new(plugin, options, name))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AbiDecision, abi_decision};
+    use std::sync::Arc;
+
+    use rustline_core::PluginConfig;
+
+    use super::{AbiDecision, DenialObserver, abi_decision, instantiate_named};
+    use crate::capability::NoopObserver;
 
     #[test]
     fn abi_decision_matrix() {
         assert!(matches!(abi_decision(1, Some(1)), AbiDecision::Register));
         assert!(matches!(abi_decision(1, None), AbiDecision::RegisterLegacy));
         assert!(matches!(abi_decision(1, Some(2)), AbiDecision::Skip));
+    }
+
+    fn noop() -> Arc<dyn DenialObserver + Send + Sync> {
+        Arc::new(NoopObserver)
+    }
+
+    #[test]
+    fn instantiate_named_missing_file_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(instantiate_named(dir.path(), "nope", &PluginConfig::default(), noop()).is_none());
+    }
+
+    #[test]
+    fn instantiate_named_garbage_wasm_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("w.wasm"), b"not real wasm").unwrap();
+        assert!(instantiate_named(dir.path(), "w", &PluginConfig::default(), noop()).is_none());
     }
 }

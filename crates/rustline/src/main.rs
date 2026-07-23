@@ -229,10 +229,12 @@ fn main() {
         },
         Command::Config(cmd) => config_cmd::run(cmd, &cfg_path),
         Command::Plugin(cmd) => {
-            // Every `plugin` subcommand but `build` uses the plain resolved
-            // default; `build` alone carries its own `--plugin-dir` override.
+            // Every `plugin` subcommand but `build`/`run` uses the plain
+            // resolved default; those two alone carry their own
+            // `--plugin-dir` override.
             let dir_override = match &cmd {
                 PluginCmd::Build(args) => args.plugin_dir.as_deref(),
+                PluginCmd::Run(args) => args.plugin_dir.as_deref(),
                 _ => None,
             };
             let plugin_dir = resolve_plugin_dir(dir_override, &cfg);

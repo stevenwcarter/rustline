@@ -157,6 +157,10 @@ pub enum PluginCmd {
     /// Build any WASM guest plugin crate (not limited to this repo's own
     /// `plugins/*`) and install the resulting `.wasm` into the plugin dir.
     Build(BuildArgs),
+    /// Dev harness: instantiate one plugin, render it against a fabricated
+    /// sample `Context`, and print its segments plus any capability denials it
+    /// triggered. Read-only — never touches config or the toggles file.
+    Run(RunArgs),
 }
 
 /// Arguments for `rustline plugin build`.
@@ -169,6 +173,17 @@ pub struct BuildArgs {
     #[arg(long)]
     pub release: bool,
     /// Override the install destination (default: `--plugin-dir` resolution
+    /// used elsewhere — config `plugin_dir`, or the XDG default).
+    #[arg(long)]
+    pub plugin_dir: Option<String>,
+}
+
+/// Arguments for `rustline plugin run`.
+#[derive(Args)]
+pub struct RunArgs {
+    /// The plugin name (its `.wasm` stem).
+    pub name: String,
+    /// Override the plugin discovery dir (default: `--plugin-dir` resolution
     /// used elsewhere — config `plugin_dir`, or the XDG default).
     #[arg(long)]
     pub plugin_dir: Option<String>,

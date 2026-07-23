@@ -2,16 +2,22 @@
 //! approve a plugin's declared capability manifest. Mutations use `toml_edit`
 //! so the user's comments and formatting survive.
 
+use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
-use rustline_core::Config;
-use rustline_wasm::{PluginManifest, resolve_manifest};
+use chrono::Local;
+use rustline_core::{
+    Battery, BatteryState, Config, Context as CoreContext, CpuUsage, DiskInfo, GitInfo, MemInfo,
+    NetIface, Segment, Widget, WindowCtx,
+};
+use rustline_wasm::{DenialKind, DenialObserver, PluginManifest, resolve_manifest};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
-use crate::cli::{ApproveArgs, BuildArgs, NewPluginArgs, PatternCmd, PluginCmd};
+use crate::cli::{ApproveArgs, BuildArgs, NewPluginArgs, PatternCmd, PluginCmd, RunArgs};
 
 /// The reserved widget name that a plugin must never claim (it names the
 /// built-in window-list renderer, which isn't a plugin-resolvable slot).
@@ -56,7 +62,154 @@ pub fn run(cmd: PluginCmd, config_path: &Path, plugin_dir: &Path) {
                 std::process::exit(1);
             }
         }
+        PluginCmd::Run(args) => run_plugin(&args, config_path, plugin_dir),
     }
+}
+
+/// One denied capability request captured during `plugin run`'s render, for
+/// its report. Harness-local: not part of any persisted denial log (a
+/// separate, later concern — see the module doc on `capability::DenialObserver`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Denial {
+    kind: DenialKind,
+    target: String,
+}
+
+/// A [`DenialObserver`] that records every denial into a shared `Vec`, so
+/// `plugin run` can report them once the plugin's single render call
+/// returns. `observe` takes `&self` (the trait's signature), so the list
+/// lives behind a `Mutex`; `snapshot` clones the collected denials out
+/// without requiring exclusive ownership — the observer stays shared with
+/// the plugin's `CapabilityCtx` for as long as the widget is alive.
+#[derive(Default)]
+struct CollectingObserver {
+    denials: Mutex<Vec<Denial>>,
+}
+
+impl DenialObserver for CollectingObserver {
+    fn observe(&self, _plugin: &str, kind: DenialKind, target: &str) {
+        if let Ok(mut denials) = self.denials.lock() {
+            denials.push(Denial {
+                kind,
+                target: target.to_string(),
+            });
+        }
+    }
+}
+
+impl CollectingObserver {
+    fn snapshot(&self) -> Vec<Denial> {
+        self.denials.lock().map(|d| d.clone()).unwrap_or_default()
+    }
+}
+
+/// A short label for a [`DenialKind`], for the `plugin run` report.
+fn denial_kind_label(kind: DenialKind) -> &'static str {
+    match kind {
+        DenialKind::Url => "url",
+        DenialKind::Path => "path",
+    }
+}
+
+/// Render a `plugin run` report: each rendered segment's text, then any
+/// capability denials the plugin triggered during that render. Pure, so it's
+/// unit-tested directly; `run_plugin` is its only caller.
+fn format_run_output(segments: &[Segment], denials: &[Denial]) -> String {
+    let mut out = String::new();
+    out.push_str("segments:\n");
+    if segments.is_empty() {
+        out.push_str("  (none — plugin rendered nothing)\n");
+    } else {
+        for seg in segments {
+            let _ = writeln!(out, "  {}", seg.text);
+        }
+    }
+    out.push_str("denials:\n");
+    if denials.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for d in denials {
+            let _ = writeln!(out, "  {} denied: {}", denial_kind_label(d.kind), d.target);
+        }
+    }
+    out
+}
+
+/// A representative, fully-populated sample `Context` for `plugin run`'s
+/// one-off render — a fabricated stand-in for the real `Context` built at
+/// render time (invariant #1: a plugin's `render` only ever sees `Context`),
+/// so a plugin author can exercise `render` without a live tmux pane.
+fn sample_context() -> CoreContext {
+    CoreContext {
+        session_name: "0".into(),
+        window_index: "1".into(),
+        pane_index: "0".into(),
+        pane_current_path: "/home/steve/src/rustline".into(),
+        home: "/home/steve".into(),
+        hostname: "devbox".into(),
+        loadavg: Some([0.42, 0.37, 0.30]),
+        now: Local::now(),
+        window: Some(WindowCtx {
+            index: "1".into(),
+            name: "editor".into(),
+            flags: "*".into(),
+            is_current: true,
+        }),
+        interfaces: vec![NetIface {
+            name: "eth0".into(),
+            ipv4: "192.168.1.42".parse().expect("valid ipv4 literal"),
+        }],
+        battery: Some(Battery {
+            percent: 76,
+            state: BatteryState::Discharging,
+        }),
+        cpu: Some(CpuUsage { percent: 23.5 }),
+        memory: Some(MemInfo {
+            total_bytes: 16 * 1024 * 1024 * 1024,
+            used_bytes: 6 * 1024 * 1024 * 1024,
+            available_bytes: 10 * 1024 * 1024 * 1024,
+        }),
+        git: Some(GitInfo {
+            branch: "main".into(),
+            ahead: 1,
+            behind: 0,
+            staged: 1,
+            unstaged: 2,
+        }),
+        disk: Some(DiskInfo {
+            total_bytes: 512 * 1024 * 1024 * 1024,
+            used_bytes: 200 * 1024 * 1024 * 1024,
+            available_bytes: 300 * 1024 * 1024 * 1024,
+        }),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        ..Default::default()
+    }
+}
+
+/// `rustline plugin run <name> [--plugin-dir <dir>]`: instantiate exactly the
+/// named plugin — bypassing the layout-`needed` discovery filter `render`
+/// uses — render it once against a fabricated [`sample_context`], and print
+/// its segments plus any capability denials it triggered along the way (via a
+/// [`CollectingObserver`] wired through `rustline_wasm::instantiate_named`).
+/// Read-only: loads the config but never writes it, and never touches the
+/// toggles file.
+fn run_plugin(args: &RunArgs, config_path: &Path, plugin_dir: &Path) {
+    let cfg = Config::load(config_path);
+    let pc = cfg.plugins.get(&args.name).cloned().unwrap_or_default();
+    let observer = Arc::new(CollectingObserver::default());
+    let widget = rustline_wasm::instantiate_named(plugin_dir, &args.name, &pc, observer.clone());
+    let Some(widget) = widget else {
+        eprintln!(
+            "failed to instantiate plugin {:?} from {}",
+            args.name,
+            plugin_dir.display()
+        );
+        std::process::exit(1);
+    };
+    let segments = widget.render(&sample_context());
+    let denials = observer.snapshot();
+    print!("{}", format_run_output(&segments, &denials));
 }
 
 /// Print every configured plugin's source and allowlists/caps, noting any
@@ -509,6 +662,44 @@ mod tests {
             requested_urls: urls.iter().map(|s| s.to_string()).collect(),
             requested_paths: paths.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    fn denial(kind: DenialKind, target: &str) -> Denial {
+        Denial {
+            kind,
+            target: target.to_string(),
+        }
+    }
+
+    #[test]
+    fn format_run_output_lists_segment_text_and_denials() {
+        let segments = vec![Segment::new("cool widget"), Segment::new("42")];
+        let denials = vec![
+            denial(DenialKind::Url, "https://evil.example/"),
+            denial(DenialKind::Path, "/etc/passwd"),
+        ];
+
+        let out = format_run_output(&segments, &denials);
+
+        assert!(out.contains("cool widget"), "{out}");
+        assert!(out.contains("42"), "{out}");
+        assert!(out.contains("url denied: https://evil.example/"), "{out}");
+        assert!(out.contains("path denied: /etc/passwd"), "{out}");
+    }
+
+    #[test]
+    fn format_run_output_reports_none_when_nothing_rendered_or_denied() {
+        let out = format_run_output(&[], &[]);
+        assert!(out.contains("(none"), "empty segments section: {out}");
+        assert!(out.contains("(none)"), "empty denials section: {out}");
+    }
+
+    #[test]
+    fn format_run_output_denials_none_when_only_segments_present() {
+        let segments = vec![Segment::new("hi")];
+        let out = format_run_output(&segments, &[]);
+        assert!(out.contains("hi"), "{out}");
+        assert!(out.contains("denials:\n  (none)"), "{out}");
     }
 
     /// Read a plugin allowlist array back out of a rendered config, non-panicky
