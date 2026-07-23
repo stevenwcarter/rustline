@@ -61,6 +61,7 @@ fn ctx_now(rfc3339: &str) -> Context {
         battery: None,
         cpu: None,
         memory: None,
+        git: None,
         os: String::new(),
         arch: String::new(),
         toggled: Default::default(),

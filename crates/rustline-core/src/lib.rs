@@ -12,7 +12,9 @@ pub mod widgets;
 pub use ansi::tmux_to_ansi;
 pub use assemble::{assign_palette, render_named_region, render_window};
 pub use config::{Config, LogConfig, PluginConfig, ThemeConfig};
-pub use context::{Battery, BatteryState, Context, CpuUsage, MemInfo, NetIface, WindowCtx};
+pub use context::{
+    Battery, BatteryState, Context, CpuUsage, GitInfo, MemInfo, NetIface, WindowCtx,
+};
 pub use render::{Direction, RANGE_NAME_MAX_BYTES, Theme, render_region};
 pub use segment::{Color, Segment, Style, ThemeColors};
 pub use themes::{builtin_theme, builtin_theme_names};

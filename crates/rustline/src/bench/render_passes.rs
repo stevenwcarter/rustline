@@ -10,7 +10,7 @@ use crate::cli::{RegionArgs, WindowArgs};
 
 /// The built-in widget names, benched individually. Kept explicit so a missing
 /// registration is caught by the completeness test.
-pub const BUILTIN_WIDGETS: [&str; 11] = [
+pub const BUILTIN_WIDGETS: [&str; 12] = [
     "pane_id",
     "hostname",
     "windows",
@@ -22,6 +22,7 @@ pub const BUILTIN_WIDGETS: [&str; 11] = [
     "battery",
     "cpu",
     "memory",
+    "git",
 ];
 
 /// Time each built-in widget's `render` in isolation on the fabricated Context.

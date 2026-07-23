@@ -117,6 +117,7 @@ mod tests {
             battery: None,
             cpu: None,
             memory,
+            git: None,
             os: String::new(),
             arch: String::new(),
             toggled: Default::default(),

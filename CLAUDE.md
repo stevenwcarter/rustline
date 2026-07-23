@@ -79,16 +79,19 @@ these shared types, not a design shortcut. Keep them serializable.
   `home`, `hostname`, `loadavg: Option<[f64;3]>`, `now: DateTime<Local>`,
   `window: Option<WindowCtx>`, `interfaces: Vec<NetIface>`,
   `battery: Option<Battery>`, `cpu: Option<CpuUsage>`,
-  `memory: Option<MemInfo>`, `os: String`, `arch: String`, `toggled:
-  BTreeSet<String>`, `colors: ThemeColors`), `WindowCtx`, and
-  `NetIface { name, ipv4: Ipv4Addr }` (one non-loopback IPv4 interface, read
-  once at `Context`-build time; the IP widgets select from this list rather
-  than touching the OS mid-render). `Battery { percent: u8, state:
+  `memory: Option<MemInfo>`, `git: Option<GitInfo>`, `os: String`, `arch:
+  String`, `toggled: BTreeSet<String>`, `colors: ThemeColors`), `WindowCtx`,
+  and `NetIface { name, ipv4: Ipv4Addr }` (one non-loopback IPv4 interface,
+  read once at `Context`-build time; the IP widgets select from this list
+  rather than touching the OS mid-render). `Battery { percent: u8, state:
   BatteryState }` and `BatteryState { Charging, Discharging, Full, Unknown }`
   (serde `snake_case`) are a battery snapshot read once at `Context`-build
   time; `CpuUsage { percent: f32 }` and `MemInfo { total_bytes, used_bytes,
   available_bytes }` (all bytes as `u64`) are the cpu/memory snapshots,
-  likewise read once at `Context`-build time; `os`/`arch` come from
+  likewise read once at `Context`-build time; `GitInfo { branch, ahead: u32,
+  behind: u32, staged: u32, unstaged: u32 }` is a git branch/status snapshot,
+  read once at `Context`-build time ONLY when `git` is in the active layout
+  (mirroring the `cpu`/`memory` read-gating below); `os`/`arch` come from
   `std::env::consts::OS`/`ARCH`; `toggled` (`#[serde(default)]`) is the set of
   widget/plugin names the user has click-toggled to their `alt_format` view,
   read once at `Context`-build time from the toggles state file (invariant #1)
@@ -121,9 +124,9 @@ these shared types, not a design shortcut. Keep them serializable.
 - `widget.rs` — `Widget` trait and `Registry` (name → factory; `resolve` skips
   unknown widget names with a `warn!`, never errors). `Widget::range_name(&self)
   -> Option<&str>` defaults to `None`; a clickable widget returns `Some(name)`.
-- `widgets/` — the eleven built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
+- `widgets/` — the twelve built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
   `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`,
-  plus `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
+  `git`, plus `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
   LAN/Tailscale interface-selection and `{ip}` formatting logic shared by
   `lan_ip`/`tailscale_ip` (no I/O — operates on `Context.interfaces`).
   `alert.rs` is the shared threshold-alert helper used by `cpu`/`memory`/
@@ -159,14 +162,20 @@ these shared types, not a design shortcut. Keep them serializable.
   `substitute` scanner does the replacement. All four threshold-aware widgets
   render byte-identically to before this feature whenever no tier is
   crossed (a reading below every threshold, or a tier disabled via `0`).
+  `git.rs` is the `git` widget: pure over `Context.git`, with `{branch}`
+  (current branch, or the 7-char short SHA when `HEAD` is detached),
+  `{ahead}`/`{behind}`/`{staged}`/`{unstaged}` (counts), and `{dirty}`
+  (substitutes a configurable `dirty_glyph`, default `*`, iff `staged > 0 ||
+  unstaged > 0`, else empty) placeholders; NOT threshold-aware (no
+  `alert.rs` use) and NOT in the default layout.
   `toggle.rs` holds the shared click-toggle helpers
   `active_format(ctx, name, format, alt) -> &str`
   (picks `alt` iff it's non-empty AND `name` is in `ctx.toggled`, else
   `format`) and `clickable_range(name, alt) -> Option<&str>` (`Some(name)` iff
   `alt` is non-empty AND `name.len() <= 15`, tmux's `range=user|X` byte limit);
-  the seven format-bearing widgets (`datetime`, `lan_ip`, `tailscale_ip`,
-  `battery`, `cpu`, `memory`, `loadavg`) each carry an `alt_format` field and
-  call both helpers from their `render`/`range_name`.
+  the eight format-bearing widgets (`datetime`, `lan_ip`, `tailscale_ip`,
+  `battery`, `cpu`, `memory`, `loadavg`, `git`) each carry an `alt_format`
+  field and call both helpers from their `render`/`range_name`.
 - `assemble.rs` — `assign_palette`, `render_named_region` (panic-guarded per
   widget via `catch_unwind`; now range-wraps via `render_region_ranged`,
   remembering each widget's `range_name()` across the palette-assignment
@@ -198,11 +207,14 @@ these shared types, not a design shortcut. Keep them serializable.
 
 `rustline-abi`:
 - `lib.rs` — `Segment { text, style }`, `Style { fg, bg, bold }`,
-  `Color { Named | Indexed(u8) | Rgb(u8,u8,u8) }` (+ `Color::to_tmux()`), and
+  `Color { Named | Indexed(u8) | Rgb(u8,u8,u8) }` (+ `Color::to_tmux()`),
   `ThemeColors { fg, bar_bg, success, info, warning, error }` with `Default`
   (matches `Theme::default()`'s values) — the semantic-color snapshot carried
   on `Context.colors` so widgets and WASM guests can style alert badges
-  without seeing `Theme`. The WASM wire types, re-exported by `rustline-core`.
+  without seeing `Theme` — and `GitInfo { branch, ahead, behind, staged,
+  unstaged }` (chrono-free, so no separate wire mirror is needed; the same
+  type rides `Context.git` and `WireContext.git`). The WASM wire types,
+  re-exported by `rustline-core`.
 
 `rustline-wasm`:
 - `allow.rs` — `AllowSet`/`Pattern`: each `allowed_urls`/`allowed_paths` entry
@@ -280,16 +292,26 @@ these shared types, not a design shortcut. Keep them serializable.
   bytes from free/inactive/speculative pages at the reported page size
   (`parse_macos_memory`). Same cfg-gated pure-parser pattern as
   `battery.rs`/`cpu.rs`. Unsupported platform or failed read → `None`.
+- `git.rs` — `read_git(path) -> Option<GitInfo>`, a platform-agnostic (no
+  `#[cfg(target_os)]`) shell-out read: runs `git -C <path> status
+  --porcelain=v2 --branch`, `None` on ANY failure (`git` missing, non-repo,
+  non-zero exit). Delegates to the pure `parse_git_status(&str) -> GitInfo`
+  (unconditionally unit-tested, no cfg-gating needed since there's no OS
+  branching) — same pure-parser-behind-the-read-surface shape as
+  `battery.rs`/`cpu.rs`/`memory.rs`, just keyed on tool availability rather
+  than platform.
 - `build_context.rs` — builds `Context` from args + `gethostname`,
   `libc::getloadavg` (the only `unsafe`, guarded on `n == 3`), `chrono::Local`,
   `$HOME`, non-loopback IPv4 interfaces via `if-addrs` into
   `Context.interfaces` (a failed read yields an empty `Vec`, never a
   fabricated address — same spirit as `read_loadavg` returning `None`), and
   now also `battery` (via `battery::read_battery()`), `cpu` (via
-  `cpu::read_cpu()`), `memory` (via `memory::read_memory()`), `os`, `arch`
+  `cpu::read_cpu()`), `memory` (via `memory::read_memory()`), `git` (via
+  `git::read_git(&pane_current_path)`, gated: only read when `git` is in the
+  region's layout, mirroring the `cpu`/`memory` gate), `os`, `arch`
   (from `std::env::consts::OS`/`ARCH`), and `toggled` (via
   `toggles::read_toggles()`, unconditionally — cheap relative to the gated
-  cpu/memory reads).
+  cpu/memory/git reads).
 - `toggles.rs` — the global click-toggle state file:
   `toggles_path()` (`$XDG_DATA_HOME/rustline/toggles`, reusing
   `rustline_wasm::data_root()`), `parse_toggles`/`serialize_toggles`
@@ -581,9 +603,30 @@ load threshold depends on core count.
     warn_load   = 0.0   # default (off); e.g. 4.0 on a 4-core box
     crit_load   = 0.0   # default (off)
 
-**Click-to-toggle widget views:** the seven format-bearing widgets —
-`datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg` —
-each take an additional `alt_format` (default `""`, `#[serde(default)]`, so
+**Git widget:** `git` is opt-in — not in the default layout. It reads the
+pane's git branch/status by shelling out to `git status --porcelain=v2
+--branch` (`crates/rustline/src/git.rs`); `Context.git` is `None` (and the
+widget renders nothing/`down_format`) when `git` is missing, the pane isn't
+inside a repository, or the read fails — never a fabricated "clean" reading
+(invariant #6). Takes a `format` (default `" {branch}{dirty}"` — a
+Nerd-Font branch glyph, U+E0A0) with `{branch}` (current branch, or the
+7-char short SHA when `HEAD` is detached), `{ahead}`/`{behind}`/`{staged}`/
+`{unstaged}` (counts), and `{dirty}` placeholders, a `dirty_glyph` (default
+`"*"`, substituted for `{dirty}` iff `staged > 0 || unstaged > 0`, else
+empty), and a `down_format` (default `""`, i.e. render nothing) — same
+collapse-placeholders-to-empty behavior as the other widgets' `down_format`.
+NOT threshold-aware (no semantic-color alert badge).
+
+```toml
+[widgets.git]
+format = " {branch}{dirty}"   # U+E0A0 branch glyph
+dirty_glyph = "*"
+down_format = ""
+```
+
+**Click-to-toggle widget views:** the eight format-bearing widgets —
+`datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg`,
+`git` — each take an additional `alt_format` (default `""`, `#[serde(default)]`, so
 covered by invariant #3 like every other opt). A non-empty `alt_format` makes
 that widget clickable: left-clicking it in the tmux status line toggles it
 between `format` and `alt_format`.
@@ -851,6 +894,12 @@ branch on platform.
   reusing `use_theme` for the write); requires a TTY. See
   `docs/superpowers/specs/2026-07-22-rustline-theme-pick-design.md` /
   `docs/superpowers/plans/2026-07-22-rustline-theme-pick.md`.
+- Done: `git` widget — `Context.git`/`GitInfo` (`rustline-abi`), the twelfth
+  built-in, and `crates/rustline/src/git.rs`'s platform-agnostic shell-out
+  read pattern (`git status --porcelain=v2 --branch`, gated by layout like
+  `cpu`/`memory`); branch/short-SHA, ahead/behind/staged/unstaged counts, and
+  a `{dirty}` marker, opt-in and click-toggleable like the other
+  format-bearing widgets, but NOT threshold-aware.
 - Historical sparkline (last-X-seconds graph) for `cpu`/`memory` — today's
   reads are single-shot, stateless snapshots; a sparkline needs
   cross-invocation sample persistence, deferred to its own spec.

@@ -4,6 +4,7 @@ mod bench;
 mod build_context;
 mod cli;
 mod cpu;
+mod git;
 mod init;
 mod logging;
 mod memory;

@@ -50,16 +50,23 @@ pub(crate) fn read_interfaces() -> Vec<NetIface> {
 /// Build the [`Context`] for rendering a left/right region from the tmux
 /// format-variable values passed on the command line, plus live host state.
 ///
-/// `layout` is the region's widget-name list; the expensive cpu/memory reads
-/// (`read_cpu` sleeps ~120ms on Linux; `read_memory` on macOS spawns `vm_stat`)
-/// are taken ONLY when that region actually renders them — the same
-/// "pay only for what the region references" gating `register_plugins` uses.
+/// `layout` is the region's widget-name list; the expensive cpu/memory/git reads
+/// (`read_cpu` sleeps ~120ms on Linux; `read_memory` on macOS spawns `vm_stat`;
+/// `read_git` shells out to `git`) are taken ONLY when that region actually
+/// renders them — the same "pay only for what the region references" gating
+/// `register_plugins` uses.
 pub fn build_region_context(args: &RegionArgs, layout: &[String], theme: &Theme) -> Context {
+    let pane_current_path = args.pane_path.clone().unwrap_or_default();
+    let git = if layout.iter().any(|w| w == "git") {
+        crate::git::read_git(&pane_current_path)
+    } else {
+        None
+    };
     Context {
         session_name: args.session.clone().unwrap_or_default(),
         window_index: args.window.clone().unwrap_or_default(),
         pane_index: args.pane.clone().unwrap_or_default(),
-        pane_current_path: args.pane_path.clone().unwrap_or_default(),
+        pane_current_path,
         home: env::var("HOME").unwrap_or_default(),
         hostname: hostname(),
         loadavg: read_loadavg(),
@@ -77,6 +84,7 @@ pub fn build_region_context(args: &RegionArgs, layout: &[String], theme: &Theme)
         } else {
             None
         },
+        git,
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         toggled: crate::toggles::read_toggles(),
@@ -182,5 +190,13 @@ mod tests {
             &Theme::default(),
         );
         assert!(wctx.cpu.is_none() && wctx.memory.is_none());
+    }
+
+    #[test]
+    fn git_read_only_when_region_names_it() {
+        // Empty layout: the git shell-out never runs, so it stays None — same
+        // "pay only for what the region references" gating as cpu/memory.
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default());
+        assert!(ctx.git.is_none());
     }
 }

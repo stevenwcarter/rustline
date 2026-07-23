@@ -6,7 +6,7 @@
 
 use chrono::{Local, TimeZone};
 use rustline_core::{
-    Battery, BatteryState, Context, CpuUsage, MemInfo, NetIface, ThemeColors, WindowCtx,
+    Battery, BatteryState, Context, CpuUsage, GitInfo, MemInfo, NetIface, ThemeColors, WindowCtx,
 };
 
 /// A representative, fully-populated `Context`. Every widget renders its real
@@ -54,6 +54,13 @@ pub fn fabricated_context() -> Context {
             total_bytes: 16 * 1024 * 1024 * 1024,
             used_bytes: 6 * 1024 * 1024 * 1024,
             available_bytes: 10 * 1024 * 1024 * 1024,
+        }),
+        git: Some(GitInfo {
+            branch: "main".into(),
+            ahead: 1,
+            behind: 0,
+            staged: 1,
+            unstaged: 2,
         }),
         os: "linux".into(),
         arch: "x86_64".into(),

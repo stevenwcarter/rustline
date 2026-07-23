@@ -65,7 +65,8 @@ mod tests {
 
     use chrono::{DateTime, Local, TimeZone};
     use rustline_core::{
-        Battery, BatteryState, Color, Context, CpuUsage, MemInfo, NetIface, ThemeColors, WindowCtx,
+        Battery, BatteryState, Color, Context, CpuUsage, GitInfo, MemInfo, NetIface, ThemeColors,
+        WindowCtx,
     };
 
     use super::*;
@@ -106,6 +107,13 @@ mod tests {
                 used_bytes: 6 * 1024 * 1024 * 1024,
                 available_bytes: 10 * 1024 * 1024 * 1024,
             }),
+            git: Some(GitInfo {
+                branch: "main".into(),
+                ahead: 2,
+                behind: 1,
+                staged: 1,
+                unstaged: 3,
+            }),
             os: "linux".into(),
             arch: "x86_64".into(),
             toggled: BTreeSet::from(["weather".to_string()]),
@@ -141,6 +149,7 @@ mod tests {
         assert_eq!(wire.battery, ctx.battery);
         assert_eq!(wire.cpu, ctx.cpu);
         assert_eq!(wire.memory, ctx.memory);
+        assert_eq!(wire.git, ctx.git);
         assert_eq!(wire.os, ctx.os);
         assert_eq!(wire.arch, ctx.arch);
         assert_eq!(wire.toggled, ctx.toggled);

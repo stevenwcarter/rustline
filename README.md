@@ -16,6 +16,9 @@ pane, window, host, and system info, with zero required configuration.
   Tailscale IPv4 addresses.
 - Opt-in `battery` widget showing charge percentage, state, and a
   level-bucketed Nerd-Font icon (Linux + macOS).
+- Opt-in `git` widget showing the current branch (or short SHA when
+  detached), a dirty marker, and ahead/behind/staged/unstaged counts, read via
+  a `git status` shell-out.
 - Click-to-toggle widget alt views: give a widget an `alt_format` and
   left-clicking it in the status line swaps it to that view (e.g. a compact
   `cpu` reading toggling to one with a gauge bar).
@@ -103,7 +106,8 @@ Widget names available for the `layout` arrays are: `pane_id`, `hostname`,
 `windows`, `cwd`, `cpu`, `memory` (see [CPU and memory
 widgets](#cpu-and-memory-widgets) below), `loadavg`, `datetime`, and the
 opt-in `lan_ip` / `tailscale_ip` (see [IP address widgets](#ip-address-widgets)
-below) and `battery` (see [Battery widget](#battery-widget) below).
+below), `battery` (see [Battery widget](#battery-widget) below), and `git`
+(see [Git widget](#git-widget) below).
 
 Example — reorder the right region and change the clock format:
 
@@ -227,10 +231,36 @@ warn_load   = 0.0   # default (off); e.g. 4.0 on a 4-core box
 crit_load   = 0.0   # default (off)
 ```
 
+### Git widget
+
+An opt-in `git` built-in shows the current branch (or a 7-character short SHA
+when `HEAD` is detached), a dirty marker, and ahead/behind/staged/unstaged
+counts for the pane's working directory, read by shelling out to `git status
+--porcelain=v2 --branch`. Not in the default layout — add it to a `layout`
+region to use it. When `git` is missing, the pane isn't inside a repository,
+or the read fails, it renders nothing by default.
+
+Takes a `format` with `{branch}`, `{ahead}`, `{behind}`, `{staged}`,
+`{unstaged}`, and `{dirty}` placeholders (`{dirty}` substitutes `dirty_glyph`
+when there's any staged or unstaged change, else nothing), a `down_format`
+shown when there's no git reading (default empty — same collapse-to-nothing
+behavior as the other widgets' `down_format`), and an `alt_format` for
+[click-to-toggle](#click-to-toggle-widget-views).
+
+```toml
+[layout]
+right = ["git", "cwd", "loadavg", "datetime"]
+
+[widgets.git]
+format      = " {branch}{dirty}"   # default: Nerd-Font branch glyph
+dirty_glyph = "*"                        # default
+down_format = ""                         # shown outside a repo; default: nothing
+```
+
 ### Click-to-toggle widget views
 
-`datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`, and `loadavg`
-each take an `alt_format` (default empty). Give a widget a non-empty
+`datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg`,
+and `git` each take an `alt_format` (default empty). Give a widget a non-empty
 `alt_format` and it becomes clickable: left-clicking it in the tmux status
 line toggles it between `format` and `alt_format`, e.g. a compact CPU reading
 swapping to one with a gauge bar:

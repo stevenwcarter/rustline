@@ -431,6 +431,67 @@ fn render_right_with_cpu_memory_renders_gracefully() {
 }
 
 #[test]
+fn render_right_with_git_outside_repo_renders_gracefully() {
+    // `git` in a layout, with `--pane-path` pointed at a bare tempdir (never a
+    // git repository), must degrade to its empty down_format rather than crash
+    // or hang — proves the build_context -> read_git -> Context -> widget wiring
+    // does not break the bar when `git status` fails (invariant #6).
+    let tmp = tempfile::tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    std::fs::write(
+        cfgdir.join("config.toml"),
+        "[layout]\nright = [\"git\", \"datetime\"]\n",
+    )
+    .unwrap();
+    let pane_dir = tmp.path().join("not_a_repo");
+    std::fs::create_dir_all(&pane_dir).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["render", "right", "--pane-path", pane_dir.to_str().unwrap()])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("#["), "built-ins still render: {s}");
+}
+
+#[test]
+fn render_right_with_git_inside_repo_renders_branch() {
+    // Pointing `--pane-path` at this checkout's own repo root must render a
+    // non-empty branch glyph — the positive-path counterpart to the
+    // outside-a-repo test above, exercising the full read_git -> parse ->
+    // widget chain against a real repository rather than a fixture string.
+    let repo_root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    let tmp = tempfile::tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    std::fs::write(
+        cfgdir.join("config.toml"),
+        "[layout]\nright = [\"git\"]\n\n[widgets.git]\nformat = \"{branch}\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["render", "right", "--pane-path", repo_root])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("#["), "git branch text should render: {s}");
+}
+
+#[test]
 fn plugin_add_on_unparseable_config_preserves_file() {
     // A pre-existing config with a TOML *syntax* error must abort with exit 1
     // and leave the file byte-for-byte intact — never truncate the user's whole

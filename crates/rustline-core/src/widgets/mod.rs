@@ -4,6 +4,7 @@ pub mod battery;
 pub mod cpu;
 pub mod cwd;
 pub mod datetime;
+pub mod git;
 pub mod hostname;
 pub mod lan_ip;
 pub mod loadavg;
@@ -18,6 +19,7 @@ pub use battery::BatteryWidget;
 pub use cpu::CpuWidget;
 pub use cwd::Cwd;
 pub use datetime::DateTime;
+pub use git::GitWidget;
 pub use hostname::Hostname;
 pub use lan_ip::LanIp;
 pub use loadavg::LoadAvg;
@@ -47,10 +49,10 @@ fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDe
 }
 
 impl Registry {
-    /// Build a [`Registry`] pre-populated with all eleven built-in widgets,
+    /// Build a [`Registry`] pre-populated with all twelve built-in widgets,
     /// configuring the ones that carry options (`pane_id`, `hostname`,
     /// `datetime`, `cwd`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`,
-    /// `memory`, `loadavg`) from `cfg`.
+    /// `memory`, `loadavg`, `git`) from `cfg`.
     pub fn with_builtins(cfg: &Config) -> Registry {
         let mut registry = Registry::new();
         let pane_id = cfg.widgets.pane_id.clone();
@@ -206,6 +208,23 @@ impl Registry {
             }),
         );
 
+        let git = cfg.widgets.git.clone();
+        registry.register_described(
+            builtin_descriptor(
+                "git",
+                "Current git branch, dirty marker, and ahead/behind counts",
+                true,
+            ),
+            Box::new(move || {
+                Box::new(GitWidget {
+                    format: git.format.clone(),
+                    alt_format: git.alt_format.clone(),
+                    down_format: git.down_format.clone(),
+                    dirty_glyph: git.dirty_glyph.clone(),
+                })
+            }),
+        );
+
         registry
     }
 }
@@ -234,6 +253,7 @@ mod tests {
             battery: None,
             cpu: None,
             memory: None,
+            git: None,
             os: String::new(),
             arch: String::new(),
             toggled: Default::default(),
@@ -242,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn with_builtins_descriptors_cover_all_eleven_with_correct_configurable_flags() {
+    fn with_builtins_descriptors_cover_all_twelve_with_correct_configurable_flags() {
         let cfg = Config::default();
         let reg = Registry::with_builtins(&cfg);
         let names: Vec<&str> = reg.available_names().collect();
@@ -258,10 +278,11 @@ mod tests {
             "battery",
             "cpu",
             "memory",
+            "git",
         ] {
             assert!(names.contains(&expected), "missing descriptor: {expected}");
         }
-        assert_eq!(names.len(), 11);
+        assert_eq!(names.len(), 12);
 
         let configurable = |name: &str| {
             reg.descriptors()
@@ -397,5 +418,41 @@ mod tests {
                 "\u{f035b} 8.0G/16G".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn git_registered_and_renders_from_context() {
+        use crate::GitInfo;
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        assert!(reg.contains("git"));
+
+        let mut c = ctx(Vec::new());
+        c.git = Some(GitInfo {
+            branch: "main".into(),
+            ahead: 0,
+            behind: 0,
+            staged: 1,
+            unstaged: 0,
+        });
+        let widgets = reg.resolve(&["git".into()]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|w| w.render(&c))
+            .map(|s| s.text)
+            .collect();
+        // default format "\u{e0a0} {branch}{dirty}", dirty_glyph "*".
+        assert_eq!(texts, vec!["\u{e0a0} main*".to_string()]);
+
+        // No git info + default (empty) down_format -> widget skipped.
+        let mut c0 = ctx(Vec::new());
+        c0.git = None;
+        let widgets = reg.resolve(&["git".into()]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|w| w.render(&c0))
+            .map(|s| s.text)
+            .collect();
+        assert!(texts.is_empty());
     }
 }

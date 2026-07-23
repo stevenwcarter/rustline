@@ -406,6 +406,43 @@ impl Default for LoadAvgOpts {
     }
 }
 
+/// Default `format` for the `git` widget: a Nerd-Font branch glyph, the
+/// branch name, and a trailing dirty marker.
+fn default_git_format() -> String {
+    "\u{e0a0} {branch}{dirty}".into()
+}
+
+/// Default `{dirty}` glyph: a bare asterisk, for terminals without a Nerd Font.
+fn default_dirty_glyph() -> String {
+    "*".into()
+}
+
+/// Options for the `git` widget.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GitOpts {
+    #[serde(default = "default_git_format")]
+    pub format: String,
+    #[serde(default)]
+    pub down_format: String,
+    #[serde(default)]
+    pub alt_format: String,
+    /// Substituted for `{dirty}` when the repo has any staged or unstaged
+    /// change; the empty string when clean.
+    #[serde(default = "default_dirty_glyph")]
+    pub dirty_glyph: String,
+}
+
+impl Default for GitOpts {
+    fn default() -> Self {
+        Self {
+            format: default_git_format(),
+            down_format: String::new(),
+            alt_format: String::new(),
+            dirty_glyph: default_dirty_glyph(),
+        }
+    }
+}
+
 /// Per-widget option overrides, keyed by widget name.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WidgetOpts {
@@ -429,6 +466,8 @@ pub struct WidgetOpts {
     pub memory: MemoryOpts,
     #[serde(default)]
     pub loadavg: LoadAvgOpts,
+    #[serde(default)]
+    pub git: GitOpts,
 }
 
 /// Optional theme overrides layered onto a base [`Theme`] by
@@ -1105,6 +1144,41 @@ alt_format = "{load1} {load5} {load15}"
         std::fs::write(&p, "[widgets.loadavg]\nformat = 5\n").unwrap();
         let c = Config::load(&p);
         assert_eq!(c.widgets.loadavg.format, "{load1} {load5} {load15}");
+        assert_eq!(c.layout.left, Config::default().layout.left);
+    }
+
+    #[test]
+    fn git_opts_parse_with_defaults() {
+        let toml = r#"
+[widgets.git]
+format = "{branch}{dirty}"
+dirty_glyph = "!"
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.widgets.git.format, "{branch}{dirty}");
+        assert_eq!(c.widgets.git.dirty_glyph, "!");
+        assert_eq!(c.widgets.git.down_format, ""); // omitted -> default
+        assert_eq!(c.widgets.git.alt_format, ""); // omitted -> default
+    }
+
+    #[test]
+    fn git_opts_default_when_absent() {
+        let c = Config::default();
+        assert_eq!(c.widgets.git.format, "\u{e0a0} {branch}{dirty}");
+        assert_eq!(c.widgets.git.dirty_glyph, "*");
+        assert_eq!(c.widgets.git.down_format, "");
+        assert_eq!(c.widgets.git.alt_format, "");
+    }
+
+    #[test]
+    fn malformed_git_table_falls_back_to_default() {
+        let dir = std::env::temp_dir().join("rustline_test_badgit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        // format must be a string; an integer makes the table invalid.
+        std::fs::write(&p, "[widgets.git]\nformat = 5\n").unwrap();
+        let c = Config::load(&p);
+        assert_eq!(c.widgets.git.format, "\u{e0a0} {branch}{dirty}");
         assert_eq!(c.layout.left, Config::default().layout.left);
     }
 

@@ -140,6 +140,22 @@ pub struct CpuUsage {
     pub percent: f32,
 }
 
+/// A git repository status snapshot for the pane's current working directory,
+/// captured at Context-build time by shelling out to `git status
+/// --porcelain=v2 --branch`. `branch` is the current branch name, or the
+/// 7-character short SHA when `HEAD` is detached. `Context::git` is `None`
+/// when `git` is missing, the pane isn't inside a repository, or the read
+/// failed — never a fabricated "clean" reading (invariant #6), mirroring
+/// `loadavg`/`battery`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitInfo {
+    pub branch: String,
+    pub ahead: u32,
+    pub behind: u32,
+    pub staged: u32,
+    pub unstaged: u32,
+}
+
 /// The guest-side wire mirror of `rustline_core::WindowCtx`. A WASM guest
 /// deserializes this typed struct rather than hand-walking the JSON.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +194,7 @@ pub struct WireContext {
     pub battery: Option<Battery>,
     pub cpu: Option<CpuUsage>,
     pub memory: Option<MemInfo>,
+    pub git: Option<GitInfo>,
     pub os: String,
     pub arch: String,
     #[serde(default)]
