@@ -6,7 +6,9 @@
 //! unit tests, while only the file-read / subprocess / sleep is `#[cfg]`-gated.
 
 #[cfg(target_os = "linux")]
-use std::time::Duration;
+use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustline_core::CpuUsage;
 
@@ -14,6 +16,16 @@ use rustline_core::CpuUsage;
 /// enough to be a stable reading. (macOS uses `top`'s own ~1 s sample instead.)
 #[cfg(target_os = "linux")]
 const CPU_SAMPLE_WINDOW: Duration = Duration::from_millis(120);
+
+/// Upper bound (seconds) on how old the persisted `/proc/stat` snapshot may be
+/// and still be used for a zero-sleep delta read. The reader can't see tmux's
+/// `status-interval`, so this is a fixed conservative bound: within it, the
+/// prior snapshot yields a busy% averaged over the real elapsed wall-clock
+/// (coarser than the 120 ms window but a fine steady-state reading); past it,
+/// the average would span too long to represent "current" load (or the box was
+/// idle/suspended), so `read_cpu` re-primes via the classic two-sample path.
+#[cfg(any(target_os = "linux", test))]
+const CPU_SNAPSHOT_STALENESS_SECS: u64 = 60;
 
 /// Read CPU utilization, or `None` if the platform is unsupported or the read
 /// failed. Called once at Context-build time.
@@ -34,12 +46,120 @@ pub fn read_cpu() -> Option<CpuUsage> {
 
 #[cfg(target_os = "linux")]
 fn read_cpu_linux() -> Option<CpuUsage> {
-    let prev = parse_proc_stat(&std::fs::read_to_string("/proc/stat").ok()?)?;
-    std::thread::sleep(CPU_SAMPLE_WINDOW);
-    let cur = parse_proc_stat(&std::fs::read_to_string("/proc/stat").ok()?)?;
-    Some(CpuUsage {
-        percent: busy_percent(prev, cur),
-    })
+    let cur_times = parse_proc_stat(&std::fs::read_to_string("/proc/stat").ok()?)?;
+    let current = CpuSnapshot {
+        idle: cur_times.idle,
+        total: cur_times.total,
+        ts: now_unix_secs(),
+    };
+
+    // Fast path (default): a fresh persisted snapshot gives busy% with no sleep.
+    // Fallback: no recent prior -> take the second sample the classic way.
+    let percent = match load_snapshot()
+        .and_then(|prev| busy_from_snapshots(&prev, &current, CPU_SNAPSHOT_STALENESS_SECS))
+    {
+        Some(p) => p,
+        None => {
+            std::thread::sleep(CPU_SAMPLE_WINDOW);
+            let second = parse_proc_stat(&std::fs::read_to_string("/proc/stat").ok()?)?;
+            busy_percent(cur_times, second)
+        }
+    };
+
+    // Always persist the current reading so the next invocation can take the
+    // fast path. Best-effort: a write failure just warns and is ignored.
+    store_snapshot(&current);
+    Some(CpuUsage { percent })
+}
+
+/// One `/proc/stat` aggregate reading plus the wall-clock instant it was taken,
+/// persisted across invocations so the next `read_cpu` can compute a delta
+/// without the sampling sleep. Also the sample history a future sparkline can
+/// consume.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CpuSnapshot {
+    idle: u64,
+    total: u64,
+    /// Unix timestamp (seconds) at which the counters were read.
+    ts: u64,
+}
+
+/// Busy % between a persisted prior snapshot and the current one, or `None`
+/// when the prior can't yield a trustworthy delta (so the caller falls back to
+/// a fresh two-sample read). `None` when: age (`now.ts - prev.ts`) is `<= 0`
+/// (same instant or a backward clock) or `> staleness_secs`, or the total-jiffy
+/// delta is `<= 0` (idle interval or backward counters after suspend/resume).
+/// Otherwise the same busy% formula as [`busy_percent`], clamped `0..=100`.
+#[cfg(any(target_os = "linux", test))]
+fn busy_from_snapshots(prev: &CpuSnapshot, now: &CpuSnapshot, staleness_secs: u64) -> Option<f32> {
+    let age = now.ts.checked_sub(prev.ts)?;
+    if age == 0 || age > staleness_secs {
+        return None;
+    }
+    let dt = now.total.checked_sub(prev.total).filter(|&d| d > 0)?;
+    let didle = now.idle.saturating_sub(prev.idle);
+    Some((dt.saturating_sub(didle) as f32 / dt as f32 * 100.0).clamp(0.0, 100.0))
+}
+
+/// Serialize a snapshot to a single `total idle ts` line (trailing newline),
+/// the same plain-text, total-on-parse-failure discipline as the toggles file.
+#[cfg(any(target_os = "linux", test))]
+fn serialize_snapshot(snap: &CpuSnapshot) -> String {
+    format!("{} {} {}\n", snap.total, snap.idle, snap.ts)
+}
+
+/// Parse a `total idle ts` line back into a snapshot. Total: any
+/// missing/short/non-numeric content yields `None` (treated as absent →
+/// fallback), never a panic. Extra trailing tokens are ignored.
+#[cfg(any(target_os = "linux", test))]
+fn parse_snapshot(text: &str) -> Option<CpuSnapshot> {
+    let mut fields = text.lines().next()?.split_whitespace();
+    let total = fields.next()?.parse().ok()?;
+    let idle = fields.next()?.parse().ok()?;
+    let ts = fields.next()?.parse().ok()?;
+    Some(CpuSnapshot { idle, total, ts })
+}
+
+/// State-file path for the persisted snapshot: `<state_root>/cpu-sample`.
+#[cfg(target_os = "linux")]
+fn snapshot_path() -> PathBuf {
+    rustline_wasm::state_root().join("cpu-sample")
+}
+
+/// Current wall clock as unix seconds; a pre-epoch clock degrades to `0`
+/// (which makes any prior snapshot read as backward-clock → fallback).
+#[cfg(target_os = "linux")]
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Load the persisted snapshot; a missing/unreadable/corrupt file → `None`
+/// (treated as absent, so the caller falls back to the two-sample read).
+#[cfg(target_os = "linux")]
+fn load_snapshot() -> Option<CpuSnapshot> {
+    parse_snapshot(&std::fs::read_to_string(snapshot_path()).ok()?)
+}
+
+/// Best-effort atomic persist (temp file + rename); logs a warning on failure
+/// and never panics — a broken cache must never break the bar.
+#[cfg(target_os = "linux")]
+fn store_snapshot(snap: &CpuSnapshot) {
+    let path = snapshot_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("tmp");
+    if let Err(error) = std::fs::write(&tmp, serialize_snapshot(snap)) {
+        tracing::warn!(%error, "failed to write cpu-sample temp file");
+        return;
+    }
+    if let Err(error) = std::fs::rename(&tmp, &path) {
+        tracing::warn!(%error, "failed to rename cpu-sample file");
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -189,5 +309,76 @@ mod tests {
         if let Some(c) = read_cpu() {
             assert!((0.0..=100.0).contains(&c.percent));
         }
+    }
+
+    fn snap(total: u64, idle: u64, ts: u64) -> CpuSnapshot {
+        CpuSnapshot { total, idle, ts }
+    }
+
+    #[test]
+    fn busy_from_snapshots_computes_delta_percent() {
+        // Δtotal=1000, Δidle=800 -> (1000-800)/1000*100 = 20%.
+        let prev = snap(1000, 800, 100);
+        let now = snap(2000, 1600, 105);
+        let b = busy_from_snapshots(&prev, &now, CPU_SNAPSHOT_STALENESS_SECS).unwrap();
+        assert!((b - 20.0).abs() < 0.01, "got {b}");
+    }
+
+    #[test]
+    fn busy_from_snapshots_respects_staleness_boundary() {
+        let prev = snap(1000, 500, 0);
+        // age == staleness is still fresh (inclusive upper bound).
+        let at_bound = snap(2000, 1000, CPU_SNAPSHOT_STALENESS_SECS);
+        assert!(busy_from_snapshots(&prev, &at_bound, CPU_SNAPSHOT_STALENESS_SECS).is_some());
+        // age one past the bound -> stale -> None (caller falls back to two-sample).
+        let past_bound = snap(2000, 1000, CPU_SNAPSHOT_STALENESS_SECS + 1);
+        assert!(busy_from_snapshots(&prev, &past_bound, CPU_SNAPSHOT_STALENESS_SECS).is_none());
+    }
+
+    #[test]
+    fn busy_from_snapshots_zero_or_backward_age_is_none() {
+        let prev = snap(1000, 500, 200);
+        // Same instant: age == 0 -> None.
+        assert!(busy_from_snapshots(&prev, &snap(2000, 1000, 200), 60).is_none());
+        // Clock went backwards: now.ts < prev.ts -> None.
+        assert!(busy_from_snapshots(&prev, &snap(2000, 1000, 199), 60).is_none());
+    }
+
+    #[test]
+    fn busy_from_snapshots_zero_or_backward_total_is_none() {
+        let prev = snap(1000, 500, 100);
+        // Δtotal == 0 -> None (nothing to divide by; fall back).
+        assert!(busy_from_snapshots(&prev, &snap(1000, 500, 105), 60).is_none());
+        // Counters went backwards (suspend/resume) -> None.
+        assert!(busy_from_snapshots(&prev, &snap(400, 200, 105), 60).is_none());
+    }
+
+    #[test]
+    fn snapshot_serialize_parse_round_trips() {
+        let s = snap(123_456, 78_900, 1_700_000_000);
+        assert_eq!(parse_snapshot(&serialize_snapshot(&s)), Some(s));
+    }
+
+    #[test]
+    fn parse_snapshot_is_total_over_corrupt_input() {
+        // Missing, empty, truncated, non-numeric, and garbage all yield None
+        // (absent -> fallback), never a panic. Mirrors toggles' total-read.
+        for bad in [
+            "",
+            "   ",
+            "\n",
+            "1000",
+            "1000 800",
+            "x y z",
+            "1000 800 abc",
+            "garbage line",
+        ] {
+            assert!(parse_snapshot(bad).is_none(), "expected None for {bad:?}");
+        }
+        // Extra trailing junk on the line is ignored, not fatal.
+        assert_eq!(
+            parse_snapshot("1000 800 42 leftover\n"),
+            Some(snap(1000, 800, 42))
+        );
     }
 }
