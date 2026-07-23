@@ -366,7 +366,7 @@ fn prompt_answers(themes_dir: &Path) -> InitAnswers {
         drop(w);
         if let Some(idx) = parse_menu_choice(&read_line(), themes.len(), 0) {
             a.theme = themes[idx].clone();
-            if let Some(preview) = crate::theme_cmd::preview_named(&a.theme, themes_dir) {
+            if let Some(preview) = crate::theme_cmd::preview_named(&a.theme, themes_dir, true) {
                 eprintln!("\n{preview}\n");
             }
             if ask("Use this theme?", true) {

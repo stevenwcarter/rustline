@@ -282,9 +282,13 @@ rustline theme pick                  # interactively browse previews, then set o
 
 `theme pick` lists the themes (active marked, themes-dir files tagged
 `(custom)`), lets you preview any by number (or `a`/`all` for every one), then
-prompts you to set one by name or number (blank keeps the current theme). It
-needs a terminal — a non-interactive invocation prints a hint to use
-`theme show`/`theme use` instead and exits non-zero without writing anything.
+prompts you to set one by name or number (blank keeps the current theme).
+Previews default to a **healthy** status line — just the theme's palette, the
+way you'll actually see it day to day. Press `t` to toggle the warning/error
+alert-badge colors on, so you can sample a theme's semantic colors, and `t`
+again to turn them back off. It needs a terminal — a non-interactive invocation
+prints a hint to use `theme show`/`theme use` instead and exits non-zero
+without writing anything.
 
 `theme new` writes a complete, commented theme file to
 `$XDG_CONFIG_HOME/rustline/themes/<name>.toml` (fallback
