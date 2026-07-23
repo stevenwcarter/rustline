@@ -4,12 +4,14 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
+use anyhow::{Context, bail};
 use rustline_core::Config;
 use rustline_wasm::{PluginManifest, resolve_manifest};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
-use crate::cli::{ApproveArgs, NewPluginArgs, PatternCmd, PluginCmd};
+use crate::cli::{ApproveArgs, BuildArgs, NewPluginArgs, PatternCmd, PluginCmd};
 
 /// The reserved widget name that a plugin must never claim (it names the
 /// built-in window-list renderer, which isn't a plugin-resolvable slot).
@@ -48,6 +50,12 @@ pub fn run(cmd: PluginCmd, config_path: &Path, plugin_dir: &Path) {
         PluginCmd::Path(pc) => pattern_cmd(pc, Kind::Path, config_path),
         PluginCmd::Approve(args) => approve(args, config_path, plugin_dir),
         PluginCmd::New(args) => new_plugin(&args),
+        PluginCmd::Build(args) => {
+            if let Err(error) = build_plugin(&args, plugin_dir) {
+                eprintln!("plugin build failed: {error:#}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -400,6 +408,96 @@ fn print_next_steps(name: &str, dir: &Path) {
     println!("format = \"{name}: hello!\"");
 }
 
+/// Read a crate's `[package].name` out of its `Cargo.toml`, so `plugin build`
+/// can derive a plugin's identity — and thus its installed `.wasm` filename —
+/// from an arbitrary external crate directory, the same identity `plugin new`
+/// fixes at scaffold time.
+fn package_name(cargo_toml: &Path) -> anyhow::Result<String> {
+    let text = std::fs::read_to_string(cargo_toml)
+        .with_context(|| format!("failed to read {}", cargo_toml.display()))?;
+    let doc: DocumentMut = text
+        .parse()
+        .with_context(|| format!("{} is not valid TOML", cargo_toml.display()))?;
+    doc.get("package")
+        .and_then(Item::as_table)
+        .and_then(|t| t.get("name"))
+        .and_then(Item::as_str)
+        .map(str::to_string)
+        .with_context(|| format!("{} has no [package].name", cargo_toml.display()))
+}
+
+/// The `cargo build` arguments for compiling a plugin crate to the wasm32
+/// target, honoring `--release`. Factored out as a pure function so the
+/// argument assembly is unit-tested without shelling out to a real `cargo`.
+fn cargo_build_args(release: bool) -> Vec<&'static str> {
+    let mut args = vec!["build", "--target", "wasm32-unknown-unknown"];
+    if release {
+        args.push("--release");
+    }
+    args
+}
+
+/// Where `cargo build --target wasm32-unknown-unknown [--release]` writes its
+/// build artifact: `<target_dir>/wasm32-unknown-unknown/{release|debug}/<stem>.wasm`.
+/// `stem` is the *build* artifact's stem — cargo normalizes a hyphenated
+/// crate name to underscores for the output filename (see `print_next_steps`
+/// above) — which can differ from the plugin's own hyphenated identity;
+/// `build_plugin` resolves both and keeps them straight.
+fn wasm_artifact_path(target_dir: &Path, stem: &str, release: bool) -> PathBuf {
+    let profile = if release { "release" } else { "debug" };
+    target_dir
+        .join("wasm32-unknown-unknown")
+        .join(profile)
+        .join(format!("{stem}.wasm"))
+}
+
+/// `rustline plugin build <dir> [--release] [--plugin-dir <dir>]`: build any
+/// WASM guest plugin crate at `<dir>` — not limited to this repo's own
+/// `plugins/*`, the generic counterpart to `just build-plugin NAME` — and
+/// install the resulting `.wasm` into `plugin_dir`, named after the crate's
+/// own `[package].name` (hyphens intact, matching plugin discovery's
+/// filename-stem convention). A missing wasm target or non-zero `cargo build`
+/// exit surfaces as the process's own stderr output plus a clear error here;
+/// a missing artifact afterward (e.g. a non-`cdylib` crate) is likewise a
+/// clear error — never a panic.
+fn build_plugin(args: &BuildArgs, plugin_dir: &Path) -> anyhow::Result<()> {
+    let name = package_name(&args.dir.join("Cargo.toml"))?;
+    let build_stem = name.replace('-', "_");
+
+    let status = Command::new("cargo")
+        .args(cargo_build_args(args.release))
+        .current_dir(&args.dir)
+        .status()
+        .with_context(|| format!("failed to run `cargo build` in {}", args.dir.display()))?;
+    if !status.success() {
+        bail!("cargo build failed in {} ({status})", args.dir.display());
+    }
+
+    let artifact = wasm_artifact_path(&args.dir.join("target"), &build_stem, args.release);
+    if !artifact.is_file() {
+        bail!(
+            "expected wasm artifact not found at {} (is the wasm32-unknown-unknown target \
+             installed via `rustup target add wasm32-unknown-unknown`, and is `{name}`'s \
+             [lib] crate-type [\"cdylib\"]?)",
+            artifact.display()
+        );
+    }
+
+    std::fs::create_dir_all(plugin_dir)
+        .with_context(|| format!("failed to create plugin dir {}", plugin_dir.display()))?;
+    let dest = plugin_dir.join(format!("{name}.wasm"));
+    std::fs::copy(&artifact, &dest).with_context(|| {
+        format!(
+            "failed to install {} to {}",
+            artifact.display(),
+            dest.display()
+        )
+    })?;
+
+    println!("built and installed {name}.wasm -> {}", dest.display());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,6 +646,57 @@ mod tests {
         assert!(!should_refuse_overwrite(true, true));
         assert!(!should_refuse_overwrite(false, false));
         assert!(!should_refuse_overwrite(false, true));
+    }
+
+    #[test]
+    fn cargo_build_args_release_vs_debug() {
+        assert_eq!(
+            cargo_build_args(true),
+            vec!["build", "--target", "wasm32-unknown-unknown", "--release"]
+        );
+        assert_eq!(
+            cargo_build_args(false),
+            vec!["build", "--target", "wasm32-unknown-unknown"]
+        );
+    }
+
+    #[test]
+    fn package_name_reads_from_cargo_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let cargo_toml = dir.path().join("Cargo.toml");
+        std::fs::write(
+            &cargo_toml,
+            "[package]\nname = \"my-widget\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(package_name(&cargo_toml).unwrap(), "my-widget");
+    }
+
+    #[test]
+    fn package_name_errors_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(package_name(&dir.path().join("Cargo.toml")).is_err());
+    }
+
+    #[test]
+    fn package_name_errors_on_missing_package_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let cargo_toml = dir.path().join("Cargo.toml");
+        std::fs::write(&cargo_toml, "[dependencies]\n").unwrap();
+        assert!(package_name(&cargo_toml).is_err());
+    }
+
+    #[test]
+    fn wasm_artifact_path_release_vs_debug() {
+        let target_dir = PathBuf::from("/proj/target");
+        assert_eq!(
+            wasm_artifact_path(&target_dir, "my_widget", true),
+            PathBuf::from("/proj/target/wasm32-unknown-unknown/release/my_widget.wasm")
+        );
+        assert_eq!(
+            wasm_artifact_path(&target_dir, "my_widget", false),
+            PathBuf::from("/proj/target/wasm32-unknown-unknown/debug/my_widget.wasm")
+        );
     }
 
     #[test]

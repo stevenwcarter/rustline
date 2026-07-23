@@ -154,6 +154,24 @@ pub enum PluginCmd {
     Approve(ApproveArgs),
     /// Scaffold a new WASM guest plugin crate skeleton.
     New(NewPluginArgs),
+    /// Build any WASM guest plugin crate (not limited to this repo's own
+    /// `plugins/*`) and install the resulting `.wasm` into the plugin dir.
+    Build(BuildArgs),
+}
+
+/// Arguments for `rustline plugin build`.
+#[derive(Args)]
+pub struct BuildArgs {
+    /// Path to the plugin crate to build (any directory with a `Cargo.toml`
+    /// producing a `cdylib` for `wasm32-unknown-unknown`).
+    pub dir: PathBuf,
+    /// Build in release mode (default: debug).
+    #[arg(long)]
+    pub release: bool,
+    /// Override the install destination (default: `--plugin-dir` resolution
+    /// used elsewhere — config `plugin_dir`, or the XDG default).
+    #[arg(long)]
+    pub plugin_dir: Option<String>,
 }
 
 /// Arguments for `rustline plugin new`.

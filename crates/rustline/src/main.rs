@@ -24,7 +24,7 @@ use std::path::PathBuf;
 
 use build_context::{build_region_context, build_window_context};
 use clap::{CommandFactory, Parser};
-use cli::{Cli, Command, Render};
+use cli::{Cli, Command, PluginCmd, Render};
 use rustline_core::{
     Config, Direction, Registry, Theme, ThemeConfig, builtin_theme, render_named_region,
     render_window, tmux_to_ansi,
@@ -229,7 +229,13 @@ fn main() {
         },
         Command::Config(cmd) => config_cmd::run(cmd, &cfg_path),
         Command::Plugin(cmd) => {
-            let plugin_dir = resolve_plugin_dir(None, &cfg);
+            // Every `plugin` subcommand but `build` uses the plain resolved
+            // default; `build` alone carries its own `--plugin-dir` override.
+            let dir_override = match &cmd {
+                PluginCmd::Build(args) => args.plugin_dir.as_deref(),
+                _ => None,
+            };
+            let plugin_dir = resolve_plugin_dir(dir_override, &cfg);
             plugin_cmd::run(cmd, &cfg_path, &plugin_dir);
         }
         Command::Theme(cmd) => theme_cmd::run(cmd, &cfg_path, &themes_dir()),
