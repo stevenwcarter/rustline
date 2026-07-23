@@ -1,9 +1,13 @@
 //! Platform-specific CPU-utilization read, isolated at the `Context`-build edge.
 //!
-//! CPU usage is a delta between two cumulative snapshots. The Linux reader takes
-//! both across a short sleep; macOS uses `top`'s own internal sample. Mirrors
-//! `battery.rs`: the pure parsers compile under `test` on any host and carry the
-//! unit tests, while only the file-read / subprocess / sleep is `#[cfg]`-gated.
+//! CPU usage is a delta between two cumulative snapshots. The Linux reader
+//! prefers a *cross-invocation* delta: it diffs the current `/proc/stat`
+//! against a persisted prior snapshot (zero sleep) when that snapshot is fresh,
+//! and only falls back to taking both samples across a short sleep on the first
+//! run or a stale snapshot (see `CPU_SNAPSHOT_STALENESS_SECS`). macOS uses
+//! `top`'s own internal sample. Mirrors `battery.rs`: the pure parsers compile
+//! under `test` on any host and carry the unit tests, while only the file-read /
+//! subprocess / sleep / snapshot-persistence is `#[cfg]`-gated.
 
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
