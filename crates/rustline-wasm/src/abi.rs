@@ -4,6 +4,9 @@
 use rustline_core::{Context, Segment};
 use serde::{Deserialize, Serialize};
 
+/// Result of a plain (uncached) HTTP GET. `ok` means the transport completed
+/// for *any* status, including non-2xx (not that the response was 2xx); the
+/// HTTP status is in `status` and `error` carries a transport failure.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct HttpResult {
     pub ok: bool,
@@ -12,6 +15,9 @@ pub struct HttpResult {
     pub error: String,
 }
 
+/// Result of a host state/file read. `ok=true` with `exists=false` is a
+/// successful read of a missing file (not an error); `error` carries the
+/// message only when `ok` is false.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ReadResult {
     pub ok: bool,
@@ -20,6 +26,8 @@ pub struct ReadResult {
     pub error: String,
 }
 
+/// Result of a host state/file write. `ok` is true on success; otherwise
+/// `error` carries the failure message.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct WriteResult {
     pub ok: bool,

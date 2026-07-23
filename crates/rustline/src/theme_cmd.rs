@@ -227,7 +227,8 @@ fn preview_theme_ansi(theme: &Theme, show_alerts: bool) -> String {
 }
 
 /// Render a labelled, ANSI-coloured preview of the built-in theme `name`, or
-/// `None` if unknown.
+/// `None` if unknown. `show_alerts` selects the pegged-vs-healthy synthetic
+/// readings (see [`sample_context`]).
 fn preview_ansi(name: &str, show_alerts: bool) -> Option<String> {
     Some(preview_theme_ansi(&builtin_theme(name)?, show_alerts))
 }
