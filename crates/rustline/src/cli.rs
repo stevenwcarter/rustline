@@ -6,6 +6,8 @@
 //! `rustline render window [--current] --index <i> --name <n> --flags <f>` all
 //! parse as `rustline render <region-or-window> ...`.
 
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 
 /// Rust tmux statusline: renders status-line regions and window segments,
@@ -18,6 +20,11 @@ pub struct Cli {
     /// stderr is unaffected (see `log.stderr_level`).
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
+    /// Override the config file path (default: `$XDG_CONFIG_HOME/rustline/config.toml`,
+    /// falling back to `~/.config/rustline/config.toml`). Applies to every
+    /// subcommand that reads or writes the config file.
+    #[arg(long = "config", global = true)]
+    pub config: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Command,
 }

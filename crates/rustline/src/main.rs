@@ -68,6 +68,15 @@ fn config_path() -> PathBuf {
     config_base().join("config.toml")
 }
 
+/// Resolve the *effective* config file path: the `--config` flag if given,
+/// else the XDG-derived default (`config_path`). Resolved once in `main` and
+/// threaded into every subcommand that reads or writes the config file, so a
+/// `--config` override is honored everywhere `config_path()` used to be
+/// called directly.
+fn effective_config_path(flag: &Option<PathBuf>) -> PathBuf {
+    flag.clone().unwrap_or_else(config_path)
+}
+
 /// Resolve the themes dir: `$XDG_CONFIG_HOME/rustline/themes` (fallback
 /// `~/.config/rustline/themes`), parallel to `config_path`.
 fn themes_dir() -> PathBuf {
@@ -148,9 +157,12 @@ fn run_click(args: &cli::ClickArgs) {
 
 fn main() {
     let cli = Cli::parse();
+    // Resolved once and threaded into every subcommand below, so a `--config`
+    // override is honored everywhere the plain XDG default used to be.
+    let cfg_path = effective_config_path(&cli.config);
     // Load config first so logging can honor `[log]`; defer the load-failure
     // warning until the subscriber exists (else it would be dropped).
-    let (cfg, load_warning) = Config::load_reporting(&config_path());
+    let (cfg, load_warning) = Config::load_reporting(&cfg_path);
     logging::init(&cfg.log, cli.verbose);
     if let Some(msg) = load_warning {
         tracing::warn!("{msg}");
@@ -188,7 +200,7 @@ fn main() {
             let binary = resolve_binary(args.binary.as_deref());
             init::run(
                 &args,
-                &config_path(),
+                &cfg_path,
                 &themes_dir(),
                 &tmux_conf_path(),
                 &theme,
@@ -202,17 +214,17 @@ fn main() {
                 std::process::exit(1);
             }
         },
-        Command::Config(cmd) => config_cmd::run(cmd, &config_path()),
+        Command::Config(cmd) => config_cmd::run(cmd, &cfg_path),
         Command::Plugin(cmd) => {
             let plugin_dir = resolve_plugin_dir(None, &cfg);
-            plugin_cmd::run(cmd, &config_path(), &plugin_dir);
+            plugin_cmd::run(cmd, &cfg_path, &plugin_dir);
         }
-        Command::Theme(cmd) => theme_cmd::run(cmd, &config_path(), &themes_dir()),
+        Command::Theme(cmd) => theme_cmd::run(cmd, &cfg_path, &themes_dir()),
         Command::Click(args) => run_click(&args),
         Command::Doctor => {
             let plugin_dir = resolve_plugin_dir(None, &cfg);
             let paths = doctor::DoctorPaths {
-                config: &config_path(),
+                config: &cfg_path,
                 themes_dir: &themes_dir(),
                 plugin_dir: &plugin_dir,
                 log_file: &logging::log_path(&cfg.log),

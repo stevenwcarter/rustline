@@ -1774,6 +1774,100 @@ fn plugin_approve_declined_writes_nothing() {
     );
 }
 
+/// A global `--config <path>` overrides the resolved config file everywhere:
+/// `config path` prints the override, not the XDG-derived default.
+#[test]
+fn config_flag_overrides_path() {
+    let dir = tempdir().unwrap();
+    let cfg = dir.path().join("alt.toml");
+    fs::write(&cfg, "layout.left = [\"hostname\"]\n").unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["--config", cfg.to_str().unwrap(), "config", "path"]);
+    isolate(&mut cmd, dir.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        s.trim(),
+        cfg.display().to_string(),
+        "prints the --config override, not the XDG default"
+    );
+}
+
+/// `--config` also threads into the actual config load: `print-config`
+/// reflects the alternate file's contents, not the (nonexistent) default one.
+#[test]
+fn config_flag_overrides_print_config_contents() {
+    let dir = tempdir().unwrap();
+    let cfg = dir.path().join("alt.toml");
+    fs::write(&cfg, "layout.left = [\"hostname\"]\n").unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["--config", cfg.to_str().unwrap(), "print-config"]);
+    isolate(&mut cmd, dir.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("hostname"),
+        "reflects the --config file's layout: {s}"
+    );
+}
+
+/// `--config` threads all the way into a mutating subcommand's write path
+/// too (`plugin url add`), not just the read-only `config`/`print-config`
+/// commands — it writes the override file and leaves the default untouched.
+#[test]
+fn config_flag_threads_into_plugin_mutator_write_path() {
+    let dir = tempdir().unwrap();
+    let cfg = dir.path().join("alt.toml");
+    fs::write(&cfg, "[plugins.weather]\nallowed_urls = []\n").unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args([
+        "--config",
+        cfg.to_str().unwrap(),
+        "plugin",
+        "url",
+        "add",
+        "weather",
+        "https://wttr.in/*",
+    ]);
+    isolate(&mut cmd, dir.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let after = fs::read_to_string(&cfg).unwrap();
+    assert!(
+        after.contains("https://wttr.in/*"),
+        "writes into the --config override file: {after}"
+    );
+
+    let default_cfg = dir
+        .path()
+        .join("home")
+        .join(".config")
+        .join("rustline")
+        .join("config.toml");
+    assert!(
+        !default_cfg.exists(),
+        "must not write to the default XDG config path"
+    );
+}
+
 /// `plugin approve` with no manifest present reports it and writes nothing.
 #[test]
 fn plugin_approve_no_manifest_writes_nothing() {
