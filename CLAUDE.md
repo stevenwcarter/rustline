@@ -39,6 +39,18 @@ workspace member (own `Cargo.lock`, built for `wasm32-unknown-unknown`):
   configured zip code from wttr.in, fetched via the host's TTL-cached GET
   (`rl_http_get_cached`) so it hits the network at most once per `refresh_secs`
   (the host owns the cache; the guest no longer manages its own state dir).
+- `plugins/counter` — a state-backed counter: reads its previous count via
+  `rl_state_read`, increments it, writes it back via `rl_state_write`, and
+  renders it, demonstrating the sandboxed-state capability (no network at
+  all) plus `rl_log` on a failed write.
+- `plugins/filewatch` — reads a configured file via `rl_file_read` (gated by
+  the user's `allowed_paths`) and renders a first-line/line-count summary,
+  demonstrating the arbitrary-file-read capability; a denied/missing file
+  logs why via `rl_log` and falls back to `down_format`.
+- `plugins/httpget` — a plain (uncached) `rl_http_get` widget that fetches a
+  configured URL and renders a snippet of the body, contrasting with
+  `weather`'s TTL-cached path; a non-2xx status or transport error logs why
+  via `rl_log` and falls back to `down_format`.
 
 ### Render pipeline
 
@@ -278,6 +290,31 @@ these shared types, not a design shortcut. Keep them serializable.
   `#[cfg(target_arch = "wasm32")] mod guest` with the Extism `name`/`render`
   exports and a single `rl_http_get_cached` guest import (the host owns the
   TTL cache).
+
+`plugins/counter`, `plugins/filewatch`, `plugins/httpget` (excluded workspace
+members, `wasm32-unknown-unknown`, same shape as `plugins/weather` — pure
+logic unit-tested on the host target plus a `#[cfg(target_arch = "wasm32")]
+mod guest`): three more worked examples, each covering a host capability
+`weather` doesn't touch, and each logging its one failure path via `rl_log`
+(W7) rather than staying silent:
+- `plugins/counter/lib.rs` — `parse_count`/`next_count`/`render_format`; the
+  guest reads its previous count via `rl_state_read`, increments it,
+  persists the new value via `rl_state_write` (a failed write is `rl_log`ged
+  and otherwise ignored — the count just won't have advanced next render),
+  and renders it. No network capability at all.
+- `plugins/filewatch/lib.rs` — `summarize`/`render_format`; the guest reads
+  a configured `path` via `rl_file_read` (gated by the plugin's
+  `allowed_paths`) and renders the first line + line count. A denial,
+  missing file, or malformed read result is `rl_log`ged and falls back to
+  `down_format` (empty → renders nothing, same convention as the built-in
+  widgets' `down_format`).
+- `plugins/httpget/lib.rs` — `extract_snippet`/`render_format`; the guest
+  fetches a configured `url` via the **plain, uncached** `rl_http_get` (the
+  deliberate contrast with `weather`'s `rl_http_get_cached`), checks the
+  response is 2xx itself (`ok` on the wire only means "the transport
+  completed", not "succeeded" — unlike the cached path, nothing upstream
+  filters non-2xx for it), and falls back to `down_format` (same convention),
+  `rl_log`ging the failure reason.
 
 `rustline` (bin):
 - `cli.rs` — `clap` derive. `render`, `plugin`, and `theme` are subcommand
@@ -886,16 +923,19 @@ branch on platform.
 - **`just`** recipes: `just build`, `just test` (hermetic — no wasm toolchain
   needed), `just lint`, `just preview` (colour preview via `cargo run --`, live
   tmux context when inside tmux, else samples — needs a Nerd/powerline font for
-  the glyphs), `just build-weather` (builds `plugins/weather` for
-  `wasm32-unknown-unknown` and installs `weather.wasm` into the plugin dir),
-  `just test-wasm` (opt-in: builds the weather plugin, then runs the
-  feature-gated `rustline-wasm` e2e test and the bin's `wasm_wiring` test —
-  needs the wasm target; `just test` never requires it), `just bench [ARGS]`
-  (builds the weather plugin, then runs the real `rustline bench` tool via
-  `cargo run --release --features bench -- bench {{ARGS}}`).
+  the glyphs), `just build-plugin NAME` (builds `plugins/<NAME>` for
+  `wasm32-unknown-unknown` and installs `<NAME>.wasm` into the plugin dir —
+  generic across all four example plugins, e.g. `just build-plugin counter`),
+  `just build-weather` (an alias: `build-plugin "weather"`), `just test-wasm`
+  (opt-in: builds the weather plugin, then runs the feature-gated
+  `rustline-wasm` e2e test and the bin's `wasm_wiring` test — needs the wasm
+  target; `just test` never requires it), `just bench [ARGS]` (builds the
+  weather plugin, then runs the real `rustline bench` tool via `cargo run
+  --release --features bench -- bench {{ARGS}}`).
 - Toolchain: Rust 1.97, **edition 2024** in every crate (incl. `rustline-abi`
-  and the excluded `plugins/weather`); `rustfmt.toml` is edition 2024. Keep all
-  crate editions equal to `rustfmt.toml`.
+  and the excluded `plugins/weather`, `plugins/counter`, `plugins/filewatch`,
+  `plugins/httpget`); `rustfmt.toml` is edition 2024. Keep all crate editions
+  equal to `rustfmt.toml`.
 - Must stay **clippy-clean** (`cargo clippy --all-targets -- -D warnings`) and
   **rustfmt-clean** (`cargo fmt --all --check`). There is **no pre-commit hook**
   in this repo — run `cargo fmt --all` yourself before committing.
@@ -913,7 +953,11 @@ branch on platform.
   (its built-in HTTP client is deliberately dropped — `rl_http_get` and
   `rl_http_get_cached` are the only network paths). `cargo tree -i openssl` /
   `-i native-tls` stay empty across the whole graph, including
-  `plugins/weather`. The `2.3 MB` dynamic binary is
+  `plugins/weather`, `plugins/counter`, `plugins/filewatch`, and
+  `plugins/httpget` (the last of these is the only other example plugin that
+  touches the network at all, via the plain `rl_http_get` host fn — still
+  rustls under the hood, same as `weather`'s cached path). The `2.3 MB`
+  dynamic binary is
   fine here — the musl/`scratch` Docker policy is for server images, not this
   local CLI. `if-addrs` (host interface enumeration for the IP widgets, in
   `crates/rustline`) is a thin syscall wrapper with no TLS involved, so it
@@ -980,6 +1024,13 @@ branch on platform.
   a configured `mount`, reusing `memory`'s `format_bytes`/`bar::gauge_bar`
   rather than duplicating them, opt-in, click-toggleable, and
   threshold-aware (`warn_percent`(85)/`crit_percent`(95)) like `cpu`/`memory`.
+- Done: three more worked-example plugins — `plugins/counter`
+  (`rl_state_read`/`rl_state_write`), `plugins/filewatch` (`rl_file_read`),
+  and `plugins/httpget` (plain, uncached `rl_http_get`, contrasting with
+  `weather`'s TTL-cached path) — rounding out the capability set `weather`
+  alone didn't exercise, each also demonstrating `rl_log` on its one failure
+  path, plus a generic `just build-plugin NAME` recipe (`build-weather` is
+  now an alias for it).
 - Historical sparkline (last-X-seconds graph) for `cpu`/`memory` — today's
   reads are single-shot, stateless snapshots; a sparkline needs
   cross-invocation sample persistence, deferred to its own spec.

@@ -464,15 +464,27 @@ example uses it. A plugin has no ambient access to anything — a disallowed
 request is simply refused, and any plugin error, timeout, or crash renders as
 an empty segment rather than breaking the status line.
 
-Build and install the bundled `weather` example (a Nerd-Font condition icon +
-°F for a configured zip code, fetched from wttr.in at most once per
-`refresh_secs`):
+Four worked examples ship under `plugins/`, each demonstrating a different
+host capability:
+
+| Plugin       | Capability                          | Renders                                  |
+|--------------|--------------------------------------|-------------------------------------------|
+| `weather`    | `rl_http_get_cached` (TTL-cached GET) | a condition icon + °F for a zip code      |
+| `counter`    | `rl_state_read`/`rl_state_write`      | a count that persists across renders      |
+| `filewatch`  | `rl_file_read`                        | a configured file's first line + line count |
+| `httpget`    | `rl_http_get` (plain, uncached)       | a snippet of a fetched URL's body         |
+
+Build and install any of them with the generic recipe:
 
 ```bash
-just build-weather
+just build-plugin weather    # or counter / filewatch / httpget
 ```
 
-Then add it to your layout and give it a URL allowlist:
+(`just build-weather` still works too — it's now just an alias for
+`just build-plugin weather`.)
+
+Then add one to your layout and grant it whatever it needs. For `weather`,
+that's a URL allowlist:
 
 ```toml
 [layout]
@@ -486,6 +498,42 @@ zip = "48183"
 format = "{icon} {temp_f}°F"
 refresh_secs = 1800
 ```
+
+`counter` needs no allowlist at all (it only touches its own sandboxed state
+dir):
+
+```toml
+[layout]
+right = ["counter", "cwd", "datetime"]
+
+[plugins.counter.options]
+format = "seen {count}x"
+```
+
+`filewatch` needs a path allowlist (`allowed_paths`), and `httpget` a URL
+allowlist, same shape as `weather`'s:
+
+```toml
+[plugins.filewatch]
+allowed_paths = ["/home/steve/.cache/build-status"]
+
+[plugins.filewatch.options]
+path = "/home/steve/.cache/build-status"
+format = "{first_line} ({lines}L)"
+
+[plugins.httpget]
+allowed_urls = ["https://example.com/status"]
+
+[plugins.httpget.options]
+url = "https://example.com/status"
+format = "status: {body}"
+max_chars = 40
+```
+
+All three of the newer examples also demonstrate `rl_log`: each logs a
+`warn`-level message through the host's `tracing` subscriber on its one
+failure path (a denied/failed state write, an unreadable file, or a non-2xx
+HTTP response) rather than staying silent.
 
 Manage a plugin's allowlists from the command line without hand-editing TOML:
 

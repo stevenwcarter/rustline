@@ -1,0 +1,25 @@
+# Empty [workspace] table: `filewatch` is an *excluded* member of the
+# top-level rustline workspace and builds standalone for wasm32. Declaring
+# its own workspace root stops cargo climbing ancestors for a root — which
+# otherwise breaks `cargo build` when the repo is checked out inside another
+# (e.g. an in-repo `.worktrees/<branch>` git worktree, whose outer Cargo.toml
+# doesn't list this deeper path in `exclude`).
+[workspace]
+
+[package]
+name = "filewatch"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+# This plugin's pure logic needs no dependencies at all; `cargo test` on the
+# host builds just that. Guest bindings — and the JSON parsing they need —
+# only compile for the wasm target; see src/lib.rs's
+# `#[cfg(target_arch = "wasm32")] mod guest`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+extism-pdk = "1"
+serde_json = "1"
+rustline-abi = { path = "../../crates/rustline-abi" }

@@ -6,7 +6,7 @@ members = [
     "crates/rustline",
     "crates/rustline-wasm",
 ]
-exclude = ["plugins/weather"]
+exclude = ["plugins/weather", "plugins/counter", "plugins/filewatch", "plugins/httpget"]
 
 [workspace.package]
 edition = "2024"
