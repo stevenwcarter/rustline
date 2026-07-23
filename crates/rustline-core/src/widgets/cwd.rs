@@ -107,15 +107,27 @@ fn abbreviate_components(path: &str) -> String {
 /// Keep only the last `max_depth` `/`-separated components of `text`,
 /// prefixing a leading `…/` when components were dropped. `0` (the default)
 /// means unlimited — a no-op.
+///
+/// An absolute path's leading `/` produces an empty leading component
+/// (`"/etc".split('/') == ["", "etc"]`); that empty component is excluded
+/// from the `max_depth` comparison so it isn't charged against the limit,
+/// mirroring [`abbreviate_components`]'s treatment of the same empty
+/// component.
 fn limit_depth(text: &str, max_depth: usize) -> String {
     if max_depth == 0 {
         return text.to_string();
     }
-    let components: Vec<&str> = text.split('/').collect();
-    if components.len() <= max_depth {
+    let all: Vec<&str> = text.split('/').collect();
+    let has_leading_slash = all.first().is_some_and(|c| c.is_empty());
+    let real = if has_leading_slash {
+        &all[1..]
+    } else {
+        &all[..]
+    };
+    if real.len() <= max_depth {
         return text.to_string();
     }
-    format!("…/{}", components[components.len() - max_depth..].join("/"))
+    format!("…/{}", real[real.len() - max_depth..].join("/"))
 }
 
 /// Left-truncate `text` to at most `max_len` characters, prefixing a
@@ -247,6 +259,50 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(w.render(&ctx())[0].text, "~/src/rustline");
+    }
+
+    #[test]
+    fn cwd_max_depth_preserves_absolute_leading_slash_when_fits() {
+        // An absolute path's leading `/` must not be charged against
+        // max_depth: "/etc".split('/') == ["", "etc"] has exactly 1 real
+        // component, so it fits max_depth=1 unchanged.
+        let w = Cwd {
+            abbreviate_home: false,
+            max_depth: 1,
+            ..Default::default()
+        };
+        let c = Context {
+            pane_current_path: "/etc".into(),
+            ..ctx()
+        };
+        assert_eq!(w.render(&c)[0].text, "/etc");
+
+        let w2 = Cwd {
+            abbreviate_home: false,
+            max_depth: 2,
+            ..Default::default()
+        };
+        let c2 = Context {
+            pane_current_path: "/var/log".into(),
+            ..ctx()
+        };
+        assert_eq!(w2.render(&c2)[0].text, "/var/log");
+    }
+
+    #[test]
+    fn cwd_max_depth_truncates_absolute_path() {
+        // 3 real components ("var", "log", "nginx") exceeds max_depth=2, so
+        // the last 2 are kept behind the usual ellipsis prefix.
+        let w = Cwd {
+            abbreviate_home: false,
+            max_depth: 2,
+            ..Default::default()
+        };
+        let c = Context {
+            pane_current_path: "/var/log/nginx".into(),
+            ..ctx()
+        };
+        assert_eq!(w.render(&c)[0].text, "…/log/nginx");
     }
 
     #[test]
