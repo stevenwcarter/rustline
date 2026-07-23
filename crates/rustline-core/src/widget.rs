@@ -114,13 +114,16 @@ impl Registry {
         self.factories.contains_key(name)
     }
 
-    /// Build widgets for each name in order, skipping (and logging) any
-    /// name that isn't registered.
+    /// Build widgets for each name in order, paired with the name it was
+    /// built from, skipping (and logging) any name that isn't registered.
     ///
     /// Unknown widget names in user config must never be fatal: a typo in a
     /// config file shouldn't take down the whole status line, so unknown
-    /// names are just logged and dropped.
-    pub fn resolve(&self, names: &[String]) -> Vec<Box<dyn Widget>> {
+    /// names are just logged and dropped. Returning the name alongside its
+    /// widget means a caller (e.g. `render_named_region`) never needs a
+    /// second `names`-filtering pass just to recover which widget came from
+    /// which name.
+    pub fn resolve(&self, names: &[String]) -> Vec<(String, Box<dyn Widget>)> {
         names
             .iter()
             .filter_map(|name| {
@@ -128,7 +131,7 @@ impl Registry {
                 if widget.is_none() {
                     tracing::warn!(widget = %name, "unknown widget, skipping");
                 }
-                widget
+                widget.map(|w| (name.clone(), w))
             })
             .collect()
     }
@@ -225,9 +228,20 @@ mod tests {
         let widgets = r.resolve(&["a".into(), "missing".into(), "b".into()]);
         let texts: Vec<String> = widgets
             .iter()
-            .flat_map(|w| w.render(&ctx()))
+            .flat_map(|(_, w)| w.render(&ctx()))
             .map(|s| s.text)
             .collect();
         assert_eq!(texts, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    #[test]
+    fn resolve_returns_name_widget_pairs_skipping_unknown() {
+        // W53: `resolve` returns the widget's own registry name alongside
+        // the built instance, so a caller no longer needs a second
+        // `resolved_names`/`registry.contains` traversal to recover it.
+        let reg = Registry::with_builtins(&crate::Config::default());
+        let out = reg.resolve(&["datetime".into(), "nope".into(), "cwd".into()]);
+        let names: Vec<&str> = out.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["datetime", "cwd"]); // unknown skipped, order preserved
     }
 }

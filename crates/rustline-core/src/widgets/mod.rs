@@ -367,7 +367,7 @@ mod tests {
         let widgets = reg.resolve(&["cwd".into()]);
         let texts: Vec<String> = widgets
             .iter()
-            .flat_map(|w| w.render(&c))
+            .flat_map(|(_, w)| w.render(&c))
             .map(|s| s.text)
             .collect();
         // home-abbrev "~/src/rustline" -> max_depth 1 keeps "rustline" -> format wraps it.
@@ -395,7 +395,7 @@ mod tests {
         ]);
         let texts: Vec<String> = widgets
             .iter()
-            .flat_map(|w| w.render(&c))
+            .flat_map(|(_, w)| w.render(&c))
             .map(|s| s.text)
             .collect();
         assert_eq!(
@@ -407,7 +407,7 @@ mod tests {
         let widgets = reg.resolve(&["lan_ip".into(), "tailscale_ip".into()]);
         let texts: Vec<String> = widgets
             .iter()
-            .flat_map(|w| w.render(&ctx(vec![])))
+            .flat_map(|(_, w)| w.render(&ctx(vec![])))
             .map(|s| s.text)
             .collect();
         assert_eq!(texts, vec!["TS off".to_string()]);
@@ -428,7 +428,7 @@ mod tests {
         let widgets = reg.resolve(&["battery".into()]);
         let texts: Vec<String> = widgets
             .iter()
-            .flat_map(|w| w.render(&c))
+            .flat_map(|(_, w)| w.render(&c))
             .map(|s| s.text)
             .collect();
         // default format "{icon} {percent}%", 73% discharging -> md-battery-70.
@@ -440,7 +440,7 @@ mod tests {
         let widgets = reg.resolve(&["battery".into()]);
         let texts: Vec<String> = widgets
             .iter()
-            .flat_map(|w| w.render(&c0))
+            .flat_map(|(_, w)| w.render(&c0))
             .map(|s| s.text)
             .collect();
         assert!(texts.is_empty());
@@ -464,7 +464,7 @@ mod tests {
         let texts: Vec<String> = reg
             .resolve(&["cpu".into(), "memory".into()])
             .iter()
-            .flat_map(|w| w.render(&c))
+            .flat_map(|(_, w)| w.render(&c))
             .map(|s| s.text)
             .collect();
         // cpu default "{icon} {percent}%" and memory default "{icon} {used}/{total}"
@@ -495,7 +495,7 @@ mod tests {
         let widgets = reg.resolve(&["git".into()]);
         let texts: Vec<String> = widgets
             .iter()
-            .flat_map(|w| w.render(&c))
+            .flat_map(|(_, w)| w.render(&c))
             .map(|s| s.text)
             .collect();
         // default format "\u{e0a0} {branch}{dirty}", dirty_glyph "*".
@@ -507,7 +507,7 @@ mod tests {
         let widgets = reg.resolve(&["git".into()]);
         let texts: Vec<String> = widgets
             .iter()
-            .flat_map(|w| w.render(&c0))
+            .flat_map(|(_, w)| w.render(&c0))
             .map(|s| s.text)
             .collect();
         assert!(texts.is_empty());
@@ -530,7 +530,7 @@ mod tests {
         let widgets = reg.resolve(&["disk".into()]);
         let texts: Vec<String> = widgets
             .iter()
-            .flat_map(|w| w.render(&c))
+            .flat_map(|(_, w)| w.render(&c))
             .map(|s| s.text)
             .collect();
         // default format " {used}/{total}".
@@ -542,7 +542,7 @@ mod tests {
         let widgets = reg.resolve(&["disk".into()]);
         let texts: Vec<String> = widgets
             .iter()
-            .flat_map(|w| w.render(&c0))
+            .flat_map(|(_, w)| w.render(&c0))
             .map(|s| s.text)
             .collect();
         assert!(texts.is_empty());
@@ -559,7 +559,7 @@ mod tests {
         let widgets = reg.resolve(&["uptime".into()]);
         let texts: Vec<String> = widgets
             .iter()
-            .flat_map(|w| w.render(&c))
+            .flat_map(|(_, w)| w.render(&c))
             .map(|s| s.text)
             .collect();
         // default format "{uptime}".
@@ -571,7 +571,7 @@ mod tests {
         let widgets = reg.resolve(&["uptime".into()]);
         let texts: Vec<String> = widgets
             .iter()
-            .flat_map(|w| w.render(&c0))
+            .flat_map(|(_, w)| w.render(&c0))
             .map(|s| s.text)
             .collect();
         assert!(texts.is_empty());
@@ -593,7 +593,7 @@ mod tests {
         let widgets = reg.resolve(&["media".into()]);
         let texts: Vec<String> = widgets
             .iter()
-            .flat_map(|w| w.render(&c))
+            .flat_map(|(_, w)| w.render(&c))
             .map(|s| s.text)
             .collect();
         // default format "{title} — {artist}".
@@ -605,7 +605,7 @@ mod tests {
         let widgets = reg.resolve(&["media".into()]);
         let texts: Vec<String> = widgets
             .iter()
-            .flat_map(|w| w.render(&c0))
+            .flat_map(|(_, w)| w.render(&c0))
             .map(|s| s.text)
             .collect();
         assert!(texts.is_empty());

@@ -83,18 +83,13 @@ pub fn render_named_region(
     overrides: &HashMap<String, ColorOverride>,
 ) -> String {
     let widgets = registry.resolve(names);
-    // `resolve` silently drops unknown names (in order), so re-filter `names`
-    // the same way to recover each resolved widget's own registry name —
-    // needed to look up its color override — without changing `Registry`'s
-    // public API just for this.
-    let resolved_names = names.iter().filter(|name| registry.contains(name));
 
-    // Render each widget (panic-guarded), apply its color override (if any),
-    // and keep its clickable range name.
+    // Render each widget (panic-guarded), apply its color override (if any,
+    // looked up by the name `resolve` paired it with), and keep its
+    // clickable range name.
     let rendered: Vec<(Option<String>, Vec<Segment>)> = widgets
         .iter()
-        .zip(resolved_names)
-        .map(|(w, name)| {
+        .map(|(name, w)| {
             let mut segments = render_guarded(w.as_ref(), ctx);
             if let Some(over) = overrides.get(name) {
                 apply_color_override(&mut segments, over);
@@ -133,7 +128,7 @@ pub fn render_window(ctx: &Context, registry: &Registry, theme: &Theme) -> Strin
     let widgets = registry.resolve(&["windows".to_string()]);
     let segments: Vec<Segment> = widgets
         .iter()
-        .flat_map(|w| render_guarded(w.as_ref(), ctx))
+        .flat_map(|(_, w)| render_guarded(w.as_ref(), ctx))
         .collect();
     let Some(seg) = segments.first() else {
         return String::new();
@@ -418,6 +413,41 @@ mod tests {
         assert!(
             out.contains(&format!("fg=black,bg={}", theme.palette[0].to_tmux())),
             "fg override composes with the palette-assigned bg: {out}"
+        );
+    }
+
+    #[test]
+    fn resolve_pairs_refactor_is_byte_identical() {
+        // W53 characterization: golden captured from the PRE-refactor
+        // `render_named_region` (which drove range-wrapping/override lookups
+        // off a second `resolved_names`/`registry.contains` traversal
+        // alongside `registry.resolve`). A region mixing a real clickable
+        // widget (`datetime` with a non-empty `alt_format`), an unknown name
+        // in the middle, and a plain widget must render identically once
+        // `resolve` itself returns `(name, widget)` pairs and the second
+        // traversal is gone.
+        let mut cfg = Config::default();
+        cfg.widgets.datetime.alt_format = "ALT".into();
+        let reg = Registry::with_builtins(&cfg);
+        let theme = cfg.to_theme();
+        let names = vec![
+            "hostname".to_string(),
+            "nope".to_string(),
+            "datetime".to_string(),
+        ];
+        let out = render_named_region(
+            Direction::Left,
+            &names,
+            &ctx(),
+            &reg,
+            &theme,
+            &HashMap::new(),
+        );
+        assert_eq!(
+            out,
+            "#[fg=colour234,bg=colour31]\u{e0b0}#[fg=colour255,bg=colour31] scadrial \
+             #[fg=colour31,bg=colour238]\u{e0b0}#[range=user|datetime]#[fg=colour255,bg=colour238] \
+             Mon < 2026-07-20 < 17:49 #[norange]#[fg=colour238,bg=colour234]\u{e0b0}#[default]"
         );
     }
 
