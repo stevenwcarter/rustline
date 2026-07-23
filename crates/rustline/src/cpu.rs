@@ -6,7 +6,7 @@
 //! unit tests, while only the file-read / subprocess / sleep is `#[cfg]`-gated.
 
 #[cfg(target_os = "linux")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -46,6 +46,15 @@ pub fn read_cpu() -> Option<CpuUsage> {
 
 #[cfg(target_os = "linux")]
 fn read_cpu_linux() -> Option<CpuUsage> {
+    read_cpu_linux_in(&rustline_wasm::state_root())
+}
+
+/// [`read_cpu_linux`]'s body, parameterized on the snapshot-cache directory so
+/// tests can inject a `tempfile::tempdir()` instead of touching the real XDG
+/// state dir. Production always calls this via `read_cpu_linux`'s
+/// `state_root()` default.
+#[cfg(target_os = "linux")]
+fn read_cpu_linux_in(state_dir: &Path) -> Option<CpuUsage> {
     let cur_times = parse_proc_stat(&std::fs::read_to_string("/proc/stat").ok()?)?;
     let current = CpuSnapshot {
         idle: cur_times.idle,
@@ -55,7 +64,7 @@ fn read_cpu_linux() -> Option<CpuUsage> {
 
     // Fast path (default): a fresh persisted snapshot gives busy% with no sleep.
     // Fallback: no recent prior -> take the second sample the classic way.
-    let percent = match load_snapshot()
+    let percent = match load_snapshot(state_dir)
         .and_then(|prev| busy_from_snapshots(&prev, &current, CPU_SNAPSHOT_STALENESS_SECS))
     {
         Some(p) => p,
@@ -68,7 +77,7 @@ fn read_cpu_linux() -> Option<CpuUsage> {
 
     // Always persist the current reading so the next invocation can take the
     // fast path. Best-effort: a write failure just warns and is ignored.
-    store_snapshot(&current);
+    store_snapshot(state_dir, &current);
     Some(CpuUsage { percent })
 }
 
@@ -121,10 +130,10 @@ fn parse_snapshot(text: &str) -> Option<CpuSnapshot> {
     Some(CpuSnapshot { idle, total, ts })
 }
 
-/// State-file path for the persisted snapshot: `<state_root>/cpu-sample`.
+/// State-file path for the persisted snapshot: `<state_dir>/cpu-sample`.
 #[cfg(target_os = "linux")]
-fn snapshot_path() -> PathBuf {
-    rustline_wasm::state_root().join("cpu-sample")
+fn snapshot_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("cpu-sample")
 }
 
 /// Current wall clock as unix seconds; a pre-epoch clock degrades to `0`
@@ -140,15 +149,15 @@ fn now_unix_secs() -> u64 {
 /// Load the persisted snapshot; a missing/unreadable/corrupt file → `None`
 /// (treated as absent, so the caller falls back to the two-sample read).
 #[cfg(target_os = "linux")]
-fn load_snapshot() -> Option<CpuSnapshot> {
-    parse_snapshot(&std::fs::read_to_string(snapshot_path()).ok()?)
+fn load_snapshot(state_dir: &Path) -> Option<CpuSnapshot> {
+    parse_snapshot(&std::fs::read_to_string(snapshot_path(state_dir)).ok()?)
 }
 
 /// Best-effort atomic persist (temp file + rename); logs a warning on failure
 /// and never panics — a broken cache must never break the bar.
 #[cfg(target_os = "linux")]
-fn store_snapshot(snap: &CpuSnapshot) {
-    let path = snapshot_path();
+fn store_snapshot(state_dir: &Path, snap: &CpuSnapshot) {
+    let path = snapshot_path(state_dir);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -304,7 +313,21 @@ mod tests {
         assert!(parse_top_cpu("nothing here").is_none());
     }
 
+    // Linux takes the state-dir-injecting path so this never touches the real
+    // XDG state dir (`read_cpu()` itself always writes to the real one — see
+    // `read_cpu_linux_in`'s doc comment). Other platforms don't persist any
+    // snapshot, so calling the public `read_cpu()` directly is already hermetic.
     #[test]
+    #[cfg(target_os = "linux")]
+    fn read_cpu_never_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(c) = read_cpu_linux_in(dir.path()) {
+            assert!((0.0..=100.0).contains(&c.percent));
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
     fn read_cpu_never_panics() {
         if let Some(c) = read_cpu() {
             assert!((0.0..=100.0).contains(&c.percent));
@@ -339,18 +362,39 @@ mod tests {
     fn busy_from_snapshots_zero_or_backward_age_is_none() {
         let prev = snap(1000, 500, 200);
         // Same instant: age == 0 -> None.
-        assert!(busy_from_snapshots(&prev, &snap(2000, 1000, 200), 60).is_none());
+        assert!(
+            busy_from_snapshots(&prev, &snap(2000, 1000, 200), CPU_SNAPSHOT_STALENESS_SECS)
+                .is_none()
+        );
         // Clock went backwards: now.ts < prev.ts -> None.
-        assert!(busy_from_snapshots(&prev, &snap(2000, 1000, 199), 60).is_none());
+        assert!(
+            busy_from_snapshots(&prev, &snap(2000, 1000, 199), CPU_SNAPSHOT_STALENESS_SECS)
+                .is_none()
+        );
     }
 
     #[test]
     fn busy_from_snapshots_zero_or_backward_total_is_none() {
         let prev = snap(1000, 500, 100);
         // Δtotal == 0 -> None (nothing to divide by; fall back).
-        assert!(busy_from_snapshots(&prev, &snap(1000, 500, 105), 60).is_none());
+        assert!(
+            busy_from_snapshots(&prev, &snap(1000, 500, 105), CPU_SNAPSHOT_STALENESS_SECS)
+                .is_none()
+        );
         // Counters went backwards (suspend/resume) -> None.
-        assert!(busy_from_snapshots(&prev, &snap(400, 200, 105), 60).is_none());
+        assert!(
+            busy_from_snapshots(&prev, &snap(400, 200, 105), CPU_SNAPSHOT_STALENESS_SECS).is_none()
+        );
+    }
+
+    #[test]
+    fn busy_from_snapshots_backward_idle_saturates() {
+        // dt > 0 but idle went backwards: didle saturates to 0 -> 100% busy, finite (no NaN).
+        let prev = snap(1000, 500, 100);
+        let now = snap(2000, 100, 105);
+        let b = busy_from_snapshots(&prev, &now, CPU_SNAPSHOT_STALENESS_SECS).unwrap();
+        assert_eq!(b, 100.0); // dt=1000, didle=saturating_sub(100,500)=0 -> (1000-0)/1000*100
+        assert!(b.is_finite());
     }
 
     #[test]
