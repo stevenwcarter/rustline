@@ -18,7 +18,7 @@ use std::env;
 use std::path::PathBuf;
 
 use build_context::{build_region_context, build_window_context};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use cli::{Cli, Command, Render};
 use rustline_core::{
     Config, Direction, Registry, Theme, ThemeConfig, builtin_theme, render_named_region,
@@ -201,6 +201,14 @@ fn main() {
         Command::Plugin(cmd) => plugin_cmd::run(cmd, &config_path()),
         Command::Theme(cmd) => theme_cmd::run(cmd, &config_path(), &themes_dir()),
         Command::Click(args) => run_click(&args),
+        Command::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "rustline",
+                &mut std::io::stdout(),
+            );
+        }
         #[cfg(feature = "bench")]
         Command::Bench(args) => bench::run(&args, &cfg),
     }

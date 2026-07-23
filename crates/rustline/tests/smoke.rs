@@ -685,6 +685,28 @@ fn click_toggles_state_file() {
 }
 
 #[test]
+fn completions_prints_nonempty_script_for_each_shell() {
+    let tmp = tempdir().unwrap();
+    for shell in ["bash", "zsh", "fish"] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+        cmd.args(["completions", shell]);
+        isolate(&mut cmd, tmp.path());
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "completions {shell} exits ok; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let s = String::from_utf8_lossy(&out.stdout);
+        assert!(!s.is_empty(), "{shell} completion script is non-empty");
+        assert!(
+            s.contains("rustline"),
+            "{shell} completion script mentions rustline: {s}"
+        );
+    }
+}
+
+#[test]
 fn theme_pick_non_tty_errors_and_writes_nothing() {
     let tmp = tempdir().unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));

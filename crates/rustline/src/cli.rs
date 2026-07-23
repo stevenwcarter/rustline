@@ -41,6 +41,11 @@ pub enum Command {
     Theme(ThemeCmd),
     /// Toggle a widget's alt view (invoked by the tmux MouseDown1Status binding).
     Click(ClickArgs),
+    /// Print a shell-completion script for the given shell to stdout.
+    Completions {
+        /// Which shell to generate a completion script for.
+        shell: clap_complete::Shell,
+    },
     /// Benchmark the render pipeline (feature `bench`).
     #[cfg(feature = "bench")]
     Bench(BenchArgs),
