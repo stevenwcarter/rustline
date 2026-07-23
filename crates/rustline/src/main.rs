@@ -5,6 +5,7 @@ mod build_context;
 mod cli;
 mod cpu;
 mod disk;
+mod doctor;
 mod git;
 mod init;
 mod logging;
@@ -201,6 +202,17 @@ fn main() {
         Command::Plugin(cmd) => plugin_cmd::run(cmd, &config_path()),
         Command::Theme(cmd) => theme_cmd::run(cmd, &config_path(), &themes_dir()),
         Command::Click(args) => run_click(&args),
+        Command::Doctor => {
+            let plugin_dir = resolve_plugin_dir(None, &cfg);
+            let paths = doctor::DoctorPaths {
+                config: &config_path(),
+                themes_dir: &themes_dir(),
+                plugin_dir: &plugin_dir,
+                log_file: &logging::log_path(&cfg.log),
+                tmux_conf: &tmux_conf_path(),
+            };
+            std::process::exit(doctor::run(&paths));
+        }
         Command::Completions { shell } => {
             clap_complete::generate(
                 shell,

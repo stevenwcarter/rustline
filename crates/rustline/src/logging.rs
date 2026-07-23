@@ -79,8 +79,9 @@ fn resolve_stderr_level(cfg_level: &str) -> (LevelFilter, Option<String>) {
 }
 
 /// The effective log-file path: config override (`~/` expanded) or
-/// `$XDG_DATA_HOME/rustline/rustline.log`.
-fn log_path(cfg: &LogConfig) -> PathBuf {
+/// `$XDG_DATA_HOME/rustline/rustline.log`. `pub(crate)` so `doctor.rs` can
+/// report it without duplicating the resolution logic.
+pub(crate) fn log_path(cfg: &LogConfig) -> PathBuf {
     match &cfg.file {
         Some(p) => rustline_wasm::expand_tilde(p),
         None => rustline_wasm::data_root().join("rustline.log"),

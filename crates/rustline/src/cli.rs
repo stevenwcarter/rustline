@@ -41,6 +41,10 @@ pub enum Command {
     Theme(ThemeCmd),
     /// Toggle a widget's alt view (invoked by the tmux MouseDown1Status binding).
     Click(ClickArgs),
+    /// Diagnose documented prerequisites (tmux version, mouse mode,
+    /// truecolor terminal, PATH, the managed tmux config block) and report
+    /// pass/warn/fail, plus the resolved config/themes/plugin/log paths.
+    Doctor,
     /// Print a shell-completion script for the given shell to stdout.
     Completions {
         /// Which shell to generate a completion script for.

@@ -1095,3 +1095,52 @@ fn unwritable_log_dir_degrades_to_stderr_only() {
         "file-open failure degrades to a stderr-only report; got: {stderr}"
     );
 }
+
+#[test]
+fn doctor_runs_and_prints_resolved_paths() {
+    // Host-dependent (tmux may or may not be installed, running, or have
+    // mouse mode on wherever CI runs this), so this only checks that the
+    // report runs and prints the resolved config/themes/plugin/log paths --
+    // never a particular check outcome or exit code.
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    let out = isolated_cmd(&home, &data, &config)
+        .arg("doctor")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("rustline doctor"),
+        "prints a report header: {stdout}"
+    );
+    assert!(
+        stdout.contains("Resolved paths:"),
+        "prints the resolved-paths section: {stdout}"
+    );
+
+    let expected_config = config.join("rustline/config.toml");
+    let expected_themes = config.join("rustline/themes");
+    let expected_plugins = data.join("rustline/plugins");
+    let expected_log = data.join("rustline/rustline.log");
+    assert!(
+        stdout.contains(&expected_config.display().to_string()),
+        "resolved config path present: {stdout}"
+    );
+    assert!(
+        stdout.contains(&expected_themes.display().to_string()),
+        "resolved themes path present: {stdout}"
+    );
+    assert!(
+        stdout.contains(&expected_plugins.display().to_string()),
+        "resolved plugin dir present: {stdout}"
+    );
+    assert!(
+        stdout.contains(&expected_log.display().to_string()),
+        "resolved log path present: {stdout}"
+    );
+}
