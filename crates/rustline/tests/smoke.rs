@@ -1801,16 +1801,30 @@ fn config_flag_overrides_path() {
 
 /// `--config` also threads into the actual config load: `print-config`
 /// reflects the alternate file's contents, not the (nonexistent) default one.
+///
+/// The sentinel must be absent from every default, or this test passes even
+/// when `--config` is silently ignored (a prior version used `"hostname"`,
+/// which is also in the *default* `left` layout, so it couldn't tell "the
+/// override was honored" from "the default loaded"). `theme.base = "nord"`
+/// has no such overlap: default `print-config` output has no `base` line at
+/// all under `[theme]` (confirmed by the negative-control assertion below),
+/// so `nord` can only appear in the output if the `--config` file was
+/// genuinely loaded.
 #[test]
 fn config_flag_overrides_print_config_contents() {
     let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
     let cfg = dir.path().join("alt.toml");
-    fs::write(&cfg, "layout.left = [\"hostname\"]\n").unwrap();
+    fs::write(&cfg, "theme.base = \"nord\"\n").unwrap();
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
-    cmd.args(["--config", cfg.to_str().unwrap(), "print-config"]);
-    isolate(&mut cmd, dir.path());
-    let out = cmd.output().unwrap();
+    let out = isolated_cmd(&home, &data, &config)
+        .args(["--config", cfg.to_str().unwrap(), "print-config"])
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "exit ok; stderr={}",
@@ -1818,8 +1832,23 @@ fn config_flag_overrides_print_config_contents() {
     );
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(
-        s.contains("hostname"),
-        "reflects the --config file's layout: {s}"
+        s.contains("base = \"nord\""),
+        "reflects the --config file's theme.base override: {s}"
+    );
+
+    // Negative control: same isolated env, no `--config`, no config file at
+    // all in `config` — the sentinel must be absent here, otherwise the
+    // assertion above wouldn't discriminate "override honored" from
+    // "override ignored, default loaded".
+    let default_out = isolated_cmd(&home, &data, &config)
+        .arg("print-config")
+        .output()
+        .unwrap();
+    assert!(default_out.status.success(), "default print-config exit ok");
+    let default_s = String::from_utf8_lossy(&default_out.stdout);
+    assert!(
+        !default_s.contains("nord"),
+        "sentinel must be absent from default output: {default_s}"
     );
 }
 
