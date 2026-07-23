@@ -85,3 +85,60 @@ api_base = "{base}"
         "temp rendered via register_plugins -> WasmWidget -> guest -> cached fetch: {stdout}"
     );
 }
+
+/// Positive proof that the production `FileDenialObserver` wiring in
+/// `register_plugins` (not just the `DenialObserver` seam itself) is live: a
+/// real `weather.wasm`, configured with no `allowed_urls`, gets its one fetch
+/// denied gate-first, and that denial lands in `<data_home>/rustline/denials.jsonl`.
+#[test]
+fn denied_plugin_persists_a_denial_record_via_register_plugins() {
+    let wasm_src = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../plugins/weather/target/wasm32-unknown-unknown/release/weather.wasm"
+    );
+    if !std::path::Path::new(wasm_src).exists() {
+        panic!("run `just build-weather` first");
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_home = tmp.path().join("cfg");
+    let data_home = tmp.path().join("data");
+
+    let cfg_dir = cfg_home.join("rustline");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    // No `allowed_urls` for weather -> its one fetch is denied before any
+    // network call; the widget still degrades to empty (invariant N2).
+    std::fs::write(
+        cfg_dir.join("config.toml"),
+        r#"[layout]
+right = ["weather"]
+[plugins.weather]
+"#,
+    )
+    .unwrap();
+
+    let plugin_dir = data_home.join("rustline").join("plugins");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::copy(wasm_src, plugin_dir.join("weather.wasm")).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rustline"))
+        .args(["render", "right"])
+        .env("XDG_CONFIG_HOME", &cfg_home)
+        .env("XDG_DATA_HOME", &data_home)
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "a denied plugin degrades to empty, never fails the process: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let record_path = data_home.join("rustline").join("denials.jsonl");
+    let contents = std::fs::read_to_string(&record_path)
+        .unwrap_or_else(|e| panic!("expected {} to exist: {e}", record_path.display()));
+    assert!(
+        contents.contains("\"plugin\":\"weather\"") && contents.contains("\"kind\":\"url\""),
+        "denial persisted by the production FileDenialObserver: {contents}"
+    );
+}

@@ -161,6 +161,14 @@ pub enum PluginCmd {
     /// sample `Context`, and print its segments plus any capability denials it
     /// triggered. Read-only — never touches config or the toggles file.
     Run(RunArgs),
+    /// List a plugin's persisted capability denials — every distinct
+    /// `(kind, target)` it has actually been denied, recorded by the
+    /// production `FileDenialObserver` (see `rustline-wasm::denials`).
+    /// Read-only.
+    Denials {
+        /// The plugin name (its `.wasm` stem).
+        name: String,
+    },
 }
 
 /// Arguments for `rustline plugin build`.

@@ -8,6 +8,7 @@ pub mod abi;
 pub mod allow;
 pub mod cache;
 pub mod capability;
+pub mod denials;
 pub mod fetch;
 pub mod host;
 pub mod manifest;
@@ -24,6 +25,7 @@ use rustline_core::{
 };
 
 pub use capability::{CapabilityCtx, DenialKind, DenialObserver};
+pub use denials::{Denial, FileDenialObserver, denials_path, read_denials};
 pub use host::{WasmWidget, build_plugin};
 pub use manifest::{PluginManifest, resolve_manifest};
 pub use paths::{data_root, default_plugin_dir, expand_tilde, state_root};
@@ -60,6 +62,11 @@ pub fn abi_decision(host: u32, guest: Option<u32>) -> AbiDecision {
 /// instantiation error is logged and skipped — never fatal.
 pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, needed: &[String]) {
     let root = state_root();
+    // One resolved path, reused per plugin below: each instance gets its own
+    // `FileDenialObserver` (cheap — just a `PathBuf` clone) writing to the
+    // same persisted record, so `rustline plugin denials <name>` has
+    // something real to show instead of the default `NoopObserver`.
+    let denials_path = denials::denials_path();
     let Ok(entries) = std::fs::read_dir(plugin_dir) else {
         return; // missing dir → no plugins, no error
     };
@@ -83,7 +90,9 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
             tracing::warn!(plugin = %stem, "failed to read plugin file, skipping");
             continue;
         };
-        let ctx = capability::CapabilityCtx::from_config(stem, &pc, root.clone());
+        let observer = denials::FileDenialObserver::new(denials_path.clone());
+        let ctx = capability::CapabilityCtx::from_config(stem, &pc, root.clone())
+            .with_observer(Arc::new(observer));
         let options = serde_json::to_value(&pc.options).unwrap_or_default();
         let mut plugin = match host::build_plugin(&wasm, ctx) {
             Ok(p) => p,

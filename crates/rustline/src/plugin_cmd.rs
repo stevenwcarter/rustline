@@ -63,6 +63,21 @@ pub fn run(cmd: PluginCmd, config_path: &Path, plugin_dir: &Path) {
             }
         }
         PluginCmd::Run(args) => run_plugin(&args, config_path, plugin_dir),
+        PluginCmd::Denials { name } => denials_cmd(&name),
+    }
+}
+
+/// `rustline plugin denials <name>`: list every capability denial the
+/// production `FileDenialObserver` has recorded for `name` (one line per
+/// distinct `(kind, target)` — see `rustline_wasm::denials`). Read-only.
+fn denials_cmd(name: &str) {
+    let denials = rustline_wasm::read_denials(name);
+    if denials.is_empty() {
+        println!("no recorded denials for {name}");
+        return;
+    }
+    for d in denials {
+        println!("{} denied: {}", denial_kind_label(d.kind), d.target);
     }
 }
 
@@ -269,7 +284,15 @@ fn pattern_cmd(cmd: PatternCmd, kind: Kind, config_path: &Path) {
 /// idempotently. Approval only ever writes an allowlist entry (deny-by-default
 /// still holds until then) and never widens beyond what the manifest declares
 /// (N4), so it cannot over-grant.
+///
+/// Also surfaces a `plugin denials` hint whenever `<name>` has any persisted
+/// denials, independent of whether a manifest resolves or approval proceeds —
+/// a denial record is informational only, never itself grounds for widening
+/// an allowlist.
 fn approve(args: ApproveArgs, config_path: &Path, plugin_dir: &Path) {
+    if !rustline_wasm::read_denials(&args.plugin).is_empty() {
+        println!("recorded denials: run `plugin denials {}`", args.plugin);
+    }
     let Some(manifest) = resolve_manifest(plugin_dir, &args.plugin) else {
         println!("no manifest found for {}", args.plugin);
         return;

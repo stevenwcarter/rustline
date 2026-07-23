@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rustline_core::PluginConfig;
+use serde::{Deserialize, Serialize};
 
 use crate::allow::AllowSet;
 #[cfg(test)]
@@ -13,7 +14,10 @@ use crate::state;
 
 /// The kind of capability a denied request was for, carried to a
 /// [`DenialObserver`] alongside the plugin name and the denied target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `Serialize`/`Deserialize` (`snake_case`: `url`/`path`) so it rides
+/// [`crate::denials::Denial`]'s JSONL record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DenialKind {
     /// An HTTP GET (cached or uncached) denied by `allowed_urls`.
     Url,
