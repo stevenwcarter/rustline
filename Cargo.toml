@@ -5,6 +5,7 @@ members = [
     "crates/rustline-core",
     "crates/rustline",
     "crates/rustline-wasm",
+    "crates/rustline-plugin-sdk",
 ]
 exclude = ["plugins/weather", "plugins/counter", "plugins/filewatch", "plugins/httpget"]
 

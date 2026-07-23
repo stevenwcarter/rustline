@@ -75,72 +75,36 @@ pub fn parse_wttr(json: &str) -> Option<Wttr> {
     })
 }
 
-/// Pick the active weather format given whether this plugin is toggled and its
-/// configured `alt_format` (mirrors the host's `active_format`).
-pub fn select_weather_format<'a>(toggled: bool, format: &'a str, alt_format: &'a str) -> &'a str {
-    if toggled && !alt_format.is_empty() {
-        alt_format
-    } else {
-        format
-    }
-}
-
 #[cfg(target_arch = "wasm32")]
 mod guest {
     use super::*;
-    use extism_pdk::*;
-    use rustline_abi::{GuestRender, Segment};
-    use serde_json::Value;
+    use rustline_plugin_sdk::{
+        GuestRender, Segment, active_format, export_plugin, http_get_cached,
+    };
 
-    #[host_fn]
-    extern "ExtismHost" {
-        fn rl_http_get_cached(url: String, ttl_secs: String, now: String) -> String;
-    }
-
-    #[plugin_fn]
-    pub fn name() -> FnResult<String> {
-        Ok("weather".to_string())
-    }
-
-    #[plugin_fn]
-    pub fn render(input: String) -> FnResult<Json<Vec<Segment>>> {
-        // Parse the typed guest input; a malformed input degrades to an empty
-        // render (never break the bar) rather than erroring.
-        let Ok(input) = serde_json::from_str::<GuestRender>(&input) else {
-            return Ok(Json(Vec::new()));
-        };
-        let now = input.context.now;
-        // `context.toggled` is the set of toggled widget/plugin names; this
-        // plugin is toggled when it contains its own name, "weather".
-        let toggled = input.context.toggled.contains("weather");
+    /// Render one unstyled weather segment. The host owns the TTL cache
+    /// (`http_get_cached`): it fetches at most once per `refresh_secs`, serving
+    /// a fresh or last-good-stale body, keyed by URL so a zip change is a
+    /// distinct entry (no cross-zip leakage). A failed/absent body renders
+    /// nothing (never breaks the bar).
+    fn render(input: &GuestRender) -> Vec<Segment> {
         let cfg = &input.config;
-        let zip = cfg["zip"].as_str().unwrap_or("48183").to_string();
+        let zip = cfg["zip"].as_str().unwrap_or("48183");
         let raw_format = cfg["format"].as_str().unwrap_or("{icon} {temp_f}°F");
         let alt_format = cfg["alt_format"].as_str().unwrap_or("");
-        let format = select_weather_format(toggled, raw_format, alt_format);
+        // `context.toggled` drives the click-toggle view, identical to a
+        // built-in widget (this plugin's name is "weather").
+        let format = active_format(&input.context, "weather", raw_format, alt_format);
         let refresh_secs = cfg["refresh_secs"].as_i64().unwrap_or(1800);
-        let api_base = cfg["api_base"]
-            .as_str()
-            .unwrap_or("https://wttr.in")
-            .to_string();
+        let api_base = cfg["api_base"].as_str().unwrap_or("https://wttr.in");
 
-        // The host owns the TTL cache: fetch at most once per refresh_secs,
-        // serving a fresh or last-good-stale body. Keyed by URL, so a zip
-        // change is a different cache entry (no cross-zip leakage).
         let url = format!("{api_base}/{zip}?format=j1");
-        let seg = unsafe { rl_http_get_cached(url, refresh_secs.to_string(), now) }
+        http_get_cached(&url, refresh_secs, &input.context.now)
             .ok()
-            .and_then(|raw| {
-                let r: Value = serde_json::from_str(&raw).ok()?;
-                if r["ok"].as_bool().unwrap_or(false) {
-                    parse_wttr(r["body"].as_str().unwrap_or_default())
-                } else {
-                    None
-                }
-            })
-            .map(|w| segment(format, &w.code, &w.temp_f, &w.desc, &zip))
-            .unwrap_or_default();
-        Ok(Json(seg))
+            .filter(|r| r.ok)
+            .and_then(|r| parse_wttr(&r.body))
+            .map(|w| segment(format, &w.code, &w.temp_f, &w.desc, zip))
+            .unwrap_or_default()
     }
 
     fn segment(format: &str, code: &str, temp_f: &str, desc: &str, zip: &str) -> Vec<Segment> {
@@ -148,6 +112,8 @@ mod guest {
         // one unstyled segment; the host assigns palette for left/right regions
         vec![Segment::new(text)]
     }
+
+    export_plugin!(name: "weather", render: render);
 }
 
 #[cfg(test)]
@@ -184,20 +150,5 @@ mod tests {
         assert_eq!(w.code, "113");
         assert_eq!(w.desc, "Sunny");
         assert!(parse_wttr("{}").is_none());
-    }
-}
-
-#[cfg(test)]
-mod toggle_tests {
-    use super::select_weather_format;
-
-    #[test]
-    fn toggled_prefers_nonempty_alt() {
-        assert_eq!(
-            select_weather_format(true, "{icon} {temp_f}", "{icon} {temp_f}°F {city}"),
-            "{icon} {temp_f}°F {city}"
-        );
-        assert_eq!(select_weather_format(false, "F", "A"), "F");
-        assert_eq!(select_weather_format(true, "F", ""), "F");
     }
 }

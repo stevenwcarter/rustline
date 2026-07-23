@@ -16,10 +16,10 @@ license = "MIT"
 crate-type = ["cdylib"]
 
 # This plugin's pure logic needs no dependencies at all; `cargo test` on the
-# host builds just that. Guest bindings — and the JSON parsing they need —
-# only compile for the wasm target; see src/lib.rs's
-# `#[cfg(target_arch = "wasm32")] mod guest`.
+# host builds just that. The guest bindings only compile for the wasm target
+# (see src/lib.rs's `#[cfg(target_arch = "wasm32")] mod guest`): `extism-pdk`
+# for the exports `export_plugin!` emits, and the SDK for the typed http-get
+# wrapper, wire types, and that macro.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 extism-pdk = "1"
-serde_json = "1"
-rustline-abi = { path = "../../crates/rustline-abi" }
+rustline-plugin-sdk = { path = "../../crates/rustline-plugin-sdk" }

@@ -36,72 +36,41 @@ pub fn render_format(format: &str, count: u64) -> String {
 #[cfg(target_arch = "wasm32")]
 mod guest {
     use super::*;
-    use extism_pdk::*;
-    use rustline_abi::{GuestRender, Segment};
-    use serde_json::Value;
+    use rustline_plugin_sdk::{
+        GuestRender, LogLevel, Segment, export_plugin, log, state_read, state_write,
+    };
 
-    #[host_fn]
-    extern "ExtismHost" {
-        fn rl_state_read(relpath: String) -> String;
-        fn rl_state_write(relpath: String, contents: String) -> String;
-        fn rl_log(level: String, msg: String) -> String;
-    }
-
-    #[plugin_fn]
-    pub fn name() -> FnResult<String> {
-        Ok("counter".to_string())
-    }
-
-    #[plugin_fn]
-    pub fn render(input: String) -> FnResult<Json<Vec<Segment>>> {
-        // A malformed input degrades to an empty render (never break the
-        // bar) rather than erroring.
-        let Ok(input) = serde_json::from_str::<GuestRender>(&input) else {
-            return Ok(Json(Vec::new()));
-        };
+    fn render(input: &GuestRender) -> Vec<Segment> {
         let format = input.config["format"].as_str().unwrap_or("{count}");
-
         let count = next_count(read_count());
         write_count(count);
-
-        Ok(Json(vec![Segment::new(render_format(format, count))]))
+        vec![Segment::new(render_format(format, count))]
     }
 
-    /// Read the previously-stored count via `rl_state_read`; missing state,
-    /// a host-call error, or malformed JSON all fall back to 0 (same "never
+    /// Read the previously-stored count via `state_read`; missing state, a
+    /// host-call error, or a not-ok result all fall back to 0 (same "never
     /// break the bar" degrade as everywhere else in this plugin).
     fn read_count() -> u64 {
-        let call = unsafe { rl_state_read(STATE_KEY.to_string()) };
-        let Ok(raw) = call else { return 0 };
-        let Ok(result) = serde_json::from_str::<Value>(&raw) else {
-            return 0;
-        };
-        if result["ok"].as_bool().unwrap_or(false) && result["exists"].as_bool().unwrap_or(false) {
-            parse_count(result["contents"].as_str().unwrap_or_default())
-        } else {
-            0
+        match state_read(STATE_KEY) {
+            Ok(r) if r.ok && r.exists => parse_count(&r.contents),
+            _ => 0,
         }
     }
 
-    /// Persist `count` via `rl_state_write`. A failed write is logged
-    /// through `rl_log` (demonstrating the capability-free logging host fn)
-    /// rather than breaking the render — the count just won't have advanced
-    /// next time.
+    /// Persist `count` via `state_write`. A failed write is logged through the
+    /// SDK's `log` (the capability-free logging host fn) rather than breaking
+    /// the render — the count just won't have advanced next time.
     fn write_count(count: u64) {
-        let call = unsafe { rl_state_write(STATE_KEY.to_string(), count.to_string()) };
-        let ok = call
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            .is_some_and(|result: Value| result["ok"].as_bool().unwrap_or(false));
+        let ok = state_write(STATE_KEY, &count.to_string()).is_ok_and(|r| r.ok);
         if !ok {
-            let _ = unsafe {
-                rl_log(
-                    "warn".to_string(),
-                    format!("counter: failed to persist count {count}"),
-                )
-            };
+            log(
+                LogLevel::Warn,
+                &format!("counter: failed to persist count {count}"),
+            );
         }
     }
+
+    export_plugin!(name: "counter", render: render);
 }
 
 #[cfg(test)]

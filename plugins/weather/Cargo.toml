@@ -15,12 +15,15 @@ license = "MIT"
 [lib]
 crate-type = ["cdylib"]
 
+# The pure wttr.in JSON parse (host-tested) uses serde/serde_json.
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Guest bindings only compiled for the wasm target; host-side `cargo test`
-# builds just the pure logic below.
+# builds just the pure logic below. `extism-pdk` is needed for the exports
+# `export_plugin!` emits; the SDK supplies the typed host wrappers, wire types,
+# toggle helper, and that macro.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 extism-pdk = "1"
-rustline-abi = { path = "../../crates/rustline-abi" }
+rustline-plugin-sdk = { path = "../../crates/rustline-plugin-sdk" }

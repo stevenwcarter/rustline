@@ -38,76 +38,53 @@ pub fn render_format(format: &str, summary: &Summary, path: &str) -> String {
 #[cfg(target_arch = "wasm32")]
 mod guest {
     use super::*;
-    use extism_pdk::*;
-    use rustline_abi::{GuestRender, Segment};
-    use serde_json::Value;
+    use rustline_plugin_sdk::{GuestRender, LogLevel, Segment, export_plugin, file_read, log};
 
-    #[host_fn]
-    extern "ExtismHost" {
-        fn rl_file_read(path: String) -> String;
-        fn rl_log(level: String, msg: String) -> String;
-    }
-
-    #[plugin_fn]
-    pub fn name() -> FnResult<String> {
-        Ok("filewatch".to_string())
-    }
-
-    #[plugin_fn]
-    pub fn render(input: String) -> FnResult<Json<Vec<Segment>>> {
-        // A malformed input degrades to an empty render (never break the
-        // bar) rather than erroring.
-        let Ok(input) = serde_json::from_str::<GuestRender>(&input) else {
-            return Ok(Json(Vec::new()));
-        };
+    fn render(input: &GuestRender) -> Vec<Segment> {
         let cfg = &input.config;
         let path = cfg["path"].as_str().unwrap_or("");
         if path.is_empty() {
             // Nothing configured to watch.
-            return Ok(Json(Vec::new()));
+            return Vec::new();
         }
         let format = cfg["format"].as_str().unwrap_or("{first_line} ({lines}L)");
         let down_format = cfg["down_format"].as_str().unwrap_or("");
 
-        Ok(Json(match read_file(path) {
+        match read_file(path) {
             Some(contents) => vec![Segment::new(render_format(
                 format,
                 &summarize(&contents),
                 path,
             ))],
             None => down_segment(down_format),
-        }))
+        }
     }
 
-    /// Read `path` via `rl_file_read`. Any denial (not in `allowed_paths`),
-    /// missing file, host-call error, or malformed JSON logs why (via
-    /// `rl_log`) and returns `None` rather than erroring.
+    /// Read `path` via the SDK's `file_read`. Any denial (not in
+    /// `allowed_paths`), missing file, or host-call error logs why (via `log`)
+    /// and returns `None` rather than erroring.
     fn read_file(path: &str) -> Option<String> {
-        let call = unsafe { rl_file_read(path.to_string()) };
-        let raw = match call {
-            Ok(raw) => raw,
-            Err(error) => {
-                let _ = unsafe {
-                    rl_log(
-                        "warn".to_string(),
-                        format!("filewatch: host call failed for {path}: {error}"),
-                    )
+        match file_read(path) {
+            Ok(r) if r.ok && r.exists => Some(r.contents),
+            Ok(r) => {
+                let reason = if r.error.is_empty() {
+                    "file missing"
+                } else {
+                    r.error.as_str()
                 };
-                return None;
+                log(
+                    LogLevel::Warn,
+                    &format!("filewatch: {path} unavailable: {reason}"),
+                );
+                None
             }
-        };
-        let result: Value = serde_json::from_str(&raw).ok()?;
-        if result["ok"].as_bool().unwrap_or(false) && result["exists"].as_bool().unwrap_or(false) {
-            Some(result["contents"].as_str().unwrap_or_default().to_string())
-        } else {
-            let reason = result["error"].as_str().unwrap_or("file missing");
-            let _ = unsafe {
-                rl_log(
-                    "warn".to_string(),
-                    format!("filewatch: {path} unavailable: {reason}"),
-                )
-            };
-            None
+            Err(error) => {
+                log(
+                    LogLevel::Warn,
+                    &format!("filewatch: host call failed for {path}: {error}"),
+                );
+                None
+            }
         }
     }
 
@@ -121,6 +98,8 @@ mod guest {
             vec![Segment::new(down_format.to_string())]
         }
     }
+
+    export_plugin!(name: "filewatch", render: render);
 }
 
 #[cfg(test)]

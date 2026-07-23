@@ -14,16 +14,22 @@ edition = "2024"
 [lib]
 crate-type = ["cdylib"]
 
-[dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# This plugin's pure logic (unit-tested on the host via `cargo test`) needs no
+# dependencies by default; add serde/serde_json/etc. under `[dependencies]`
+# here if your logic needs them.
 
 # Guest bindings only compile for the wasm target; `cargo test` on the host
 # builds just the pure logic in src/lib.rs.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# `extism-pdk` supplies the exports the SDK's `export_plugin!` macro emits.
 extism-pdk = "1"
-# Point this at your rustline checkout's rustline-abi crate (adjust the
-# relative path if you scaffolded this plugin somewhere other than
-# rustline's own `plugins/` directory), or pin a released version once
-# rustline-abi is published to crates.io.
-rustline-abi = { path = "../../crates/rustline-abi" }
+# The rustline plugin SDK: typed host-capability wrappers (`http_get`,
+# `state_read`, …), the shared wire types (`GuestRender`/`WireContext`/
+# `Segment`/…), a click-toggle helper, and the `export_plugin!` macro — so this
+# plugin depends on one crate rather than hand-rolling the Extism glue.
+#
+# Point this at your rustline checkout's rustline-plugin-sdk crate (adjust the
+# relative path if you scaffolded this plugin somewhere other than rustline's
+# own `plugins/` directory), or pin a released version once it's published to
+# crates.io.
+rustline-plugin-sdk = { path = "../../crates/rustline-plugin-sdk" }

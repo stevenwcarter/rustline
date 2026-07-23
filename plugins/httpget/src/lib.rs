@@ -34,80 +34,52 @@ pub fn render_format(format: &str, snippet: &str) -> String {
 #[cfg(target_arch = "wasm32")]
 mod guest {
     use super::*;
-    use extism_pdk::*;
-    use rustline_abi::{GuestRender, Segment};
-    use serde_json::Value;
+    use rustline_plugin_sdk::{GuestRender, LogLevel, Segment, export_plugin, http_get, log};
 
-    #[host_fn]
-    extern "ExtismHost" {
-        fn rl_http_get(url: String) -> String;
-        fn rl_log(level: String, msg: String) -> String;
-    }
-
-    #[plugin_fn]
-    pub fn name() -> FnResult<String> {
-        Ok("httpget".to_string())
-    }
-
-    #[plugin_fn]
-    pub fn render(input: String) -> FnResult<Json<Vec<Segment>>> {
-        // A malformed input degrades to an empty render (never break the
-        // bar) rather than erroring.
-        let Ok(input) = serde_json::from_str::<GuestRender>(&input) else {
-            return Ok(Json(Vec::new()));
-        };
+    fn render(input: &GuestRender) -> Vec<Segment> {
         let cfg = &input.config;
         let url = cfg["url"].as_str().unwrap_or("");
         if url.is_empty() {
             // Nothing configured to fetch.
-            return Ok(Json(Vec::new()));
+            return Vec::new();
         }
         let format = cfg["format"].as_str().unwrap_or("{body}");
         let max_chars = cfg["max_chars"].as_u64().unwrap_or(40) as usize;
         let down_format = cfg["down_format"].as_str().unwrap_or("");
 
-        Ok(Json(match fetch_body(url) {
+        match fetch_body(url) {
             Some(body) => vec![Segment::new(render_format(
                 format,
                 &extract_snippet(&body, max_chars),
             ))],
             None => down_segment(down_format),
-        }))
+        }
     }
 
-    /// Plain (uncached) GET via `rl_http_get`. `ok` on the wire only means
-    /// the transport completed — a non-2xx status is still `ok`, so this
-    /// checks the status range itself (unlike `weather`'s cached path, where
-    /// the host already restricts caching to 2xx responses). Any denial
-    /// (not in `allowed_urls`), transport error, or non-2xx status logs why
-    /// (via `rl_log`) and returns `None`.
+    /// Plain (uncached) GET via the SDK's `http_get`. `ok` only means the
+    /// transport completed — a non-2xx status is still `ok`, so this checks the
+    /// status range itself (unlike `weather`'s cached path, where the host
+    /// already restricts caching to 2xx responses). Any denial (not in
+    /// `allowed_urls`), transport error, or non-2xx status logs why (via `log`)
+    /// and returns `None`.
     fn fetch_body(url: &str) -> Option<String> {
-        let call = unsafe { rl_http_get(url.to_string()) };
-        let raw = match call {
-            Ok(raw) => raw,
-            Err(error) => {
-                let _ = unsafe {
-                    rl_log(
-                        "warn".to_string(),
-                        format!("httpget: host call failed for {url}: {error}"),
-                    )
-                };
-                return None;
+        match http_get(url) {
+            Ok(r) if r.ok && (200u16..300).contains(&r.status) => Some(r.body),
+            Ok(r) => {
+                let reason = r.error.as_str();
+                log(
+                    LogLevel::Warn,
+                    &format!("httpget: {url} failed (status {}): {reason}", r.status),
+                );
+                None
             }
-        };
-        let result: Value = serde_json::from_str(&raw).ok()?;
-        let status = result["status"].as_u64().unwrap_or(0);
-        if result["ok"].as_bool().unwrap_or(false) && (200..300).contains(&status) {
-            Some(result["body"].as_str().unwrap_or_default().to_string())
-        } else {
-            let reason = result["error"].as_str().unwrap_or_default();
-            let _ = unsafe {
-                rl_log(
-                    "warn".to_string(),
-                    format!("httpget: {url} failed (status {status}): {reason}"),
-                )
-            };
-            None
+            Err(error) => {
+                log(
+                    LogLevel::Warn,
+                    &format!("httpget: host call failed for {url}: {error}"),
+                );
+                None
+            }
         }
     }
 
@@ -121,6 +93,8 @@ mod guest {
             vec![Segment::new(down_format.to_string())]
         }
     }
+
+    export_plugin!(name: "httpget", render: render);
 }
 
 #[cfg(test)]
