@@ -247,7 +247,7 @@ impl Registry {
 
         let uptime = cfg.widgets.uptime.clone();
         registry.register_described(
-            builtin_descriptor("uptime", "system uptime", true),
+            builtin_descriptor("uptime", "System uptime, humanized", true),
             Box::new(move || {
                 Box::new(Uptime {
                     format: uptime.format.clone(),

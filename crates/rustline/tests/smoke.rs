@@ -1072,6 +1072,36 @@ fn render_right_with_disk_on_real_mount_renders_usage() {
 }
 
 #[test]
+fn render_right_with_uptime_renders_humanized_reading() {
+    // `uptime` alone in a layout must render non-empty humanized text on this
+    // Linux box — exercising the full read_uptime -> Context -> widget chain
+    // against the real `/proc/uptime`, which (like the disk real-mount test
+    // above) is real and host-independent: tolerant of the actual uptime
+    // value, just asserts the segment renders.
+    let tmp = tempfile::tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    std::fs::write(
+        cfgdir.join("config.toml"),
+        "[layout]\nright = [\"uptime\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["render", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("#["), "uptime text should render: {s}");
+}
+
+#[test]
 fn plugin_add_on_unparseable_config_preserves_file() {
     // A pre-existing config with a TOML *syntax* error must abort with exit 1
     // and leave the file byte-for-byte intact — never truncate the user's whole
