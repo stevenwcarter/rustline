@@ -9,9 +9,9 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rustline_core::{Context, PluginConfig, Widget};
+use rustline_core::{Config, Context, PluginConfig, Registry, Widget, WidgetSource};
 use rustline_wasm::capability::CapabilityCtx;
-use rustline_wasm::{WasmWidget, build_plugin};
+use rustline_wasm::{WasmWidget, build_plugin, register_plugins};
 
 const WTTR_BODY: &str = r#"{"current_condition":[{"temp_F":"72","weatherCode":"113","weatherDesc":[{"value":"Sunny"}]}]}"#;
 
@@ -98,6 +98,35 @@ fn spawn_mock_once() -> String {
         // listener dropped here -> port closed
     });
     format!("http://{addr}")
+}
+
+#[test]
+fn register_plugins_records_a_plugin_sourced_descriptor() {
+    let plugin_dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/weather/target/wasm32-unknown-unknown/release/weather.wasm"
+        ),
+        plugin_dir.path().join("weather.wasm"),
+    )
+    .expect("run `just build-weather` first");
+
+    let mut reg = Registry::new();
+    register_plugins(
+        &mut reg,
+        &Config::default(),
+        plugin_dir.path(),
+        &["weather".to_string()],
+    );
+
+    let desc = reg
+        .descriptors()
+        .iter()
+        .find(|d| d.name == "weather")
+        .expect("weather plugin registered a descriptor");
+    assert_eq!(desc.source, WidgetSource::Plugin);
+    assert!(desc.configurable);
 }
 
 #[test]

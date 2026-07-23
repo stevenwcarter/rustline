@@ -20,12 +20,39 @@ pub trait Widget {
 /// of them keyed by name.
 type Factory = Box<dyn Fn() -> Box<dyn Widget> + Send + Sync>;
 
+/// Where a registered widget came from: compiled into the binary, or
+/// discovered from a WASM plugin at runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WidgetSource {
+    Builtin,
+    Plugin,
+}
+
+/// A description of a registered widget, independent of building an
+/// instance. This is the enabling abstraction for a future `widget` command
+/// that can list/describe what's available without touching `Context`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WidgetDescriptor {
+    /// The registry name (the layout/config key, or a plugin's `.wasm` stem).
+    pub name: String,
+    /// A one-line, human-readable description of what the widget shows.
+    pub summary: String,
+    /// Whether the widget carries a `[widgets.<name>]` (or plugin `options`)
+    /// config table, as opposed to always rendering the same way.
+    pub configurable: bool,
+    /// Whether this widget is compiled in or came from a discovered plugin.
+    pub source: WidgetSource,
+}
+
 /// A name-to-factory table for widgets, populated at startup from built-in
 /// and/or plugin widget constructors and consulted when resolving the
-/// widget names listed in user config.
+/// widget names listed in user config. Also keeps an ordered list of
+/// [`WidgetDescriptor`]s so callers can enumerate/describe what's registered
+/// without building an instance.
 #[derive(Default)]
 pub struct Registry {
     factories: HashMap<String, Factory>,
+    descriptors: Vec<WidgetDescriptor>,
 }
 
 impl Registry {
@@ -35,13 +62,46 @@ impl Registry {
     }
 
     /// Register a widget constructor under `name`, overwriting any existing
-    /// registration for that name.
+    /// registration for that name. Records a minimal descriptor (`summary`
+    /// equal to `name`, not configurable, [`WidgetSource::Builtin`]); use
+    /// [`Registry::register_described`] to supply a fuller one.
     pub fn register(
         &mut self,
         name: &str,
         factory: Box<dyn Fn() -> Box<dyn Widget> + Send + Sync>,
     ) {
-        self.factories.insert(name.to_string(), factory);
+        self.register_described(
+            WidgetDescriptor {
+                name: name.to_string(),
+                summary: name.to_string(),
+                configurable: false,
+                source: WidgetSource::Builtin,
+            },
+            factory,
+        );
+    }
+
+    /// Register a widget constructor along with a full [`WidgetDescriptor`],
+    /// overwriting any existing registration (factory and descriptor) for
+    /// that name.
+    pub fn register_described(
+        &mut self,
+        desc: WidgetDescriptor,
+        factory: Box<dyn Fn() -> Box<dyn Widget> + Send + Sync>,
+    ) {
+        self.factories.insert(desc.name.clone(), factory);
+        self.descriptors.retain(|d| d.name != desc.name);
+        self.descriptors.push(desc);
+    }
+
+    /// Every registered widget's descriptor, in registration order.
+    pub fn descriptors(&self) -> &[WidgetDescriptor] {
+        &self.descriptors
+    }
+
+    /// Every registered widget's name, in registration order.
+    pub fn available_names(&self) -> impl Iterator<Item = &str> {
+        self.descriptors.iter().map(|d| d.name.as_str())
     }
 
     /// Build a single widget by name, if registered.
@@ -114,6 +174,47 @@ mod tests {
     #[test]
     fn range_name_defaults_to_none() {
         assert_eq!(Fixed("x").range_name(), None);
+    }
+
+    #[test]
+    fn descriptors_list_registrations_in_order() {
+        let mut r = Registry::new();
+        r.register("a", Box::new(|| Box::new(Fixed("A"))));
+        r.register("b", Box::new(|| Box::new(Fixed("B"))));
+        let names: Vec<&str> = r.descriptors().iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+        assert_eq!(r.available_names().collect::<Vec<_>>(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn register_backcompat_minimal_descriptor() {
+        let mut r = Registry::new();
+        r.register("a", Box::new(|| Box::new(Fixed("A"))));
+        let desc = &r.descriptors()[0];
+        assert_eq!(desc.name, "a");
+        assert_eq!(desc.summary, "a");
+        assert!(!desc.configurable);
+        assert_eq!(desc.source, WidgetSource::Builtin);
+    }
+
+    #[test]
+    fn register_described_overwrites_prior_descriptor_for_same_name() {
+        let mut r = Registry::new();
+        r.register("a", Box::new(|| Box::new(Fixed("A"))));
+        r.register_described(
+            WidgetDescriptor {
+                name: "a".to_string(),
+                summary: "the real A".to_string(),
+                configurable: true,
+                source: WidgetSource::Plugin,
+            },
+            Box::new(|| Box::new(Fixed("A2"))),
+        );
+        assert_eq!(r.descriptors().len(), 1);
+        let desc = &r.descriptors()[0];
+        assert_eq!(desc.summary, "the real A");
+        assert!(desc.configurable);
+        assert_eq!(desc.source, WidgetSource::Plugin);
     }
 
     #[test]

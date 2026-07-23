@@ -16,4 +16,4 @@ pub use context::{Battery, BatteryState, Context, CpuUsage, MemInfo, NetIface, W
 pub use render::{Direction, RANGE_NAME_MAX_BYTES, Theme, render_region};
 pub use segment::{Color, Segment, Style, ThemeColors};
 pub use themes::{builtin_theme, builtin_theme_names};
-pub use widget::{Registry, Widget};
+pub use widget::{Registry, Widget, WidgetDescriptor, WidgetSource};

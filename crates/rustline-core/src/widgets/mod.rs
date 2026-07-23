@@ -34,7 +34,17 @@ pub use windows::Windows;
 pub(crate) use alert::{AlertKind, alert_over, alert_style, alert_under};
 
 use crate::Config;
-use crate::widget::Registry;
+use crate::widget::{Registry, WidgetDescriptor, WidgetSource};
+
+/// Build a minimal-boilerplate `WidgetDescriptor` for a built-in widget.
+fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDescriptor {
+    WidgetDescriptor {
+        name: name.to_string(),
+        summary: summary.to_string(),
+        configurable,
+        source: WidgetSource::Builtin,
+    }
+}
 
 impl Registry {
     /// Build a [`Registry`] pre-populated with all eleven built-in widgets,
@@ -42,12 +52,33 @@ impl Registry {
     /// `tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg`) from `cfg`.
     pub fn with_builtins(cfg: &Config) -> Registry {
         let mut registry = Registry::new();
-        registry.register("pane_id", Box::new(|| Box::new(PaneId)));
-        registry.register("hostname", Box::new(|| Box::new(Hostname)));
-        registry.register("windows", Box::new(|| Box::new(Windows)));
+        registry.register_described(
+            builtin_descriptor(
+                "pane_id",
+                "The tmux pane target triple (session:window.pane)",
+                false,
+            ),
+            Box::new(|| Box::new(PaneId)),
+        );
+        registry.register_described(
+            builtin_descriptor(
+                "hostname",
+                "The local hostname, truncated at the first dot",
+                false,
+            ),
+            Box::new(|| Box::new(Hostname)),
+        );
+        registry.register_described(
+            builtin_descriptor(
+                "windows",
+                "The tmux window list, rendered as rounded pills",
+                false,
+            ),
+            Box::new(|| Box::new(Windows)),
+        );
         let loadavg = cfg.widgets.loadavg.clone();
-        registry.register(
-            "loadavg",
+        registry.register_described(
+            builtin_descriptor("loadavg", "1/5/15-minute load average", true),
             Box::new(move || {
                 Box::new(LoadAvg {
                     format: loadavg.format.clone(),
@@ -60,8 +91,12 @@ impl Registry {
         );
 
         let datetime = cfg.widgets.datetime.clone();
-        registry.register(
-            "datetime",
+        registry.register_described(
+            builtin_descriptor(
+                "datetime",
+                "The current time, `chrono` strftime-formatted",
+                true,
+            ),
             Box::new(move || {
                 Box::new(DateTime {
                     format: datetime.format.clone(),
@@ -71,11 +106,14 @@ impl Registry {
         );
 
         let abbreviate_home = cfg.widgets.cwd.abbreviate_home;
-        registry.register("cwd", Box::new(move || Box::new(Cwd { abbreviate_home })));
+        registry.register_described(
+            builtin_descriptor("cwd", "The pane's current working directory", true),
+            Box::new(move || Box::new(Cwd { abbreviate_home })),
+        );
 
         let lan = cfg.widgets.lan_ip.clone();
-        registry.register(
-            "lan_ip",
+        registry.register_described(
+            builtin_descriptor("lan_ip", "The machine's LAN IPv4 address", true),
             Box::new(move || {
                 Box::new(LanIp {
                     format: lan.format.clone(),
@@ -87,8 +125,8 @@ impl Registry {
         );
 
         let ts = cfg.widgets.tailscale_ip.clone();
-        registry.register(
-            "tailscale_ip",
+        registry.register_described(
+            builtin_descriptor("tailscale_ip", "The machine's Tailscale IPv4 address", true),
             Box::new(move || {
                 Box::new(TailscaleIp {
                     format: ts.format.clone(),
@@ -99,8 +137,12 @@ impl Registry {
         );
 
         let battery = cfg.widgets.battery.clone();
-        registry.register(
-            "battery",
+        registry.register_described(
+            builtin_descriptor(
+                "battery",
+                "Battery percentage, charge state, and level icon",
+                true,
+            ),
             Box::new(move || {
                 Box::new(BatteryWidget {
                     format: battery.format.clone(),
@@ -113,8 +155,8 @@ impl Registry {
         );
 
         let cpu = cfg.widgets.cpu.clone();
-        registry.register(
-            "cpu",
+        registry.register_described(
+            builtin_descriptor("cpu", "CPU utilization, with an optional gauge bar", true),
             Box::new(move || {
                 Box::new(CpuWidget {
                     format: cpu.format.clone(),
@@ -128,8 +170,8 @@ impl Registry {
         );
 
         let memory = cfg.widgets.memory.clone();
-        registry.register(
-            "memory",
+        registry.register_described(
+            builtin_descriptor("memory", "Memory usage, with an optional gauge bar", true),
             Box::new(move || {
                 Box::new(MemoryWidget {
                     format: memory.format.clone(),
@@ -175,6 +217,39 @@ mod tests {
             toggled: Default::default(),
             colors: Default::default(),
         }
+    }
+
+    #[test]
+    fn with_builtins_descriptors_cover_all_eleven_with_correct_configurable_flags() {
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        let names: Vec<&str> = reg.available_names().collect();
+        for expected in [
+            "pane_id",
+            "hostname",
+            "windows",
+            "loadavg",
+            "datetime",
+            "cwd",
+            "lan_ip",
+            "tailscale_ip",
+            "battery",
+            "cpu",
+            "memory",
+        ] {
+            assert!(names.contains(&expected), "missing descriptor: {expected}");
+        }
+        assert_eq!(names.len(), 11);
+
+        let configurable = |name: &str| {
+            reg.descriptors()
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.configurable)
+        };
+        assert_eq!(configurable("cpu"), Some(true));
+        assert_eq!(configurable("datetime"), Some(true));
+        assert_eq!(configurable("pane_id"), Some(false));
     }
 
     #[test]

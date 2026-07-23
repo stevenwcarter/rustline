@@ -16,7 +16,7 @@ pub mod state;
 use std::path::Path;
 use std::sync::Arc;
 
-use rustline_core::{Config, RANGE_NAME_MAX_BYTES, Registry};
+use rustline_core::{Config, RANGE_NAME_MAX_BYTES, Registry, WidgetDescriptor, WidgetSource};
 
 pub use host::{WasmWidget, build_plugin};
 pub use paths::{data_root, default_plugin_dir, expand_tilde, state_root};
@@ -76,6 +76,14 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
         }
         let widget = host::WasmWidget::new(plugin, options, stem);
         let shared = Arc::new(widget);
-        reg.register(stem, Box::new(move || Box::new((*shared).clone())));
+        reg.register_described(
+            WidgetDescriptor {
+                name: stem.to_string(),
+                summary: "WASM plugin".to_string(),
+                configurable: true,
+                source: WidgetSource::Plugin,
+            },
+            Box::new(move || Box::new((*shared).clone())),
+        );
     }
 }
