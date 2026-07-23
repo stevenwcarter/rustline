@@ -317,10 +317,18 @@ these shared types, not a design shortcut. Keep them serializable.
   layered on top of the same helpers: `picker_entries` builds the ordered,
   name-deduped `PickEntry { name, active, from_file }` list (built-ins first,
   then themes-dir-only stems), `parse_preview_input`/`parse_set_input` are
-  pure parsers for the two prompt loops, and `run_picker` (reader/writer-
+  pure parsers for the two prompt loops (the preview loop also accepts
+  `t`/`toggle` → `PreviewCmd::ToggleAlerts`), and `run_picker` (reader/writer-
   generic over `BufRead`/`Write`, so it's unit-tested with byte-slice
   reader/writer — no real TTY needed) drives preview-then-set and returns the
-  chosen name or `None` to keep the current theme; `pick` itself requires a
+  chosen name or `None` to keep the current theme. Its previews default to a
+  **healthy** synthetic bar (palette only, no alert badges — what a normal
+  status line looks like); `t` toggles the warning/error alert colors on to
+  sample a theme's semantic colors. The healthy-vs-pegged synthetic readings
+  are chosen by a `show_alerts` bool threaded through
+  `sample_context`/`preview_theme_ansi`/`preview_named` (`theme show` and the
+  `init` wizard's one-shot preview pass `true`, keeping their alert-badge
+  demo). `pick` itself requires a
   TTY (`stdin().is_terminal()`; a non-interactive invocation prints a hint
   toward `theme show`/`theme use` and exits non-zero, writing nothing) and,
   on a choice, reuses `use_theme` for the actual config write.
@@ -429,8 +437,10 @@ A global `-v`/`--verbose` (repeatable) raises the **file** log level:
   themes-dir files tagged `(custom)`), preview any by number (or `a`/`all` for
   every one), then prompt to set one by name or number (blank keeps the
   current theme), writing `[theme].base` via the same path as `theme use`.
-  Requires a terminal — a non-TTY invocation prints a hint toward `theme
-  show`/`theme use` and exits non-zero without writing.
+  Previews default to a healthy bar (palette only); `t` toggles the
+  warning/error alert-badge colors on/off. Requires a terminal — a non-TTY
+  invocation prints a hint toward `theme show`/`theme use` and exits non-zero
+  without writing.
 - `rustline click --range=<name> [--button=left]` — flip `<name>`'s membership
   in the global toggle state file; invoked by the `init`-emitted tmux mouse
   binding. Only `left` acts today; other button values are reserved for a

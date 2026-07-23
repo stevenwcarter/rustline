@@ -144,9 +144,18 @@ fn list(config_path: &Path, themes_dir: &Path) {
     }
 }
 
-/// A representative synthetic Context that trips warning+error badges so a
-/// preview exercises the semantic colors. `colors` come from `theme`.
-fn sample_context(theme: &Theme) -> Context {
+/// A representative synthetic Context for previews. When `show_alerts` is set,
+/// cpu/memory/battery are pegged past their thresholds so the preview trips the
+/// warning+error badges and exercises the theme's semantic colors; otherwise
+/// they carry healthy readings, so the preview shows only the palette — what a
+/// normal bar actually looks like. `colors` come from `theme`.
+fn sample_context(theme: &Theme, show_alerts: bool) -> Context {
+    let gib = 1024u64.pow(3);
+    let (cpu_pct, mem_used_gib, mem_avail_gib, batt_pct) = if show_alerts {
+        (96.0, 14, 2, 15)
+    } else {
+        (12.0, 6, 10, 82)
+    };
     Context {
         session_name: "0".into(),
         window_index: "1".into(),
@@ -159,14 +168,14 @@ fn sample_context(theme: &Theme) -> Context {
         window: None,
         interfaces: Vec::new(),
         battery: Some(Battery {
-            percent: 15,
+            percent: batt_pct,
             state: BatteryState::Discharging,
         }),
-        cpu: Some(CpuUsage { percent: 96.0 }),
+        cpu: Some(CpuUsage { percent: cpu_pct }),
         memory: Some(MemInfo {
-            total_bytes: 16 * 1024u64.pow(3),
-            used_bytes: 14 * 1024u64.pow(3),
-            available_bytes: 2 * 1024u64.pow(3),
+            total_bytes: 16 * gib,
+            used_bytes: mem_used_gib * gib,
+            available_bytes: mem_avail_gib * gib,
         }),
         os: "linux".into(),
         arch: "x86_64".into(),
@@ -178,11 +187,12 @@ fn sample_context(theme: &Theme) -> Context {
 /// Render a labelled, ANSI-coloured preview of `theme`. Uses the default left
 /// layout plus an explicit right list that includes `battery` (not in the
 /// default layout) so its alert badge shows, and both an active and inactive
-/// window pill.
-fn preview_theme_ansi(theme: &Theme) -> String {
+/// window pill. `show_alerts` picks the pegged-vs-healthy synthetic readings
+/// (see [`sample_context`]).
+fn preview_theme_ansi(theme: &Theme, show_alerts: bool) -> String {
     let cfg = Config::default();
     let reg = Registry::with_builtins(&cfg);
-    let mut ctx = sample_context(theme);
+    let mut ctx = sample_context(theme, show_alerts);
     let right = vec![
         "cwd".to_string(),
         "cpu".to_string(),
@@ -218,23 +228,24 @@ fn preview_theme_ansi(theme: &Theme) -> String {
 
 /// Render a labelled, ANSI-coloured preview of the built-in theme `name`, or
 /// `None` if unknown.
-fn preview_ansi(name: &str) -> Option<String> {
-    Some(preview_theme_ansi(&builtin_theme(name)?))
+fn preview_ansi(name: &str, show_alerts: bool) -> Option<String> {
+    Some(preview_theme_ansi(&builtin_theme(name)?, show_alerts))
 }
 
 /// Resolve and ANSI-render a preview for theme `name` (themes-dir file first,
-/// then built-in). `None` if unknown or the file is invalid.
-pub(crate) fn preview_named(name: &str, themes_dir: &Path) -> Option<String> {
+/// then built-in). `None` if unknown or the file is invalid. `show_alerts`
+/// selects the pegged-vs-healthy synthetic readings (see [`sample_context`]).
+pub(crate) fn preview_named(name: &str, themes_dir: &Path, show_alerts: bool) -> Option<String> {
     let file = themes_dir.join(format!("{name}.toml"));
     if let Ok(text) = std::fs::read_to_string(&file) {
         if let Ok(tc) = toml::from_str::<ThemeConfig>(&text) {
             let mut t = Theme::default();
             tc.apply_to(&mut t);
-            return Some(preview_theme_ansi(&t));
+            return Some(preview_theme_ansi(&t, show_alerts));
         }
         return None;
     }
-    preview_ansi(name)
+    preview_ansi(name, show_alerts)
 }
 
 /// Preview theme `name`: a themes-dir `<name>.toml` file shadows a same-named
@@ -247,7 +258,7 @@ fn show(name: &str, themes_dir: &Path) {
             Ok(tc) => {
                 let mut t = Theme::default();
                 tc.apply_to(&mut t);
-                println!("{}", preview_theme_ansi(&t));
+                println!("{}", preview_theme_ansi(&t, true));
                 return;
             }
             Err(e) => {
@@ -256,7 +267,7 @@ fn show(name: &str, themes_dir: &Path) {
             }
         }
     }
-    match preview_ansi(name) {
+    match preview_ansi(name, true) {
         Some(s) => println!("{s}"),
         None => {
             eprintln!(
@@ -441,11 +452,13 @@ enum PreviewCmd {
     Done,
     All,
     Preview(usize),
+    ToggleAlerts,
     Invalid,
 }
 
 /// Parse a preview-loop answer: blank → `Done`; `a`/`all` (case-insensitive) →
-/// `All`; a number in `1..=n` → `Preview(k-1)`; anything else → `Invalid`.
+/// `All`; `t`/`toggle` (case-insensitive) → `ToggleAlerts`; a number in
+/// `1..=n` → `Preview(k-1)`; anything else → `Invalid`.
 fn parse_preview_input(input: &str, n: usize) -> PreviewCmd {
     let t = input.trim();
     if t.is_empty() {
@@ -454,6 +467,9 @@ fn parse_preview_input(input: &str, n: usize) -> PreviewCmd {
     let lower = t.to_ascii_lowercase();
     if lower == "a" || lower == "all" {
         return PreviewCmd::All;
+    }
+    if lower == "t" || lower == "toggle" {
+        return PreviewCmd::ToggleAlerts;
     }
     match t.parse::<usize>() {
         Ok(k) if (1..=n).contains(&k) => PreviewCmd::Preview(k - 1),
@@ -509,15 +525,22 @@ fn run_picker<R: BufRead, W: Write>(
         let tag = if e.from_file { "  (custom)" } else { "" };
         let _ = writeln!(writer, "  {}) {}{mark}{tag}", i + 1, e.name);
     }
+    // Previews default to a healthy bar (palette only, no alert badges) so they
+    // match what a normal status line looks like; `t` toggles the warning/error
+    // alert colors on to sample the theme's semantic colors.
+    let mut show_alerts = false;
     loop {
-        let _ = write!(writer, "Preview # (number, a=all, enter=done): ");
+        let _ = write!(
+            writer,
+            "Preview # (number, a=all, t=toggle alerts, enter=done): "
+        );
         let _ = writer.flush();
         match parse_preview_input(&read_line(reader), entries.len()) {
             PreviewCmd::Done => break,
             PreviewCmd::All => {
                 for e in entries {
                     let _ = writeln!(writer, "\n== {} ==", e.name);
-                    if let Some(p) = preview_named(&e.name, themes_dir) {
+                    if let Some(p) = preview_named(&e.name, themes_dir, show_alerts) {
                         let _ = writeln!(writer, "{p}");
                     }
                 }
@@ -525,14 +548,27 @@ fn run_picker<R: BufRead, W: Write>(
             PreviewCmd::Preview(idx) => {
                 let name = &entries[idx].name;
                 let _ = writeln!(writer, "\n== {name} ==");
-                if let Some(p) = preview_named(name, themes_dir) {
+                if let Some(p) = preview_named(name, themes_dir, show_alerts) {
                     let _ = writeln!(writer, "{p}");
                 }
+            }
+            PreviewCmd::ToggleAlerts => {
+                show_alerts = !show_alerts;
+                let state = if show_alerts { "on" } else { "off" };
+                let _ = writeln!(
+                    writer,
+                    "alert badges: {state} (previews now show {})",
+                    if show_alerts {
+                        "warning/error colors"
+                    } else {
+                        "the palette only"
+                    }
+                );
             }
             PreviewCmd::Invalid => {
                 let _ = writeln!(
                     writer,
-                    "enter a number 1-{}, 'a' for all, or blank to finish",
+                    "enter a number 1-{}, 'a' for all, 't' to toggle alerts, or blank to finish",
                     entries.len()
                 );
             }
@@ -638,10 +674,85 @@ mod tests {
 
     #[test]
     fn preview_ansi_is_nonempty_and_colored_for_builtin() {
-        let out = super::preview_ansi("nord").expect("known theme");
+        let out = super::preview_ansi("nord", true).expect("known theme");
         assert!(out.contains('\u{1b}'), "contains ANSI escape: {out:?}");
         assert!(out.contains("RIGHT"), "labels the right region");
-        assert!(super::preview_ansi("nope").is_none());
+        assert!(super::preview_ansi("nope", true).is_none());
+    }
+
+    #[test]
+    fn preview_show_alerts_gates_the_warning_error_badge_colors() {
+        // The default theme's error/warning semantics are colour196/colour214;
+        // the ANSI transcoder emits an indexed background as `48;5;<n>`. With
+        // alerts on, the pegged synthetic readings trip both badges; with alerts
+        // off (the picker default), the healthy readings show only the palette,
+        // so neither badge color appears.
+        let with = super::preview_theme_ansi(&Theme::default(), true);
+        assert!(
+            with.contains("48;5;196"),
+            "error badge bg present: {with:?}"
+        );
+        assert!(
+            with.contains("48;5;214"),
+            "warning badge bg present: {with:?}"
+        );
+
+        let without = super::preview_theme_ansi(&Theme::default(), false);
+        assert!(
+            !without.contains("48;5;196"),
+            "no error badge when alerts off: {without:?}"
+        );
+        assert!(
+            !without.contains("48;5;214"),
+            "no warning badge when alerts off: {without:?}"
+        );
+    }
+
+    #[test]
+    fn parse_preview_input_recognizes_toggle() {
+        assert_eq!(parse_preview_input("t", 5), PreviewCmd::ToggleAlerts);
+        assert_eq!(parse_preview_input("  T ", 5), PreviewCmd::ToggleAlerts);
+        assert_eq!(parse_preview_input("toggle", 5), PreviewCmd::ToggleAlerts);
+        // Still distinct from the other commands.
+        assert_eq!(parse_preview_input("a", 5), PreviewCmd::All);
+        assert_eq!(parse_preview_input("2", 5), PreviewCmd::Preview(1));
+        assert_eq!(parse_preview_input("", 5), PreviewCmd::Done);
+    }
+
+    #[test]
+    fn run_picker_toggle_enables_badge_colors_in_previews() {
+        // Preview theme #1 (default) with alerts off (default) → no badge color;
+        // then toggle on and preview #1 again → badge color appears; then keep.
+        let entries = vec![PickEntry {
+            name: "default".to_string(),
+            active: true,
+            from_file: false,
+        }];
+        let dir = std::path::Path::new("/nonexistent-themes-dir");
+        let input = b"1\nt\n1\n\n\n";
+        let mut reader = &input[..];
+        let mut out: Vec<u8> = Vec::new();
+        let choice = run_picker(&entries, dir, &mut reader, &mut out, "default");
+        assert_eq!(choice, None, "blank set-step keeps current theme");
+        let text = String::from_utf8(out).unwrap();
+        // The toggle status line is shown.
+        assert!(
+            text.contains("alert badges: on"),
+            "toggle prints its new state: {text:?}"
+        );
+        // Split on the toggle status line: the badge color must be absent before
+        // it and present after it.
+        let (before, after) = text
+            .split_once("alert badges: on")
+            .expect("toggle status line present");
+        assert!(
+            !before.contains("48;5;196"),
+            "no error badge before toggle: {before:?}"
+        );
+        assert!(
+            after.contains("48;5;196"),
+            "error badge appears after toggle: {after:?}"
+        );
     }
 
     #[test]
