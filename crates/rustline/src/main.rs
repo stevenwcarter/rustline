@@ -3,6 +3,7 @@ mod battery;
 mod bench;
 mod build_context;
 mod cli;
+mod config_cmd;
 mod cpu;
 mod disk;
 mod doctor;
@@ -199,6 +200,7 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Command::Config(cmd) => config_cmd::run(cmd, &config_path()),
         Command::Plugin(cmd) => plugin_cmd::run(cmd, &config_path()),
         Command::Theme(cmd) => theme_cmd::run(cmd, &config_path(), &themes_dir()),
         Command::Click(args) => run_click(&args),

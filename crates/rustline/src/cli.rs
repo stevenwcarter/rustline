@@ -34,6 +34,10 @@ pub enum Command {
     Init(InitArgs),
     /// Print the effective config as TOML.
     PrintConfig,
+    /// Print the config file's path, open it in `$EDITOR`, or strictly
+    /// validate it.
+    #[command(subcommand)]
+    Config(ConfigCmd),
     /// Manage plugins and their capability allowlists.
     #[command(subcommand)]
     Plugin(PluginCmd),
@@ -109,6 +113,21 @@ pub enum ThemeCmd {
         #[arg(long)]
         edit: bool,
     },
+}
+
+/// Manage the config file: print its resolved path, open it in `$EDITOR`, or
+/// strictly validate it.
+#[derive(Subcommand)]
+pub enum ConfigCmd {
+    /// Print the resolved config file path.
+    Path,
+    /// Open the config file in `$EDITOR` (needs a TTY); creates it from the
+    /// starter template first if it doesn't exist yet.
+    Edit,
+    /// Strictly parse the config file and report any error with its location,
+    /// unlike the total `Config::load` (which silently falls back to
+    /// defaults). A missing file is not an error.
+    Validate,
 }
 
 /// Manage discovered plugins and their capability allowlists.

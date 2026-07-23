@@ -14,8 +14,9 @@ use toml_edit::{Array, DocumentMut, Item, Table, value};
 use crate::cli::InitArgs;
 use crate::tmux_conf::{self, InitBlockOpts};
 
-/// The recommended starter config, embedded at build time.
-const STARTER_TEMPLATE: &str = include_str!("../assets/starter-config.toml");
+/// The recommended starter config, embedded at build time. Also reused by
+/// `config_cmd::edit` to seed a config file that doesn't exist yet.
+pub(crate) const STARTER_TEMPLATE: &str = include_str!("../assets/starter-config.toml");
 
 /// A datetime preset the wizard offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1329,6 +1329,147 @@ fn unwritable_log_dir_degrades_to_stderr_only() {
 }
 
 #[test]
+fn config_path_prints_resolved_path() {
+    let tmp = tempdir().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["config", "path"]);
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let expected = tmp.path().join("cfg").join("rustline").join("config.toml");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(s.trim(), expected.display().to_string());
+}
+
+#[test]
+fn config_validate_missing_file_is_ok() {
+    // Config::load treats an absent file as "use defaults", never an error;
+    // validate agrees rather than turning absence into a false alarm.
+    let tmp = tempdir().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["config", "validate"]);
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "missing file is not an error; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("using defaults"), "explains the outcome: {s}");
+}
+
+#[test]
+fn config_validate_good_config_exits_ok() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("cfg").join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    fs::write(
+        cfgdir.join("config.toml"),
+        "[layout]\nright = [\"datetime\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["config", "validate"]);
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "good config validates ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("ok"), "prints ok: {s}");
+}
+
+#[test]
+fn config_validate_malformed_config_exits_nonzero() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("cfg").join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    fs::write(
+        cfgdir.join("config.toml"),
+        "this is = = not valid toml [[[\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["config", "validate"]);
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    let out = cmd.output().unwrap();
+    assert!(
+        !out.status.success(),
+        "malformed config must fail validation"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid config"),
+        "reports the parse error: {stderr}"
+    );
+}
+
+#[test]
+fn config_edit_creates_starter_when_missing_and_hints_without_editor() {
+    // No TTY under Command and $EDITOR unset: must create the file from the
+    // starter template and print a hint, never attempt to spawn anything
+    // (which would hang this test waiting on a real editor).
+    let tmp = tempdir().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["config", "edit"]);
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+        .env_remove("EDITOR");
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cfg_path = tmp.path().join("cfg").join("rustline").join("config.toml");
+    assert!(cfg_path.is_file(), "starter config created");
+    let text = fs::read_to_string(&cfg_path).unwrap();
+    assert!(!text.is_empty(), "starter template is non-empty");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("set $EDITOR"), "hints to set $EDITOR: {s}");
+}
+
+#[test]
+fn config_edit_does_not_recreate_existing_file() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("cfg").join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg_path = cfgdir.join("config.toml");
+    let original = "[widgets.cpu]\nformat = \"USER {percent}%\"\n";
+    fs::write(&cfg_path, original).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["config", "edit"]);
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+        .env_remove("EDITOR");
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&cfg_path).unwrap(),
+        original,
+        "an existing config must not be overwritten by `config edit`"
+    );
+}
+
+#[test]
 fn doctor_runs_and_prints_resolved_paths() {
     // Host-dependent (tmux may or may not be installed, running, or have
     // mouse mode on wherever CI runs this), so this only checks that the
