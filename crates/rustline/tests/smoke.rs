@@ -454,6 +454,181 @@ fn init_non_tty_without_flags_errors() {
 }
 
 #[test]
+fn init_uninstall_removes_block_and_backs_up() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let run = |args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+        cmd.arg("init").args(args);
+        cmd.env("HOME", &home)
+            .env("XDG_DATA_HOME", tmp.path().join("data"))
+            .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+            .env_remove("RUST_LOG");
+        cmd.output().unwrap()
+    };
+    // Seed a real tmux.conf via --defaults, then wrap it with user lines on
+    // both sides.
+    let out = run(&["--defaults"]);
+    assert!(out.status.success(), "seed init --defaults ok: {out:?}");
+    let tmux_path = home.join(".tmux.conf");
+    let seeded = fs::read_to_string(&tmux_path).expect("seeded tmux.conf");
+    let wrapped = format!("# my own line\n{seeded}# trailing user line\n");
+    fs::write(&tmux_path, &wrapped).unwrap();
+    let cfg_path = tmp.path().join("cfg").join("rustline").join("config.toml");
+    let cfg_before = fs::read_to_string(&cfg_path).expect("seeded config.toml");
+
+    let out = run(&["--uninstall"]);
+    assert!(
+        out.status.success(),
+        "uninstall exits ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("tmux source-file"),
+        "prints the reload hint: {stderr}"
+    );
+
+    let bak_path = Path::new(&format!("{}.rustline.bak", tmux_path.display())).to_path_buf();
+    let bak = fs::read_to_string(&bak_path).expect("backup written");
+    assert_eq!(bak, wrapped, "backup matches pre-uninstall content exactly");
+
+    let after = fs::read_to_string(&tmux_path).unwrap();
+    assert!(
+        !after.contains("# >>> rustline >>>"),
+        "block start removed: {after}"
+    );
+    assert!(
+        !after.contains("# <<< rustline <<<"),
+        "block end removed: {after}"
+    );
+    assert!(
+        after.contains("# my own line"),
+        "leading line kept: {after}"
+    );
+    assert!(
+        after.contains("# trailing user line"),
+        "trailing line kept: {after}"
+    );
+
+    let cfg_after = fs::read_to_string(&cfg_path).unwrap();
+    assert_eq!(
+        cfg_after, cfg_before,
+        "config.toml must be byte-for-byte unchanged by --uninstall"
+    );
+}
+
+#[test]
+fn init_uninstall_with_no_block_is_a_no_op() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let tmux_path = home.join(".tmux.conf");
+    let original = "set -g mouse on\nset -g status-interval 5\n";
+    fs::write(&tmux_path, original).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.arg("init").arg("--uninstall");
+    cmd.env("HOME", &home)
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+        .env_remove("RUST_LOG");
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "no-op still exits ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("nothing to uninstall"),
+        "explains the no-op: {stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(&tmux_path).unwrap(),
+        original,
+        "tmux.conf left byte-for-byte unchanged"
+    );
+    assert!(
+        !Path::new(&format!("{}.rustline.bak", tmux_path.display())).exists(),
+        "no backup written when nothing was removed"
+    );
+}
+
+#[test]
+fn init_uninstall_missing_tmux_conf_is_a_no_op() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap(); // no .tmux.conf created
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.arg("init").arg("--uninstall");
+    cmd.env("HOME", &home)
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+        .env_remove("RUST_LOG");
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "no-op still exits ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("nothing to uninstall"),
+        "explains the no-op: {stderr}"
+    );
+    let tmux_path = home.join(".tmux.conf");
+    assert!(!tmux_path.exists(), "no tmux.conf created");
+    assert!(
+        !Path::new(&format!("{}.rustline.bak", tmux_path.display())).exists(),
+        "no backup created"
+    );
+}
+
+#[test]
+fn init_uninstall_and_print_together_print_wins() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let run = |args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+        cmd.arg("init").args(args);
+        cmd.env("HOME", &home)
+            .env("XDG_DATA_HOME", tmp.path().join("data"))
+            .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+            .env_remove("RUST_LOG");
+        cmd.output().unwrap()
+    };
+    // Seed a tmux.conf that has the block.
+    let out = run(&["--defaults"]);
+    assert!(out.status.success(), "seed init --defaults ok: {out:?}");
+    let tmux_path = home.join(".tmux.conf");
+    let seeded = fs::read_to_string(&tmux_path).expect("seeded tmux.conf");
+
+    let out = run(&["--uninstall", "--print"]);
+    assert!(
+        out.status.success(),
+        "print wins, exits ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("#('"), "shell-quotes the binary path: {s}");
+    assert!(s.contains("' render left"), "prints the raw block: {s}");
+
+    let after = fs::read_to_string(&tmux_path).unwrap();
+    assert_eq!(
+        after, seeded,
+        "--print short-circuits before --uninstall is considered; file untouched"
+    );
+    assert!(
+        !Path::new(&format!("{}.rustline.bak", tmux_path.display())).exists(),
+        "no backup written: --print never touches disk"
+    );
+}
+
+#[test]
 fn render_right_with_missing_plugin_degrades_gracefully() {
     // A layout naming a plugin with no .wasm present must not crash: the bar
     // still renders the built-in widgets and exits 0.

@@ -175,6 +175,18 @@ pub fn upsert_tmux_block(existing: &str, block: &str) -> String {
     }
 }
 
+/// Strip the rustline-managed block from an existing `~/.tmux.conf`, leaving
+/// the surrounding text byte-identical (whatever its whitespace). A no-op —
+/// returns `existing` unchanged — when no complete region is present, so it's
+/// safe to call speculatively. Idempotent:
+/// `remove(remove(x)) == remove(x)`.
+pub fn remove_tmux_block(existing: &str) -> String {
+    match find_region(existing) {
+        Some((before, after)) => format!("{before}{after}"),
+        None => existing.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,5 +464,44 @@ mod tests {
         let once = upsert_tmux_block("user before\n", "BLOCK");
         let twice = upsert_tmux_block(&once, "BLOCK");
         assert_eq!(once, twice, "re-running with same block is a no-op");
+    }
+
+    #[test]
+    fn remove_strips_region_leaves_surroundings_byte_identical() {
+        let input = format!("before line\n{TMUX_BEGIN}\nBLOCK\n{TMUX_END}\nafter line\n");
+        assert_eq!(remove_tmux_block(&input), "before line\nafter line\n");
+    }
+
+    #[test]
+    fn remove_is_a_no_op_when_no_block() {
+        let input = "just user content\nno markers here\n";
+        let once = remove_tmux_block(input);
+        assert_eq!(once, input, "unchanged when no block is present");
+        let twice = remove_tmux_block(&once);
+        assert_eq!(twice, once, "idempotent: a second call changes nothing");
+    }
+
+    #[test]
+    fn remove_round_trips_upsert_first_insert_exact() {
+        // upsert's first-insert path normalizes prior content to exactly one
+        // blank line before the block, so starting from that already-
+        // normalized shape means remove's output matches the original bytes
+        // exactly. An input with a *different* trailing-whitespace shape
+        // round-trips to the equivalent-but-reformatted shape, not
+        // necessarily the original bytes -- that's upsert's documented
+        // normalization, not a bug in `remove`.
+        let original = "user before\n\n";
+        let inserted = upsert_tmux_block(original, "BLOCK");
+        assert_eq!(remove_tmux_block(&inserted), original);
+    }
+
+    #[test]
+    fn remove_round_trips_via_replace_path_for_any_input() {
+        // The replace path (a block already present) never touches
+        // surrounding whitespace at all, so this round-trip is exact for
+        // *any* input shape, regardless of which block content was inside.
+        let first = upsert_tmux_block("user before\n", "OLD");
+        let second = upsert_tmux_block(&first, "NEW");
+        assert_eq!(remove_tmux_block(&second), remove_tmux_block(&first));
     }
 }

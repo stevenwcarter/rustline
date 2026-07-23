@@ -29,7 +29,8 @@ pub enum Command {
     #[command(subcommand)]
     Render(Render),
     /// Onboarding wizard: write config.toml + a tmux marker-block. `--defaults`
-    /// runs non-interactively; `--print` emits the raw tmux block (legacy).
+    /// runs non-interactively; `--print` emits the raw tmux block (legacy);
+    /// `--uninstall` removes the managed tmux block instead.
     Init(InitArgs),
     /// Print the effective config as TOML.
     PrintConfig,
@@ -70,6 +71,13 @@ pub struct InitArgs {
     /// precedence if both are given.
     #[arg(long)]
     pub dry_run: bool,
+    /// Remove the rustline-managed tmux marker-block from `~/.tmux.conf`
+    /// (backing it up first) and print the reload command; touches nothing
+    /// else — `config.toml` is left alone — and needs no TTY. Checked before
+    /// `--defaults`/the interactive wizard; `--print` still wins if both are
+    /// given (see `init::run`).
+    #[arg(long)]
+    pub uninstall: bool,
     /// Override the binary path baked into the tmux block's `#(...)` calls
     /// (default: the running binary's own resolved absolute path via
     /// `std::env::current_exe()`).

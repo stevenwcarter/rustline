@@ -230,12 +230,14 @@ pub fn defaults() -> InitAnswers {
 /// one-line block, write nothing) using the caller's already-resolved
 /// `current_theme` (`[theme].base` plus any inline `[theme]` overrides), so
 /// its `status-style` colors stay byte-identical to today's `rustline init`.
-/// Else gather answers (`--defaults` or the interactive prompt) the same way
-/// a real run would. `--dry-run` then previews both artifacts and writes
-/// nothing (see [`preview`]); otherwise `apply` writes both files. A
-/// non-interactive invocation (stdin not a TTY) without `--defaults` errors
-/// rather than writing/previewing silently, whether or not `--dry-run` was
-/// also given.
+/// Next, `--uninstall` is checked: it's its own mode, independent of
+/// `--defaults`/`--dry-run` (no `InitAnswers` needed), and never touches
+/// `config.toml` or requires a TTY (see [`uninstall`]). Otherwise, gather
+/// answers (`--defaults` or the interactive prompt) the same way a real run
+/// would. `--dry-run` then previews both artifacts and writes nothing (see
+/// [`preview`]); otherwise `apply` writes both files. A non-interactive
+/// invocation (stdin not a TTY) without `--defaults` errors rather than
+/// writing/previewing silently, whether or not `--dry-run` was also given.
 ///
 /// `binary` is the resolved absolute path substituted into the tmux block's
 /// `#(...)` calls in place of a bare `rustline` (see `crate::resolve_binary`);
@@ -262,6 +264,10 @@ pub fn run(
                 binary,
             })
         );
+        return;
+    }
+    if args.uninstall {
+        uninstall(tmux_conf_path);
         return;
     }
     let answers = if args.defaults {
@@ -341,6 +347,56 @@ fn apply(a: &InitAnswers, config_path: &Path, tmux_conf_path: &Path, binary: &st
     eprintln!(
         "Updated {}. Reload tmux with:  tmux source-file {}",
         tmux_conf_path.display(),
+        tmux_conf_path.display()
+    );
+}
+
+/// `init --uninstall`'s entry point: strip the rustline-managed marker block
+/// from `tmux_conf_path`, backing the file up to `<path>.rustline.bak` first,
+/// then print the tmux reload command. Never touches `config.toml`. If the
+/// file doesn't exist, or exists but has no managed block, prints a
+/// "nothing to uninstall" note and writes nothing at all — no file, no
+/// backup. A present-but-unreadable file (e.g. non-UTF8 contents) aborts
+/// with a non-zero exit rather than risking clobbering it, mirroring
+/// `apply`'s own read-failure guard.
+fn uninstall(tmux_conf_path: &Path) {
+    let existing = match fs::read_to_string(tmux_conf_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "nothing to uninstall: {} not found",
+                tmux_conf_path.display()
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!("failed to read {}: {e}", tmux_conf_path.display());
+            std::process::exit(1);
+        }
+    };
+    let stripped = tmux_conf::remove_tmux_block(&existing);
+    if stripped == existing {
+        eprintln!(
+            "nothing to uninstall: no rustline block found in {}",
+            tmux_conf_path.display()
+        );
+        return;
+    }
+    let mut bak = tmux_conf_path.as_os_str().to_owned();
+    bak.push(".rustline.bak");
+    let bak = PathBuf::from(bak);
+    if let Err(e) = fs::write(&bak, &existing) {
+        eprintln!("failed to back up {}: {e}", tmux_conf_path.display());
+        std::process::exit(1);
+    }
+    if let Err(e) = fs::write(tmux_conf_path, stripped) {
+        eprintln!("failed to write {}: {e}", tmux_conf_path.display());
+        std::process::exit(1);
+    }
+    eprintln!(
+        "Removed the rustline block from {} (backup: {}). Reload tmux with:  tmux source-file {}",
+        tmux_conf_path.display(),
+        bak.display(),
         tmux_conf_path.display()
     );
 }
