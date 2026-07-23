@@ -232,12 +232,17 @@ pub fn defaults() -> InitAnswers {
 /// Else gather answers (`--defaults` or the interactive prompt), then write
 /// both files. A non-interactive invocation (stdin not a TTY) without a flag
 /// errors rather than writing silently.
+///
+/// `binary` is the resolved absolute path substituted into the tmux block's
+/// `#(...)` calls in place of a bare `rustline` (see `crate::resolve_binary`);
+/// `--print` uses the same resolved value.
 pub fn run(
     args: &InitArgs,
     config_path: &Path,
     themes_dir: &Path,
     tmux_conf_path: &Path,
     current_theme: &rustline_core::Theme,
+    binary: &str,
 ) {
     if args.print {
         let bar_bg = current_theme.bar_bg.to_tmux();
@@ -250,6 +255,7 @@ pub fn run(
                 two_line: false,
                 mouse: false,
                 interval: 1,
+                binary,
             })
         );
         return;
@@ -266,7 +272,7 @@ pub fn run(
         );
         std::process::exit(2);
     };
-    apply(&answers, config_path, tmux_conf_path);
+    apply(&answers, config_path, tmux_conf_path, binary);
 }
 
 /// Write `config.toml` (non-destructive) and upsert the tmux block, backing up
@@ -274,7 +280,7 @@ pub fn run(
 /// but unreadable `tmux_conf_path` (e.g. non-UTF8 contents) aborts rather than
 /// collapsing the read error to empty, which would silently skip the backup
 /// and overwrite the file the caller couldn't safely read.
-fn apply(a: &InitAnswers, config_path: &Path, tmux_conf_path: &Path) {
+fn apply(a: &InitAnswers, config_path: &Path, tmux_conf_path: &Path, binary: &str) {
     match write_config(a, config_path) {
         Ok(bak) => {
             eprint!("Wrote {}", config_path.display());
@@ -298,6 +304,7 @@ fn apply(a: &InitAnswers, config_path: &Path, tmux_conf_path: &Path) {
         two_line: a.two_line,
         mouse: a.mouse,
         interval: a.interval,
+        binary,
     });
     let existing = match fs::read_to_string(tmux_conf_path) {
         Ok(s) => s,

@@ -111,7 +111,10 @@ fn init_print_emits_block_and_writes_nothing() {
     cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
     let out = cmd.output().unwrap();
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("#(rustline render left"), "prints block: {s}");
+    // The binary path is the test binary's own resolved `current_exe()`, so
+    // assert the shape (shell-quoted call) rather than an exact path.
+    assert!(s.contains("#('"), "shell-quotes the binary path: {s}");
+    assert!(s.contains("' render left"), "prints block: {s}");
     assert!(!s.contains("set -g status 2"), "one-line by default");
     // wrote no config file
     assert!(
@@ -120,6 +123,30 @@ fn init_print_emits_block_and_writes_nothing() {
             .join("rustline")
             .join("config.toml")
             .exists()
+    );
+}
+
+#[test]
+fn init_print_binary_flag_overrides_current_exe() {
+    // `--binary` wins over the resolved `current_exe()`, and the tmux var
+    // quoting (`#{q:...}`) stays untouched alongside it.
+    let tmp = tempdir().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.arg("init")
+        .arg("--print")
+        .arg("--binary")
+        .arg("/opt/rustline/bin/rustline");
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    let out = cmd.output().unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("#('/opt/rustline/bin/rustline' render left"),
+        "uses the overridden binary path: {s}"
+    );
+    assert!(
+        s.contains("--pane-path=#{q:pane_current_path}"),
+        "tmux var quoting untouched: {s}"
     );
 }
 
@@ -210,7 +237,8 @@ fn init_defaults_writes_config_and_tmux_marker_block() {
         tmux_text.contains("# >>> rustline >>>"),
         "marker block: {tmux_text}"
     );
-    assert!(tmux_text.contains("#(rustline render left"));
+    assert!(tmux_text.contains("#('"), "shell-quotes the binary path");
+    assert!(tmux_text.contains("' render left"));
 
     // Idempotent: a user edit outside the markers survives; the region is unchanged.
     fs::write(&tmux_path, format!("# my own line\n{tmux_text}")).unwrap();

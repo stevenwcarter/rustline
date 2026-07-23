@@ -75,6 +75,26 @@ fn tmux_conf_path() -> PathBuf {
     PathBuf::from(env::var("HOME").unwrap_or_default()).join(".tmux.conf")
 }
 
+/// Resolve the absolute binary path baked into the tmux block's `#(...)`
+/// calls (see `tmux_conf::init_block`'s doc comment for why a bare `rustline`
+/// isn't safe: the tmux server's `/bin/sh` PATH may not include wherever the
+/// binary is installed). `--binary` wins if given; otherwise
+/// `std::env::current_exe()`, falling back to the bare name `"rustline"` on
+/// error rather than failing `init` outright — that's merely as fragile as
+/// the pre-W6 behavior, never worse.
+fn resolve_binary(flag: Option<&str>) -> String {
+    if let Some(b) = flag {
+        return b.to_string();
+    }
+    match env::current_exe() {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(e) => {
+            tracing::warn!("could not resolve current_exe: {e}; using bare \"rustline\"");
+            "rustline".to_string()
+        }
+    }
+}
+
 /// Resolve a base-theme name to a full `Theme`: a themes-dir `*.toml` file wins
 /// over a same-named built-in (so a user file can shadow/override a built-in).
 pub(crate) fn resolve_base_theme(name: &str) -> Option<Theme> {
@@ -161,12 +181,14 @@ fn main() {
             emit(&render_window(&ctx, &registry, &theme), args.preview);
         }
         Command::Init(args) => {
+            let binary = resolve_binary(args.binary.as_deref());
             init::run(
                 &args,
                 &config_path(),
                 &themes_dir(),
                 &tmux_conf_path(),
                 &theme,
+                &binary,
             );
         }
         Command::PrintConfig => match toml::to_string_pretty(&cfg) {

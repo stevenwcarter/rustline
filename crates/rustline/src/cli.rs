@@ -55,6 +55,11 @@ pub struct InitArgs {
     /// Print the raw one-line tmux block to stdout and write nothing (legacy).
     #[arg(long)]
     pub print: bool,
+    /// Override the binary path baked into the tmux block's `#(...)` calls
+    /// (default: the running binary's own resolved absolute path via
+    /// `std::env::current_exe()`).
+    #[arg(long)]
+    pub binary: Option<String>,
 }
 
 /// Manage themes: list, preview, select, and scaffold new ones.

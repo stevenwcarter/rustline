@@ -8,13 +8,16 @@ use std::fmt::Write as _;
 ///
 /// `two_line` renders the window list on its own line above status-left/right
 /// (the author's layout); `mouse` adds `set -g mouse on` so click-to-toggle
-/// works out of the box; `interval` sets `status-interval`.
+/// works out of the box; `interval` sets `status-interval`; `binary` is the
+/// resolved path substituted for every `#(...)` call (see [`init_block`]'s
+/// injection-safety note).
 pub struct InitBlockOpts<'a> {
     pub bar_bg: &'a str,
     pub fg: &'a str,
     pub two_line: bool,
     pub mouse: bool,
     pub interval: u32,
+    pub binary: &'a str,
 }
 
 /// Verbatim two-line `status-format[0]` (centered per-window list), copied
@@ -40,6 +43,13 @@ const STATUS_FORMAT_1: &str = r##"set -g status-format[1] "#[align=left range=le
 /// `status-style` so the powerline edges sit on the theme's bar background
 /// rather than tmux's default green.
 ///
+/// `opts.binary` replaces the bare `rustline` in every `#(...)`/`run-shell`
+/// call with the resolved absolute path to the binary (see the caller:
+/// `std::env::current_exe()`, overridable with `init --binary`). tmux's `#()`
+/// shells out via the *tmux server's* `/bin/sh`, whose `PATH` may not include
+/// wherever the user installed `rustline` (e.g. `~/.local/bin`), so a bare
+/// name can silently resolve to nothing and leave the bar empty.
+///
 /// # Injection safety
 ///
 /// tmux expands `#{...}` format variables *before* handing the `#(...)` body to
@@ -50,6 +60,15 @@ const STATUS_FORMAT_1: &str = r##"set -g status-format[1] "#[align=left range=le
 /// and passed in `--flag=value` form (no surrounding quotes, no positional
 /// args): tmux escapes the value into a single literal shell token, and the
 /// `=` form keeps an empty value present rather than shifting later args.
+///
+/// `opts.binary` is not one of these untrusted tmux variables — it's a fixed
+/// string the caller resolved itself — so it doesn't need (and can't use)
+/// tmux's `#{q:...}` modifier. It still needs *shell* quoting, though: unlike
+/// the rest of this codebase's install path, a binary path can contain a
+/// space (e.g. `~/My Programs/rustline`), which would otherwise split into
+/// two argv words for `/bin/sh`. [`shell_quote`] wraps it in single quotes
+/// (escaping any embedded single quote), so it always reaches `/bin/sh` as
+/// one token regardless of its contents.
 pub fn init_block(opts: &InitBlockOpts) -> String {
     let mut block = String::from("# rustline statusline\nset -g status on\n");
     let _ = writeln!(block, "set -g status-interval {}", opts.interval);
@@ -62,14 +81,17 @@ pub fn init_block(opts: &InitBlockOpts) -> String {
     if opts.mouse {
         block.push_str("set -g mouse on\n");
     }
+    // `@BINARY@` is a placeholder substituted below (see this fn's doc
+    // comment); it appears nowhere else in this block or in
+    // STATUS_FORMAT_0/1, so the final blanket `.replace` can't misfire.
     block.push_str(
         r##"set -g status-left-length 100
 set -g status-right-length 200
-set -g status-left  "#(rustline render left --session=#{q:session_name} --window=#{q:window_index} --pane=#{q:pane_index} --pane-path=#{q:pane_current_path})"
-set -g status-right "#(rustline render right --session=#{q:session_name} --window=#{q:window_index} --pane=#{q:pane_index} --pane-path=#{q:pane_current_path})"
+set -g status-left  "#(@BINARY@ render left --session=#{q:session_name} --window=#{q:window_index} --pane=#{q:pane_index} --pane-path=#{q:pane_current_path})"
+set -g status-right "#(@BINARY@ render right --session=#{q:session_name} --window=#{q:window_index} --pane=#{q:pane_index} --pane-path=#{q:pane_current_path})"
 set -g window-status-separator ""
-setw -g window-status-format         "#(rustline render window --index=#{q:window_index} --name=#{q:window_name} --flags=#{q:window_flags})"
-setw -g window-status-current-format "#(rustline render window --current --index=#{q:window_index} --name=#{q:window_name} --flags=#{q:window_flags})"
+setw -g window-status-format         "#(@BINARY@ render window --index=#{q:window_index} --name=#{q:window_name} --flags=#{q:window_flags})"
+setw -g window-status-current-format "#(@BINARY@ render window --current --index=#{q:window_index} --name=#{q:window_name} --flags=#{q:window_flags})"
 set-hook -g after-select-pane   "refresh-client -S"
 set-hook -g after-select-window "refresh-client -S"
 "##,
@@ -81,7 +103,7 @@ bind -T root MouseDown1Status {
         select-window -t=
     } {
         if -F "#{mouse_status_range}" {
-            run-shell "rustline click --range=#{q:mouse_status_range} --button=left"
+            run-shell "@BINARY@ click --range=#{q:mouse_status_range} --button=left"
             refresh-client -S
         }
     }
@@ -95,7 +117,16 @@ bind -T root MouseDown1Status {
         block.push_str(STATUS_FORMAT_1);
         block.push('\n');
     }
-    block
+    block.replace("@BINARY@", &shell_quote(opts.binary))
+}
+
+/// Wrap `s` in single quotes for embedding in a `/bin/sh` command line,
+/// escaping any embedded single quote with the standard `'\''` trick (close
+/// the quote, emit an escaped literal `'`, reopen the quote). Used only for
+/// [`InitBlockOpts::binary`]: a fixed, host-controlled string that still
+/// needs *shell* quoting because it can contain spaces.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Marker lines bracketing the rustline-managed region in `~/.tmux.conf`, so
@@ -148,6 +179,10 @@ pub fn upsert_tmux_block(existing: &str, block: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Fixed test binary path — deterministic, so expected output never
+    /// depends on the test process's own `current_exe()`.
+    const TEST_BIN: &str = "/usr/bin/rustline";
+
     fn one_line<'a>(bar_bg: &'a str, fg: &'a str) -> InitBlockOpts<'a> {
         InitBlockOpts {
             bar_bg,
@@ -155,14 +190,17 @@ mod tests {
             two_line: false,
             mouse: false,
             interval: 1,
+            binary: TEST_BIN,
         }
     }
 
     #[test]
-    fn one_line_default_is_byte_identical_to_legacy() {
-        // Characterization: the one-line / mouse-off / interval-1 block is EXACTLY
-        // the legacy `rustline init` output (pins the `alt_format`-defaults-stay-empty
-        // seam at the tmux-block boundary — `--print` must not drift).
+    fn one_line_default_matches_legacy_shape() {
+        // Characterization: the one-line / mouse-off / interval-1 block matches
+        // the legacy `rustline init` shape (pins the `alt_format`-defaults-stay-
+        // empty seam at the tmux-block boundary — `--print` must not drift),
+        // except the bare `rustline` binary name is now the resolved,
+        // shell-quoted absolute path (see `block_uses_binary_path`).
         let b = init_block(&one_line("colour234", "colour255"));
         assert!(b.starts_with(
             "# rustline statusline\nset -g status on\nset -g status-interval 1\nset -g status-justify centre\n"
@@ -186,8 +224,79 @@ mod tests {
             !b.contains("set -g status 2"),
             "one-line has no two-line formats: {b}"
         );
-        assert!(b.contains("#(rustline render left"));
+        assert!(b.contains("#('/usr/bin/rustline' render left"));
         assert!(b.contains("MouseDown1Status"));
+    }
+
+    #[test]
+    fn block_uses_binary_path() {
+        // The resolved absolute binary path replaces the bare `rustline` in
+        // every `#(...)`/`run-shell` call, single-quoted for the shell (it's a
+        // fixed, host-controlled string, not a tmux `#{...}` var, so tmux's
+        // `#{q:...}` quoting doesn't apply — see
+        // `binary_quoting_is_independent_of_tmux_var_quoting`).
+        let b = init_block(&one_line("colour234", "colour255"));
+        assert!(b.contains("#('/usr/bin/rustline' render left"), "{b}");
+        assert!(b.contains("#('/usr/bin/rustline' render right"), "{b}");
+        assert!(b.contains("#('/usr/bin/rustline' render window"), "{b}");
+        assert!(
+            b.contains("run-shell \"'/usr/bin/rustline' click --range="),
+            "{b}"
+        );
+        assert!(!b.contains("#(rustline render"), "no bare binary name: {b}");
+        assert!(
+            !b.contains("\"rustline click"),
+            "click dispatch also uses the resolved path: {b}"
+        );
+    }
+
+    #[test]
+    fn binary_flag_overrides() {
+        let mut o = one_line("colour234", "colour255");
+        o.binary = "/opt/my rustline/rustline";
+        let b = init_block(&o);
+        // A path containing a space is single-quoted so /bin/sh sees one argv
+        // word instead of splitting it.
+        assert!(
+            b.contains("#('/opt/my rustline/rustline' render left"),
+            "{b}"
+        );
+        assert!(
+            b.contains("run-shell \"'/opt/my rustline/rustline' click"),
+            "{b}"
+        );
+    }
+
+    #[test]
+    fn binary_quoting_is_independent_of_tmux_var_quoting() {
+        // invariant #4: only the *tmux* `#{...}` format variables need
+        // `#{q:...}` (they carry untrusted, attacker-settable content like a
+        // window title); the binary path is a value the caller resolved
+        // itself and is shell-quoted instead. Both quoting mechanisms must
+        // coexist unchanged in the same `#(...)` call.
+        let b = init_block(&one_line("colour234", "colour255"));
+        assert!(
+            b.contains("#{q:session_name}"),
+            "tmux var still q-escaped: {b}"
+        );
+        assert!(
+            b.contains("#{q:window_name}"),
+            "tmux var still q-escaped: {b}"
+        );
+        assert!(
+            b.contains("--pane-path=#{q:pane_current_path}"),
+            "=-form preserved: {b}"
+        );
+        assert!(
+            b.contains("--range=#{q:mouse_status_range}"),
+            "click range still q-escaped: {b}"
+        );
+    }
+
+    #[test]
+    fn shell_quote_escapes_embedded_single_quotes() {
+        assert_eq!(shell_quote("/usr/bin/rustline"), "'/usr/bin/rustline'");
+        assert_eq!(shell_quote("it's/rustline"), r"'it'\''s/rustline'");
     }
 
     #[test]
@@ -220,7 +329,7 @@ mod tests {
         assert!(b.contains("#{T:window-status-format}"));
         assert!(b.contains(":status-right}"));
         // shared wiring still present
-        assert!(b.contains("#(rustline render left"));
+        assert!(b.contains("#('/usr/bin/rustline' render left"));
     }
 
     #[test]
@@ -242,9 +351,9 @@ mod tests {
     fn init_block_wires_all_regions_and_hooks() {
         let b = init_block(&one_line("colour234", "colour255"));
         assert!(b.contains("status-interval 1"));
-        assert!(b.contains("#(rustline render left"));
-        assert!(b.contains("#(rustline render right"));
-        assert!(b.contains("rustline render window"));
+        assert!(b.contains("#('/usr/bin/rustline' render left"));
+        assert!(b.contains("#('/usr/bin/rustline' render right"));
+        assert!(b.contains("'/usr/bin/rustline' render window"));
         assert!(b.contains("after-select-pane"));
         assert!(b.contains("refresh-client -S"));
     }
@@ -289,9 +398,9 @@ mod tests {
             b.contains("select-window -t="),
             "keeps window selection: {b}"
         );
-        // dispatches to rustline click with the q-escaped range (invariant #4)
+        // dispatches to the resolved binary with the q-escaped range (invariant #4)
         assert!(
-            b.contains("rustline click --range=#{q:mouse_status_range}"),
+            b.contains("'/usr/bin/rustline' click --range=#{q:mouse_status_range}"),
             "click dispatch q-escaped: {b}"
         );
         // never a bare, unescaped mouse_status_range in the click arg
