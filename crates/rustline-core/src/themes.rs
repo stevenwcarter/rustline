@@ -19,6 +19,7 @@ pub fn builtin_theme(name: &str) -> Option<Theme> {
         "gruvbox" => gruvbox(),
         "catppuccin-mocha" => catppuccin_mocha(),
         "tokyo-night" => tokyo_night(),
+        "dracula" => dracula(),
         _ => return None,
     })
 }
@@ -32,6 +33,7 @@ pub fn builtin_theme_names() -> &'static [&'static str] {
         "gruvbox",
         "catppuccin-mocha",
         "tokyo-night",
+        "dracula",
     ]
 }
 
@@ -156,6 +158,30 @@ fn tokyo_night() -> Theme {
     }
 }
 
+fn dracula() -> Theme {
+    Theme {
+        palette: vec![
+            rgb(189, 147, 249), // purple
+            rgb(255, 121, 198), // pink
+            rgb(139, 233, 253), // cyan
+            rgb(80, 250, 123),  // green
+            rgb(255, 184, 108), // orange
+        ],
+        fg: rgb(40, 42, 54),
+        bar_bg: rgb(40, 42, 54),
+        soft_fg: rgb(98, 114, 164),
+        win_current_bg: rgb(189, 147, 249),
+        win_current_fg: rgb(40, 42, 54),
+        win_inactive_bg: rgb(68, 71, 90),
+        win_inactive_fg: rgb(248, 248, 242),
+        success: rgb(80, 250, 123),
+        info: rgb(139, 233, 253),
+        warning: rgb(241, 250, 140),
+        error: rgb(255, 85, 85),
+        ..Theme::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,7 +192,7 @@ mod tests {
             assert!(builtin_theme(name).is_some(), "missing built-in: {name}");
         }
         assert!(builtin_theme("nope").is_none());
-        assert_eq!(builtin_theme_names().len(), 6);
+        assert_eq!(builtin_theme_names().len(), 7);
     }
 
     #[test]

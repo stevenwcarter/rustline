@@ -19,7 +19,7 @@ pane, window, host, and system info, with zero required configuration.
 - Click-to-toggle widget alt views: give a widget an `alt_format` and
   left-clicking it in the status line swaps it to that view (e.g. a compact
   `cpu` reading toggling to one with a gauge bar).
-- Six built-in themes (a `default` plus five multi-accent, truecolor curated
+- Seven built-in themes (a `default` plus six multi-accent, truecolor curated
   themes) selectable via `rustline theme use`, browsable interactively with
   `rustline theme pick`, plus a `theme new` scaffolder for tweaking your own
   — see [Themes](#themes) below.
@@ -256,10 +256,10 @@ name becomes a tmux `range=user|<name>` argument verbatim, pick one that is
 
 ## Themes
 
-rustline ships six built-in themes, selectable from the command line, plus
+rustline ships seven built-in themes, selectable from the command line, plus
 per-widget threshold alerts that use each theme's semantic colors.
 
-> **Truecolor requirement:** the five curated themes (everything but
+> **Truecolor requirement:** the six curated themes (everything but
 > `default`) use truecolor (24-bit RGB) values. You need a truecolor-capable
 > terminal and tmux's `RGB`/`Tc` terminal feature enabled — e.g.
 > `set -as terminal-features ",xterm-256color:RGB"` (tmux ≥ 3.2), or
@@ -269,8 +269,8 @@ per-widget threshold alerts that use each theme's semantic colors.
 - **`default`** — the original two-accent palette (unchanged).
 - **`pastel-rainbow`** — the flagship: a six-color pastel palette with dark
   text.
-- **`nord`**, **`gruvbox`**, **`catppuccin-mocha`**, **`tokyo-night`** —
-  curated multi-accent ports of the popular color schemes.
+- **`nord`**, **`gruvbox`**, **`catppuccin-mocha`**, **`tokyo-night`**,
+  **`dracula`** — curated multi-accent ports of the popular color schemes.
 
 ```bash
 rustline theme list                  # built-ins + your themes-dir files, active marked *
