@@ -709,48 +709,116 @@ fn pick(config_path: &Path, themes_dir: &Path) {
 mod tests {
     use super::*;
 
-    /// Mask the datetime widget's live `%H:%M` clock reading (the last
-    /// `" < "`-prefixed field in the default `"%a < %Y-%m-%d < %H:%M"`
-    /// format) with a fixed placeholder. `sample_context`'s `now` is always
-    /// `Local::now()` — true before AND after W52's consolidation — so the
-    /// minute is the one byte range the golden-file comparison below can
-    /// never pin exactly; every other byte, including the date, is still
-    /// compared exactly.
-    fn redact_clock_minutes(rendered: &str) -> String {
-        match rendered.rfind(" < ") {
-            Some(idx) => {
-                let clock_start = idx + " < ".len();
-                let mut out = rendered[..clock_start].to_string();
-                out.push_str("HH:MM");
-                out.push_str(&rendered[clock_start + 5..]);
-                out
+    /// Mask the ENTIRE datetime widget segment — weekday, date, AND clock,
+    /// i.e. the whole default `"%a < %Y-%m-%d < %H:%M"` format — with a
+    /// fixed placeholder, applied to BOTH the live render and the golden
+    /// text before comparing. `sample_context`'s `now` is always
+    /// `Local::now()` — true before AND after W52's consolidation — so
+    /// weekday/date/time are bytes the golden-file comparison below can
+    /// never pin to a specific calendar date; redacting the whole segment on
+    /// both sides means the test passes on any date the suite happens to
+    /// run, without ever needing the golden files regenerated. Every other
+    /// byte — the pegged/healthy cpu/mem/battery numbers, colors, and pill
+    /// markup — is still compared exactly, so this stays a genuine
+    /// consolidation guard.
+    fn redact_datetime_segment(rendered: &str) -> String {
+        for (start, _) in rendered.char_indices() {
+            if let Some(len) = datetime_match_len(&rendered[start..]) {
+                let mut out = rendered[..start].to_string();
+                out.push_str("WWW < YYYY-MM-DD < HH:MM");
+                out.push_str(&rendered[start + len..]);
+                return out;
             }
-            None => rendered.to_string(),
         }
+        rendered.to_string()
+    }
+
+    /// The byte length of a `"%a < %Y-%m-%d < %H:%M"`-shaped match starting
+    /// at the beginning of `s` (24 bytes: `"Thu < 2026-07-23 < 17:07"`), or
+    /// `None` if `s` doesn't start with one.
+    fn datetime_match_len(s: &str) -> Option<usize> {
+        const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+        if !WEEKDAYS.contains(&s.get(0..3)?) {
+            return None;
+        }
+        if s.get(3..6)? != " < " {
+            return None;
+        }
+        if !is_iso_date(s.get(6..16)?) {
+            return None;
+        }
+        if s.get(16..19)? != " < " {
+            return None;
+        }
+        if !is_hh_mm(s.get(19..24)?) {
+            return None;
+        }
+        Some(24)
+    }
+
+    /// `true` iff `s` is a `YYYY-MM-DD` digit-grouped date, e.g. `2026-07-23`.
+    fn is_iso_date(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 10
+            && b[..4].iter().all(u8::is_ascii_digit)
+            && b[4] == b'-'
+            && b[5..7].iter().all(u8::is_ascii_digit)
+            && b[7] == b'-'
+            && b[8..10].iter().all(u8::is_ascii_digit)
+    }
+
+    /// `true` iff `s` is an `HH:MM` digit-grouped clock reading, e.g. `17:07`.
+    fn is_hh_mm(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 5
+            && b[..2].iter().all(u8::is_ascii_digit)
+            && b[2] == b':'
+            && b[3..5].iter().all(u8::is_ascii_digit)
     }
 
     /// Characterization pin for W52 (consolidating the three fabricated-
     /// `Context` builders into one shared `sample_context`): golden copies of
     /// the *pre-consolidation* `theme show`-style preview render, captured
     /// from the original hand-rolled `sample_context` in this module. Must
-    /// keep passing byte-for-byte (modulo the live clock, see
-    /// `redact_clock_minutes`) once `preview_theme_ansi` is repointed at the
-    /// shared `crate::sample_context::sample_context` — that is the guard
-    /// that the consolidation changed nothing observable.
+    /// keep passing byte-for-byte (modulo the datetime segment, see
+    /// `redact_datetime_segment`) once `preview_theme_ansi` is repointed at
+    /// the shared `crate::sample_context::sample_context` — that is the
+    /// guard that the consolidation changed nothing observable. Date-
+    /// independent: `redact_datetime_segment` runs on both sides, so this
+    /// passes regardless of which day it's run on, not just today.
     #[test]
     fn sample_context_render_is_unchanged_by_consolidation() {
         let golden_true = include_str!("../testdata/theme_preview_alerts_true.golden");
         let golden_false = include_str!("../testdata/theme_preview_alerts_false.golden");
         assert_eq!(
-            redact_clock_minutes(&super::preview_theme_ansi(&Theme::default(), true)),
-            redact_clock_minutes(golden_true),
+            redact_datetime_segment(&super::preview_theme_ansi(&Theme::default(), true)),
+            redact_datetime_segment(golden_true),
             "alerts-on preview must stay byte-identical"
         );
         assert_eq!(
-            redact_clock_minutes(&super::preview_theme_ansi(&Theme::default(), false)),
-            redact_clock_minutes(golden_false),
+            redact_datetime_segment(&super::preview_theme_ansi(&Theme::default(), false)),
+            redact_datetime_segment(golden_false),
             "alerts-off preview must stay byte-identical"
         );
+    }
+
+    #[test]
+    fn redact_datetime_segment_masks_any_weekday_date_and_time() {
+        // Both an arbitrary "today" and the golden's frozen literal must
+        // redact to the identical placeholder, which is the property that
+        // makes the characterization test above date-independent.
+        let live = "RIGHT  : \x1b[38;5;255;48;5;238m Mon < 2031-01-05 < 09:42 \x1b[0m";
+        let golden = "RIGHT  : \x1b[38;5;255;48;5;238m Thu < 2026-07-23 < 17:07 \x1b[0m";
+        assert_eq!(
+            redact_datetime_segment(live),
+            redact_datetime_segment(golden)
+        );
+    }
+
+    #[test]
+    fn redact_datetime_segment_leaves_non_matching_text_untouched() {
+        let text = "no datetime segment here";
+        assert_eq!(redact_datetime_segment(text), text);
     }
 
     #[test]
