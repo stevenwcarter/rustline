@@ -57,9 +57,17 @@ Confirmed on `docs.rs/extism/1.30.0`:
   the env var per-plugin**. The config TOML is:
   ```toml
   [cache]
-  enabled   = true          # still required by extism's wasmtime
   directory = "/some/path"   # where compiled artifacts live
   ```
+  **Corrected during implementation (W43):** the pinned wasmtime (43.x) parses
+  `[cache]` with `#[serde(deny_unknown_fields)]` and recognizes only `directory`
+  (plus optional tuning fields) — it has **no** `enabled` key and *rejects* one,
+  which fails `Cache::from_file`/`build()` and (per N2) would drop the plugin. An
+  earlier draft of this note claimed `enabled = true` was "still required"; that
+  reflected an older cache-config format and is wrong for 43.x. The implemented
+  config (`crates/rustline-wasm/src/paths.rs::cache_config_toml`) emits
+  `directory` **only**; the `wasm-e2e` build_plugin tests pin the format wasmtime
+  actually accepts.
   (https://github.com/extism/extism/blob/main/runtime/README.md)
 - **The in-process-only contrast:** Extism 1.30 also exports `CompiledPlugin`
   (`PluginBuilder::compile(self) -> Result<CompiledPlugin, Error>`), which
@@ -133,9 +141,12 @@ A ~15-line seam in `crates/rustline-wasm/src/host.rs`:
   version + compile flags. An extism/wasmtime bump silently misses and recompiles
   once per plugin — correct, just a one-refresh blip after upgrade. No manual
   cache-busting needed.
-- **`enabled = true` quirk:** the key is nominally optional upstream but *still
-  required* by extism's wasmtime build, or the config fails to parse. The
-  generated TOML must include it.
+- **No `enabled` key (corrected during implementation):** contrary to this
+  note's original claim, wasmtime 43.x's `[cache]` is `deny_unknown_fields` and
+  has **no** `enabled` field — emitting one fails the config parse and would drop
+  the plugin (N2). The generated TOML must contain **only** `directory` (plus any
+  optional tuning fields). The `wasm-e2e` build_plugin tests caught the wrong
+  `enabled = true` and pin the accepted format.
 - **Deserialize isn't free:** it's mmap + validation of native code, not a no-op.
   Hence the measurement gate above.
 - **Writable dir required:** the cache dir must be writable at spawn time; a

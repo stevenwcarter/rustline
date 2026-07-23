@@ -11,7 +11,10 @@ pane, window, host, and system info, with zero required configuration.
 - Zero-config: sensible defaults out of the box.
 - Optional TOML config to reorder widgets or tweak per-widget options.
 - Built-in `cpu` and `memory` widgets (in the default right layout) showing
-  usage percentage, human-readable sizes, and a Unicode gauge bar (`{bar}`).
+  usage percentage, human-readable sizes, a Unicode gauge bar (`{bar}`), and an
+  optional history sparkline (`{spark}`).
+- Opt-in `throughput` widget showing network download/upload rates
+  (`/proc/net/dev`, Linux).
 - Opt-in `lan_ip` and `tailscale_ip` widgets that show the machine's LAN and
   Tailscale IPv4 addresses.
 - Opt-in `battery` widget showing charge percentage, state, and a
@@ -134,8 +137,9 @@ Widget names available for the `layout` arrays are: `pane_id` / `hostname`
 `datetime`, and the opt-in `lan_ip` / `tailscale_ip` (see [IP address
 widgets](#ip-address-widgets) below), `battery` (see [Battery
 widget](#battery-widget) below), `git` (see [Git widget](#git-widget)
-below), `disk` (see [Disk widget](#disk-widget) below), and `uptime` / `media`
-(see [Uptime and media widgets](#uptime-and-media-widgets) below).
+below), `disk` (see [Disk widget](#disk-widget) below), `uptime` / `media`
+(see [Uptime and media widgets](#uptime-and-media-widgets) below), and
+`throughput` (see [Throughput widget](#throughput-widget) below).
 
 Example — reorder the right region and change the clock format:
 
@@ -265,11 +269,15 @@ the opt-in widgets above) — they show live CPU utilization and memory usage,
 each with a Unicode gauge bar.
 
 `cpu` takes a `format` (default `"{icon} {percent}%"`) with `{icon}`
-(nf-md-chip), `{percent}`, and `{bar}` placeholders. `memory` takes a `format`
-(default `"{icon} {used}/{total}"`) with `{icon}` (nf-md-memory),
+(nf-md-chip), `{percent}`, `{bar}`, and `{spark}` placeholders. `memory` takes
+a `format` (default `"{icon} {used}/{total}"`) with `{icon}` (nf-md-memory),
 `{used}`/`{total}`/`{avail}` (human-readable binary sizes, e.g. `6.2G`),
-`{percent}`, and `{bar}` placeholders. `{bar}` is a `bar_width`-cell (default
-8) Unicode block-eighths gauge shared by both widgets. Both also take a
+`{percent}`, `{bar}`, and `{spark}` placeholders. `{bar}` is a `bar_width`-cell
+(default 8) Unicode block-eighths gauge shared by both widgets; `{spark}` is a
+Unicode sparkline of the last `spark_width` readings (default 8), persisted
+across refreshes. **`{spark}` only accumulates history when it appears in
+`format`** — a `{spark}` placed only in a widget's click-toggle `alt_format`
+renders empty (put it in `format` for it to populate). Both also take a
 `down_format` (default empty) shown on an unsupported platform or a failed
 read — same collapse-to-nothing behavior as the `battery` widget's
 `down_format` — and an `alt_format` for
@@ -281,15 +289,17 @@ the built-in Nerd-Font one (default: `None`, keep the built-in glyph).
 
 ```toml
 [widgets.cpu]
-format = "{icon} {bar} {percent}%"   # default "{icon} {percent}%"
+format = "{icon} {spark} {percent}%" # default "{icon} {percent}%"
 bar_width = 8
+spark_width = 8     # {spark} history length (last N readings)
 warn_percent = 80   # default; 0 disables a tier
 crit_percent = 95   # default
 # icon = "CPU"       # optional; overrides the built-in Nerd-Font glyph
 
 [widgets.memory]
-format = "{icon} {used}/{total}"     # default; or "{icon} {bar} {percent}%"
+format = "{icon} {used}/{total}"     # default; or "{icon} {spark} {percent}%"
 bar_width = 8
+spark_width = 8
 warn_percent = 80   # default; 0 disables a tier
 crit_percent = 92   # default
 # icon = "MEM"       # optional; overrides the built-in Nerd-Font glyph
@@ -403,6 +413,30 @@ format      = "♪ {title} — {artist}"
 down_format = ""                      # nothing when nothing is playing
 ```
 
+### Throughput widget
+
+An opt-in `throughput` built-in shows network download/upload rates, read from
+`/proc/net/dev` (Linux). Not in the default layout — add it to a `layout`
+region to use it. A rate is a delta between two counter samples, so it renders
+nothing on the **first** refresh (nothing yet to diff against), and nothing on
+a non-Linux platform or a failed read — never a fake `0`.
+
+Takes a `format` (default `" {down} {up}"`, no icon) with `{down}`/`{up}`
+placeholders (human-readable binary sizes suffixed `/s`, e.g. `1.2M/s`), an
+optional `interface` (pin to a single NIC; omit to aggregate every non-loopback
+interface), a `down_format` (default empty), and an `alt_format` for
+[click-to-toggle](#click-to-toggle-widget-views).
+
+```toml
+[layout]
+right = ["throughput", "cwd", "datetime"]
+
+[widgets.throughput]
+format      = " {down} {up}"   # default
+# interface = "eth0"           # optional; omit to aggregate all NICs
+down_format = ""
+```
+
 ### Per-widget colors
 
 Any format-bearing widget accepts optional `fg`/`bg` keys to pin its colors,
@@ -443,7 +477,7 @@ a widget with no `alt_format` won't fire — give the widget an `alt_format`
 ### Click-to-toggle widget views
 
 `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg`,
-`git`, `disk`, `uptime`, and `media` each take an `alt_format` (default empty). Give a widget a non-empty
+`git`, `disk`, `uptime`, `media`, and `throughput` each take an `alt_format` (default empty). Give a widget a non-empty
 `alt_format` and it becomes clickable: left-clicking it in the tmux status
 line toggles it between `format` and `alt_format`, e.g. a compact CPU reading
 swapping to one with a gauge bar:
@@ -592,7 +626,10 @@ cargo run --features bench -- bench --format markdown --output bench.md
 
 Plugin passes run against the real, preserved plugin state/cache, so a cached
 plugin (e.g. `weather`) is measured on its fast cached path rather than
-re-fetching every iteration.
+re-fetching every iteration. A separate build-timing pass measures each
+plugin's cold `build_plugin` with the on-disk wasmtime compile cache off vs on
+— on a warm cache a cold spawn deserializes the precompiled module instead of
+re-running the compiler (measured ~13× faster per plugin).
 
 ## Plugins
 

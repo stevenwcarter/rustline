@@ -103,8 +103,10 @@ these shared types, not a design shortcut. Keep them serializable.
   `home`, `hostname`, `loadavg: Option<[f64;3]>`, `now: DateTime<Local>`,
   `window: Option<WindowCtx>`, `interfaces: Vec<NetIface>`,
   `battery: Option<Battery>`, `cpu: Option<CpuUsage>`,
-  `memory: Option<MemInfo>`, `git: Option<GitInfo>`, `disk: Option<DiskInfo>`,
-  `uptime: Option<u64>` (seconds), `media: Option<MediaInfo>`,
+  `cpu_history: Vec<f32>`, `memory: Option<MemInfo>`, `mem_history: Vec<f32>`,
+  `git: Option<GitInfo>`, `disk: Option<DiskInfo>`,
+  `throughput: Option<Throughput>`, `uptime: Option<u64>` (seconds),
+  `media: Option<MediaInfo>`,
   `os: String`, `arch:
   String`, `toggled: BTreeSet<String>`, `colors: ThemeColors`), plus
   `Context::default()` (an empty, epoch-timestamped instance, so test/synthetic
@@ -127,12 +129,20 @@ these shared types, not a design shortcut. Keep them serializable.
   (mirroring the `cpu`/`memory` read-gating below); `DiskInfo { total_bytes,
   used_bytes, available_bytes }` (all bytes as `u64`) is a filesystem-usage
   snapshot for a configured mount, likewise read once at `Context`-build time
-  ONLY when `disk` is in the active layout; `uptime` (seconds since boot) and
+  ONLY when `disk` is in the active layout; `throughput` (a `Throughput`
+  down/up bytes-per-sec snapshot) is read once at build time, gated the same
+  way on `throughput` being in the active layout, and is `None` on the first
+  invocation (a rate is a delta — nothing yet to diff against; invariant #6);
+  `cpu_history`/`mem_history` (`Vec<f32>`, `#[serde(default)]`) are the recent
+  cpu%/memory-used% readings (oldest first) feeding the `{spark}` placeholder,
+  populated at build time from a persisted ring ONLY when the respective
+  widget's `format` references `{spark}` (empty otherwise — no history I/O);
+  `uptime` (seconds since boot) and
   `media` (a `MediaInfo` now-playing snapshot) are read once at build time and
-  gated the same way on their widget being in the active layout — but,
-  unlike the others, are NOT mirrored into `WireContext` (not exposed to WASM
-  guests, so a guest still sees a field-for-field `Context` mirror minus these
-  two); `os`/`arch` come from
+  gated the same way on their widget being in the active layout — and,
+  like `throughput`/`cpu_history`/`mem_history`, are NOT mirrored into
+  `WireContext` (not exposed to WASM guests, so a guest sees a field-for-field
+  `Context` mirror minus these five); `os`/`arch` come from
   `std::env::consts::OS`/`ARCH`; `toggled` (`#[serde(default)]`) is the set of
   widget/plugin names the user has click-toggled to their `alt_format` view,
   read once at `Context`-build time from the toggles state file (invariant #1)
@@ -163,7 +173,11 @@ these shared types, not a design shortcut. Keep them serializable.
   theme is multi-accent (`palette.len() >= 4`) using truecolor (`Color::Rgb`).
   See Themes under Config for the full list and layering rules.
 - `widget.rs` — `Widget` trait and `Registry` (name → factory; `resolve` skips
-  unknown widget names with a `warn!`, never errors). `Widget::range_name(&self)
+  unknown widget names with a `warn!`, never errors). `resolve` now returns
+  `Vec<(String, Box<dyn Widget>)>` (W53) — each built widget paired with the
+  layout name it came from, so a caller (e.g. `render_named_region`) never
+  re-filters `names` to recover which widget is which.
+  `Widget::range_name(&self)
   -> Option<&str>` defaults to `None`; a clickable widget returns `Some(name)`.
   `WidgetDescriptor { name, summary, configurable, source: WidgetSource }`
   (`WidgetSource::{Builtin, Plugin}`) describes a registered widget
@@ -173,9 +187,9 @@ these shared types, not a design shortcut. Keep them serializable.
   `descriptors()`/`available_names()` enumerate them in registration order
   (W22) — the enabling abstraction for a future widget-listing command, not
   itself exposed as a CLI subcommand yet.
-- `widgets/` — the fifteen built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
+- `widgets/` — the sixteen built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
   `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`,
-  `git`, `disk`, `uptime`, `media`, plus `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
+  `git`, `disk`, `uptime`, `media`, `throughput`, plus `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
   LAN/Tailscale interface-selection and `{ip}` formatting logic shared by
   `lan_ip`/`tailscale_ip` (no I/O — operates on `Context.interfaces`).
   `alert.rs` is the shared threshold-alert helper used by `cpu`/`memory`/
@@ -190,13 +204,21 @@ these shared types, not a design shortcut. Keep them serializable.
   `bar.rs` is `pub(crate) fn gauge_bar(fraction: f64, width:
   usize) -> String`, a shared pure Unicode block-eighths gauge (full `█`
   cells, one sub-cell partial, `░` track) used by the `{bar}` placeholder in
-  both `cpu.rs` and `memory.rs`. `cpu.rs` is the `cpu` widget: pure over
-  `Context.cpu`, with an nf-md-chip `{icon}`, `{percent}`, and `{bar}`
+  both `cpu.rs` and `memory.rs`. `spark.rs` is `pub(crate) fn sparkline(samples:
+  &[f32], max: f32) -> String` (W45), a shared pure Unicode block-eighths
+  sparkline (one glyph per historical reading, clamped `0..=1` of `max`) backing
+  the `{spark}` placeholder in both `cpu.rs` and `memory.rs`; the history itself
+  rides `Context.cpu_history`/`mem_history`, populated at the bin's build edge
+  only when a widget's `format` references `{spark}` (see `history.rs`/`cpu.rs`/
+  `memory.rs` in the bin). `cpu.rs` is the `cpu` widget: pure over
+  `Context.cpu`, with an nf-md-chip `{icon}`, `{percent}`, `{bar}`, and
+  `{spark}` (over `Context.cpu_history`, `spark_width` ring length)
   placeholders, plus `warn_percent`(80)/`crit_percent`(95) threshold config
   (via `alert_over`). `memory.rs` is the `memory` widget: pure over
   `Context.memory`, with an nf-md-memory `{icon}`, `{used}`/`{total}`/
   `{avail}` (human-readable binary sizes via `format_bytes`, e.g. `6.2G`),
-  `{percent}`, and `{bar}` placeholders, plus `warn_percent`(80)/
+  `{percent}`, `{bar}`, and `{spark}` (over `Context.mem_history`) placeholders,
+  plus `warn_percent`(80)/
   `crit_percent`(92) threshold config (via `alert_over`). `windows.rs` is the
   `windows` widget: it emits only the window **text** (`{index}{flags}
   {name}`); the pill styling and active/inactive colors are applied
@@ -233,19 +255,29 @@ these shared types, not a design shortcut. Keep them serializable.
   `{artist}`/`{title}`/`{status}` placeholders (default `"{title} — {artist}"`),
   plus `alt_format`/`down_format`; NOT threshold-aware and NOT in the default
   layout.
+  `throughput.rs` is the `ThroughputWidget` (W47, named with the `Widget`
+  suffix to avoid colliding with the `rustline_abi::Throughput` data type):
+  pure over `Context.throughput`, with `{down}`/`{up}` placeholders (down/up
+  bytes-per-sec as human-readable `format_bytes` sizes suffixed `/s`, e.g.
+  `1.2M/s`), plus `alt_format`/`down_format`; NOT threshold-aware (a rate has
+  no universal ceiling) and NOT in the default layout.
   `toggle.rs` holds the shared click-toggle helpers
   `active_format(ctx, name, format, alt) -> &str`
   (picks `alt` iff it's non-empty AND `name` is in `ctx.toggled`, else
   `format`) and `clickable_range(name, alt) -> Option<&str>` (`Some(name)` iff
   `alt` is non-empty AND `name.len() <= 15`, tmux's `range=user|X` byte limit);
-  the eleven format-bearing widgets (`datetime`, `lan_ip`, `tailscale_ip`,
-  `battery`, `cpu`, `memory`, `loadavg`, `git`, `disk`, `uptime`, `media`) each
+  the twelve format-bearing widgets (`datetime`, `lan_ip`, `tailscale_ip`,
+  `battery`, `cpu`, `memory`, `loadavg`, `git`, `disk`, `uptime`, `media`,
+  `throughput`) each
   carry an `alt_format` field and call both helpers from their
   `render`/`range_name`.
 - `assemble.rs` — `assign_palette`, `render_named_region` (panic-guarded per
   widget via `catch_unwind`; now range-wraps via `render_region_ranged`,
   remembering each widget's `range_name()` across the palette-assignment
-  flatten/regroup), `render_window` (wraps the `windows` text in a
+  flatten/regroup, and keying each widget's color override off the `(name,
+  widget)` pairs `Registry::resolve` now returns (W53) — the old second
+  `resolved_names`/`registry.contains` re-filter is gone), `render_window`
+  (wraps the `windows` text in a
   themed rounded pill via `render.rs::render_window_pill`, keyed on
   `ctx.window.is_current`; still `catch_unwind`-guarded → `""` on panic/no
   window; the window pill is never clickable — `render window` has no
@@ -280,7 +312,11 @@ these shared types, not a design shortcut. Keep them serializable.
   `timezone: Option<String>` (W30, an IANA zone via `chrono-tz`). `PluginConfig`
   gains `source: Option<PluginSource>` (a typed enum that still accepts a bare
   `owner/repo` string) plus `checksum`/`tag: Option<String>` recorded by
-  `plugin install` (W38).
+  `plugin install` (W38). `WidgetOpts` gains a `throughput: ThroughputOpts`
+  (W47 — `format`/`alt_format`/`down_format`/`interface`/color/click, mirroring
+  the other opt-in widgets), and `CpuOpts`/`MemoryOpts` each gain a
+  `spark_width` (W45, default 8 — the `{spark}` history ring length, consulted
+  only when `format` references `{spark}`).
 - `ansi.rs` — `tmux_to_ansi(&str) -> String`: transcodes the tmux markup we emit
   into ANSI SGR (`colourN` → 256-color, `#rrggbb` → truecolor, named → basic)
   for the `--preview` flag.
@@ -311,10 +347,20 @@ these shared types, not a design shortcut. Keep them serializable.
   `counter`/`filewatch`/`httpget` examples all use these typed wire structs.
   Also `MediaInfo { artist, title, status }` (W41, a now-playing snapshot
   riding `Context.media`; NOT in `WireContext` — not exposed to guests, like
-  `Context.uptime`) and `pub const ABI_VERSION: u32 = 1` (W32) — the host↔guest
+  `Context.uptime`), `Throughput { down_bytes_per_sec, up_bytes_per_sec }`
+  (W47, a network-rate snapshot riding `Context.throughput`; also NOT in
+  `WireContext`, same as `MediaInfo`), and `pub const ABI_VERSION: u32 = 1` (W32) — the host↔guest
   ABI version the host stamps onto `RenderInput.abi_version` and a guest may
   echo from its optional `abi_version()` export (see `rustline-wasm`'s
   `abi_decision`).
+  Also the four host-effect wire-result types (`HttpResult`,
+  `CachedHttpResult`, `ReadResult`, `WriteResult`), moved here (W51) as the
+  single canonical definition a host function's JSON response decodes into —
+  previously duplicated between `rustline-wasm`'s `abi.rs` and
+  `rustline-plugin-sdk`, kept in sync only by the e2e test; each carries a
+  struct-level `#[serde(default)]` so a guest's decode stays forward-compatible
+  with a host that adds/omits a field. `rustline-wasm` and the SDK re-export
+  them.
   The WASM wire types, re-exported by `rustline-core`.
 
 `rustline-wasm`:
@@ -325,10 +371,22 @@ these shared types, not a design shortcut. Keep them serializable.
   `normalize_abs` (rejects `..` for arbitrary-file I/O), `dir_size`/`check_cap`
   (state-dir quota accounting via `walkdir`).
 - `paths.rs` — `expand_tilde`, `data_root`, `state_root`, `default_plugin_dir`
-  (all under `$XDG_DATA_HOME/rustline`, falling back to `$HOME/.local/share/rustline`).
-- `abi.rs` — the host↔guest wire types (`HttpResult`, `CachedHttpResult`,
-  `ReadResult`, `WriteResult`, `RenderInput`) and `parse_render_output`
-  (malformed JSON → empty `Vec`).
+  (all under `$XDG_DATA_HOME/rustline`, falling back to `$HOME/.local/share/rustline`),
+  plus `wasmtime_cache_config_path`/`ensure_wasmtime_cache_config` (W43): lazily
+  writes `<state_root>/wasmtime-cache.toml` (via the same atomic temp-file +
+  rename as `cpu.rs`'s snapshot store) — a `[cache]` block with ONLY
+  `directory = <state_root>/wasmtime-cache/` and **no** `enabled` key (wasmtime
+  43.x's `[cache]` is `deny_unknown_fields` and rejects `enabled`) — and returns
+  its path, or `None` (best-effort, never panics) on any I/O failure or an
+  unwritable root, so `build_plugin` degrades to no-cache rather than handing
+  wasmtime an unusable config (N2). The cache dir is kept distinct from plugins'
+  own state subdirs.
+- `abi.rs` — `RenderInput` and `parse_render_output` (malformed JSON → empty
+  `Vec`). The four host-effect wire-result types (`HttpResult`,
+  `CachedHttpResult`, `ReadResult`, `WriteResult`) now live in `rustline-abi`
+  (W51) and are re-exported here, so existing `crate::abi::HttpResult` paths
+  keep resolving (the same precedent as `rustline_core::segment`'s `Segment`
+  re-export).
 - `cache.rs` — pure HTTP-response-cache helpers: FNV-1a URL→path, RFC3339
   freshness (`age_secs`/`is_fresh`), quota-bounded `read_entry`/`write_entry`.
 - `capability.rs` — `CapabilityCtx`: one plugin instance's allowlists, state
@@ -350,7 +408,15 @@ these shared types, not a design shortcut. Keep them serializable.
 - `host.rs` — the `host_fn!` wrappers binding `perform_*` (incl.
   `rl_http_get_cached` and, W7, `rl_log`) to each plugin's `CapabilityCtx`,
   `build_plugin` (Extism instantiation: wasi off, fuel + timeout + memory
-  caps, all **seven** host functions bound), and `WasmWidget` (wraps an
+  caps, all **seven** host functions bound), `build_plugin_with_cache` +
+  `CompileCache { Enabled, Disabled }` (W43): `build_plugin` now points
+  wasmtime at an on-disk compile cache under the state root via
+  `PluginBuilder::with_cache_config` (from `wasmtime_cache_config_path`) so a
+  later cold spawn deserializes an unchanged plugin's precompiled artifact
+  instead of re-running Cranelift — best-effort (no config producible → no
+  cache, never a failed build or dropped plugin, N2; guest authority N1–N4
+  untouched); `CompileCache::Disabled` (`with_cache_disabled`) is the bench's
+  A/B toggle that forces a full compile. And `WasmWidget` (wraps an
   `extism::Plugin`; `Widget::render` degrades to empty segments on any
   error/timeout/malformed output; carries its own `name` and implements
   `range_name` as `Some(name)` iff `name.len() <= 15` — the guest itself
@@ -399,16 +465,18 @@ these shared types, not a design shortcut. Keep them serializable.
   their JSON responses into result structs, returning `Result<_, HostError>`
   (`{Call, Decode, Unavailable}`) instead of an untyped `serde_json::Value`;
   re-exports of `rustline_abi::{Color, GuestRender, Segment, Style,
-  WireContext}`; the `active_format` toggle helper and `LogLevel` enum; and the
+  WireContext}` and the four host-effect result types (`HttpResult`,
+  `CachedHttpResult`, `ReadResult`, `WriteResult`); the `active_format` toggle
+  helper and `LogLevel` enum; and the
   `export_plugin!` macro, which emits the `name`/`render`/`abi_version` Extism
   exports (the last returning the real `rustline_abi::ABI_VERSION`) from one
   line. The capability wrappers link the Extism PDK **only on `wasm32`**; on the
   host target they return `HostError::Unavailable` so a plugin's pure logic
-  compiles and unit-tests under `cargo test`. NOTE: the SDK currently
-  re-declares the host wire-result types (`HttpResult`/`CachedHttpResult`/
-  `ReadResult`/`WriteResult`, field-identical to `rustline-wasm`'s `abi.rs`,
-  guarded by the e2e test) — hoisting them into `rustline-abi` is a recorded
-  follow-up (see WHATS-NEXT).
+  compiles and unit-tests under `cargo test`. The four host-effect wire-result
+  types (`HttpResult`/`CachedHttpResult`/`ReadResult`/`WriteResult`) are now
+  re-exported from `rustline-abi` (W51) rather than re-declared here — the
+  previous SDK-local copy (kept in sync only by the e2e test) is gone, removing
+  the drift risk.
 
 `plugins/weather` (excluded workspace member, `wasm32-unknown-unknown`):
 - `lib.rs` — pure logic (`code_to_icon`, `render_format`, `parse_wttr`,
@@ -479,14 +547,22 @@ mod guest`): three more worked examples, each covering a host capability
   `parse_top_cpu`) are `#[cfg(any(target_os = …, test))]`-compiled and
   unit-tested on the Linux dev box, with the snapshot-cache tests injecting a
   tempdir rather than touching the real state dir. Unsupported platform or
-  failed read → `None`. The persisted snapshot also doubles as the sample
-  history a future sparkline could consume (see Roadmap).
+  failed read → `None`. Also `read_cpu_history(state_dir, current_percent,
+  spark_width) -> Vec<f32>` (W45): a SEPARATE persisted ring at
+  `<state_root>/cpu-history` (distinct from the `cpu-sample` snapshot above) —
+  load via `sample_store` + `history::parse_history`, push the current reading,
+  truncate to `spark_width`, persist, and return — feeding the `cpu` widget's
+  `{spark}` placeholder. Only called from the build edge when `cpu`'s `format`
+  references `{spark}`.
 - `memory.rs` — `read_memory()`, a `#[cfg(target_os)]` read surface: Linux
   reads `/proc/meminfo` (`MemTotal`/`MemAvailable` in kB, `parse_meminfo`);
   macOS shells out to `sysctl -n hw.memsize` + `vm_stat` and derives available
   bytes from free/inactive/speculative pages at the reported page size
   (`parse_macos_memory`). Same cfg-gated pure-parser pattern as
-  `battery.rs`/`cpu.rs`. Unsupported platform or failed read → `None`.
+  `battery.rs`/`cpu.rs`. Unsupported platform or failed read → `None`. Also
+  `read_memory_history(state_dir, current_percent, spark_width) -> Vec<f32>`
+  (W45), the `memory` counterpart to `cpu.rs`'s `read_cpu_history`, persisting a
+  `<state_root>/memory-history` ring for `memory`'s `{spark}`.
 - `git.rs` — `read_git(path) -> Option<GitInfo>`, a platform-agnostic (no
   `#[cfg(target_os)]`) shell-out read: runs `git -C <path> status
   --porcelain=v2 --branch`, `None` on ANY failure (`git` missing, non-repo,
@@ -511,6 +587,39 @@ mod guest`): three more worked examples, each covering a host capability
 - `media.rs` — `read_media() -> Option<MediaInfo>` (W41), a Linux shell-out to
   `playerctl metadata` behind the pure `parse_playerctl`; `None` on any failure
   (`playerctl` missing, no player, malformed output). Non-Linux → `None`.
+- `throughput.rs` — `read_throughput(state_dir, interface) -> Option<Throughput>`
+  (W47), a Linux read surface at the `Context`-build edge. A rate is a delta,
+  so — mirroring `cpu.rs`'s persisted-snapshot pattern — it diffs the current
+  `/proc/net/dev` counters against a prior `(rx, tx, ts)` sample persisted at
+  `<state_root>/throughput-sample` via `sample_store` (no sleep across two live
+  reads). `None` on the first invocation (nothing to diff against), an
+  unsupported platform, or a read failure — never a fabricated `0` (invariant
+  #6). The pure `parse_proc_net_dev`/`throughput_rate`/`aggregate` helpers are
+  `#[cfg(any(target_os = "linux", test))]`-compiled (same as `cpu.rs`), so
+  they're unit-tested on any dev box; `interface` pins the read to one named
+  interface, `None` aggregates all non-loopback interfaces.
+- `sample_store.rs` — shared best-effort atomic per-widget state persistence
+  (W52): `read_sample`/`write_sample` read/write a small text file under a state
+  dir via temp-file + rename, `warn!`ing (never panicking) on I/O failure. A
+  generalization of `cpu.rs`'s pre-existing `cpu-sample` dance, reused by
+  `throughput.rs` and the `{spark}` history reads; each caller keeps its own
+  sample serialization/parsing.
+- `history.rs` — pure sparkline-history ring helpers (W45): `parse_history`/
+  `serialize_history` over a single space-separated line of `f32` readings
+  (oldest first, total over corrupt tokens), plus push/truncate — the ring's
+  own shape, split from `sample_store`'s generic file I/O the same way
+  `cpu.rs`'s `parse_snapshot`/`serialize_snapshot` are. Shared by `cpu.rs`'s and
+  `memory.rs`'s `{spark}` history reads.
+- `sample_context.rs` — the one shared synthetic-`Context` builder (W52):
+  `sample_context(show_alerts) -> Context`, a representative fully-populated
+  fixture. The three previously near-identical hand-rolled fixtures
+  (`theme_cmd.rs`'s preview `sample_context`, `bench/fixture.rs`'s
+  `fabricated_context`, `plugin_cmd.rs`'s `plugin run` harness) now delegate
+  here via struct-update, so they no longer drift as `Context` grows.
+  `theme show`/`theme pick`'s rendered preview is the load-bearing consumer —
+  every field its preview layout can observe keeps theme_cmd's original
+  pre-consolidation value verbatim (pinned byte-identical by a characterization
+  test); the extra superset fields carry synthetic data no preview widget reads.
 - `click.rs` — click resolution + dispatch (W36): `resolve_click(&Config,
   range, button) -> ClickAction` (`{Toggle, OpenUrl, Run, NoOp}`, pure over the
   config) and `dispatch(action, range, &impl ClickExecutor)`. The
@@ -540,7 +649,13 @@ mod guest`): three more worked examples, each covering a host capability
   region's layout; `disk_mount` is `build_region_context`'s fourth parameter,
   threaded in by its caller from `cfg.widgets.disk.mount` since — unlike
   `git`, which reuses `pane_current_path` already on hand — the mount isn't
-  otherwise available inside `build_context.rs`), `os`, `arch`
+  otherwise available inside `build_context.rs`), `throughput` (via
+  `throughput::read_throughput`, gated the same way on `throughput` being in
+  the layout, W47), the `{spark}`-gated `cpu_history`/`mem_history` (only read —
+  via `cpu::read_cpu_history`/`memory::read_memory_history` — when the `cpu`/
+  `memory` widget's configured `format` contains the literal `{spark}`; a
+  `spark` struct threaded alongside the layout carries each widget's `format` +
+  `spark_width`, W45), `os`, `arch`
   (from `std::env::consts::OS`/`ARCH`), and `toggled` (via
   `toggles::read_toggles()`, unconditionally — cheap relative to the gated
   cpu/memory/git/disk reads). A private `layout_needs(layout, name) -> bool`
@@ -681,9 +796,14 @@ mod guest`): three more worked examples, each covering a host capability
   the already-resolved `theme`.
 - `bench/` (`#[cfg(feature = "bench")]`) — the `rustline bench` subcommand:
   `harness.rs` (`summarize`/`measure`/`Stats`/`Row`/`Group`), `fixture.rs`
-  (`fabricated_context` — the pure-pass mock seam), `render_passes.rs` (pure
+  (`fabricated_context` — the pure-pass mock seam, now a thin wrapper over the
+  shared `sample_context`, W52), `render_passes.rs` (pure
   widget + pure/real region passes), `sources.rs` (per-read timing + the
-  source registry), `plugins.rs` (real-preserved-state plugin timing), and
+  source registry), `plugins.rs` (real-preserved-state plugin timing, plus
+  `bench_plugin_builds` (W43): a per-plugin `build_plugin` A/B — compile cache
+  OFF (`with_cache_disabled`, a full Cranelift compile every build) vs ON (warm
+  deserialize) — the cold-start compile cost the preserved-state pass doesn't
+  isolate; measured ~13× faster (~48→~3.7 ms, ~45 ms/plugin saved)), and
   `report.rs` (comfy-table pretty/markdown). Gated behind the `bench` cargo
   feature; the default binary is unchanged.
 
@@ -956,11 +1076,14 @@ crit_percent = 10   # default; 0 disables a tier
 **CPU and memory widgets:** `cpu` and `memory` are in the **default** right
 layout (unlike the opt-in IP/battery widgets above). `cpu` takes a `format`
 (default `"{icon} {percent}%"`) with `{icon}` (nf-md-chip, or the `icon`
-override below), `{percent}`, and `{bar}` (a `bar_width`-cell Unicode
-block-eighths gauge, default 8) placeholders. `memory` takes a `format`
+override below), `{percent}`, `{bar}` (a `bar_width`-cell Unicode
+block-eighths gauge, default 8), and `{spark}` (a Unicode block-eighths
+sparkline of the last `spark_width` readings, default 8 — see below)
+placeholders. `memory` takes a `format`
 (default `"{icon} {used}/{total}"`) with `{icon}` (nf-md-memory, or its own
 `icon` override), `{used}`/`{total}`/`{avail}` (human-readable binary sizes,
-e.g. `6.2G`), `{percent}`, and `{bar}` (`bar_width`, default 8) placeholders.
+e.g. `6.2G`), `{percent}`, `{bar}` (`bar_width`, default 8), and `{spark}`
+(`spark_width`, default 8) placeholders.
 Both take a `down_format` (default `""`, i.e. render nothing) shown when the
 platform read failed or is unsupported — same collapse-placeholders-to-empty
 behavior as `battery`'s `down_format`. Both are also **threshold-aware** (see
@@ -971,21 +1094,31 @@ Nerd-Font one (`None`, the default, keeps the built-in glyph).
 
 ```toml
 [widgets.cpu]
-format = "{icon} {bar} {percent}%"   # default "{icon} {percent}%"
+format = "{icon} {spark} {percent}%" # default "{icon} {percent}%"
 bar_width = 8
+spark_width = 8     # {spark} history-ring length (last N readings)
 down_format = ""
 warn_percent = 80   # default; 0 disables a tier
 crit_percent = 95   # default
 # icon = "CPU"      # optional; overrides the built-in Nerd-Font glyph
 
 [widgets.memory]
-format = "{icon} {used}/{total}"     # default; or "{icon} {bar} {percent}%"
+format = "{icon} {used}/{total}"     # default; or "{icon} {spark} {percent}%"
 bar_width = 8
+spark_width = 8
 down_format = ""
 warn_percent = 80   # default; 0 disables a tier
 crit_percent = 92   # default
 # icon = "MEM"      # optional; overrides the built-in Nerd-Font glyph
 ```
+
+**`{spark}` history caveat (important):** the rolling history that backs
+`{spark}` is read and persisted at `Context`-build time **only when the
+widget's `format` contains `{spark}`** — a `{spark}` placed *only* in a
+widget's click-toggle `alt_format` (and never in `format`) never populates the
+history, so it renders permanently empty. Put `{spark}` in `format` (you can
+have it in both) for it to accumulate. (This gating checks `format` only; a
+follow-up to also gate on `alt_format` is recorded in WHATS-NEXT.)
 
 **Load average widget:** `loadavg` is in the **default** right layout. It takes
 a `format` (default `"{load1} {load5} {load15}"`) with `{load1}`/`{load5}`/
@@ -1077,6 +1210,28 @@ alt_format  = "{status}: {title}"    # left-click toggles to this
 down_format = ""
 ```
 
+**Throughput widget:** `throughput` is opt-in — not in the default layout. It
+reads per-interface `/proc/net/dev` byte counters once at `Context`-build time
+(Linux only; `crates/rustline/src/throughput.rs`) and diffs them against a
+prior sample persisted under the state dir to compute down/up rates.
+`Context.throughput` is `None` (and the widget renders nothing/`down_format`)
+on the **first invocation** (a rate is a delta — nothing yet to diff against),
+on a non-Linux platform, or when the read fails — never a fabricated `0` rate
+(invariant #6). Takes a `format` (default `" {down} {up}"`, no icon
+placeholder) with `{down}`/`{up}` (human-readable binary sizes suffixed `/s`,
+reusing `memory`'s `format_bytes`, e.g. `1.2M/s`) placeholders, an optional
+`interface` (pin to one named interface; `None`, the default, aggregates every
+non-loopback interface), and a `down_format` (default `""`) — same
+collapse-placeholders-to-empty behavior as the other widgets' `down_format`.
+NOT threshold-aware (a rate has no universal ceiling).
+
+```toml
+[widgets.throughput]
+format = " {down} {up}"     # default
+# interface = "eth0"        # optional; omit to aggregate all non-loopback NICs
+down_format = ""
+```
+
 **Per-widget color override (`fg`/`bg`):** every format-bearing widget accepts
 optional `fg`/`bg` keys (W29) that pin its foreground/background color,
 flattened directly into its `[widgets.<name>]` table. Applied centrally in
@@ -1094,9 +1249,9 @@ fg = { Indexed = 250 }
 bg = { Rgb = [40, 44, 52] }
 ```
 
-**Click-to-toggle widget views:** the eleven format-bearing widgets —
+**Click-to-toggle widget views:** the twelve format-bearing widgets —
 `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg`,
-`git`, `disk`, `uptime`, `media` — each take an additional `alt_format` (default `""`, `#[serde(default)]`, so
+`git`, `disk`, `uptime`, `media`, `throughput` — each take an additional `alt_format` (default `""`, `#[serde(default)]`, so
 covered by invariant #3 like every other opt). A non-empty `alt_format` makes
 that widget clickable: left-clicking it in the tmux status line toggles it
 between `format` and `alt_format`.
@@ -1144,12 +1299,16 @@ widget or plugin name longer than 15 bytes is simply not clickable (tmux's
 
 A plugin author should pick a name (the `.wasm` stem) that is ≤ 15 bytes,
 avoids the reserved name `window`, and sticks to `[A-Za-z0-9_-]`, since it
-becomes a tmux `range=user|<name>` argument verbatim. One more name worth
-avoiding: `cpu-sample` — the `cpu` widget's persisted sample cache (see
-`cpu.rs` above) writes a flat file at `<state_root>/cpu-sample`, which
-collides with a plugin's own state directory of the same name; the collision
-degrades gracefully (a failed create/rename is `warn!`-logged, never
-panics), but is still best avoided.
+becomes a tmux `range=user|<name>` argument verbatim. Also avoid the handful
+of host-owned state-file names the CLI writes flat under `<state_root>`, each
+of which would collide with a plugin's own same-named state directory:
+`cpu-sample` (the `cpu` widget's snapshot cache), `cpu-history`/
+`memory-history` (the `{spark}` history rings, W45), `throughput-sample` (the
+`throughput` widget's prior counter sample, W47), and `wasmtime-cache`/
+`wasmtime-cache.toml` (the WASM compile cache dir + its config, W43 — kept
+deliberately distinct from any plugin state subdir). Every collision degrades
+gracefully (a failed create/rename is `warn!`-logged, never panics), but is
+still best avoided.
 
 **Window pill (`[theme]`):** the window list renders as a rounded pill (see
 Render pipeline). Six optional `[theme]` fields override the defaults — active
@@ -1280,7 +1439,8 @@ info|debug|trace` and is parsed leniently (a typo falls back to the default).
    *different* version (a guest with no `abi_version` export still registers as
    legacy). Keep the wire types **additive** — no `deny_unknown_fields`, so an
    older guest keeps deserializing a newer `Context` (this is why `uptime`/
-   `media` could be omitted from `WireContext` without breaking anything).
+   `media`/`throughput`/`cpu_history`/`mem_history` could be omitted from
+   `WireContext` without breaking anything).
 3. **`Config::load` is total** — a bad config must never break the bar.
 4. **`init` output must be injection-safe** (`#{q:}` + `--flag=` form).
 5. **`render_region` puts `segments[0]` leftmost regardless of `Direction`.** The
@@ -1539,11 +1699,35 @@ branch on platform.
     `PluginBuilder::with_cache_config` seam, gated on a `build_plugin`-timing
     measurement; see the
     [feasibility note](docs/superpowers/notes/2026-07-23-w43-compiled-module-cache-feasibility.md).
-- Historical sparkline (last-X-seconds graph) for `cpu`/`memory` — `cpu`'s
-  `read_cpu` now persists one sample across invocations (the `cpu-sample`
-  cache, above), but only the single latest reading; a sparkline needs a
-  short rolling history of samples (and the same treatment for `memory`,
-  which still reads a single-shot snapshot), deferred to its own spec.
+    (Now implemented in bundle #3, below.)
+- Done (whats-next bundle #3, branch `whats-next/2026-07-23-followups` — see the
+  [design spec](docs/superpowers/specs/2026-07-23-rustline-whatsnext-bundle-3-design.md)
+  / [plan](docs/superpowers/plans/2026-07-23-rustline-whatsnext-bundle-3.md)):
+  - `throughput` widget (W47, the sixteenth built-in) — `Context.throughput`/
+    `rustline_abi::Throughput`, `throughput::read_throughput` (`/proc/net/dev`
+    counters diffed against a persisted prior sample; `None` until one exists),
+    `{down}`/`{up}` rates; opt-in, layout-gated, click-toggleable, NOT
+    threshold-aware, and NOT mirrored into `WireContext`.
+  - `{spark}` sparkline (W45) on `cpu`/`memory` — `widgets/spark.rs`'s
+    `sparkline`, `Context.cpu_history`/`mem_history` (persisted rings read at
+    the build edge ONLY when `format` references `{spark}`; a `{spark}` placed
+    solely in `alt_format` renders empty), and the `spark_width` option. Shared
+    `history.rs`/`sample_store.rs` bin helpers back the persistence.
+  - W51 — the four host-effect wire-result types (`HttpResult`/
+    `CachedHttpResult`/`ReadResult`/`WriteResult`) hoisted into `rustline-abi`
+    as one canonical definition; `rustline-wasm` and the SDK re-export them
+    (the SDK's duplicate copy deleted).
+  - W52 — the single shared `sample_context` synthetic-`Context` builder (bin;
+    theme/bench/plugin-run fixtures delegate to it) and the shared
+    `sample_store` best-effort per-widget state helper (reused by `throughput`
+    + the sparkline history).
+  - W53 — `Registry::resolve` now returns `(name, widget)` pairs; `assemble.rs`
+    dropped the second `resolved_names`/`registry.contains` re-filter.
+  - W43 — the wasmtime compile-cache seam in `build_plugin`
+    (`PluginBuilder::with_cache_config` → `<state_root>/wasmtime-cache.toml`,
+    a `[cache] directory`-only TOML with no `enabled`; best-effort/N2) plus a
+    `bench` `build_plugin`-timing pass measuring the ~13× / ~45 ms-per-plugin
+    cold-start compile win.
 - Optional daemon front-end for sub-second / push-driven widgets (the pure core
   and the wasm host are already daemon-ready).
 - Per-widget richer customization; naming the widget in the panic-guard `warn!`.
@@ -1573,4 +1757,6 @@ branch on platform.
 - Plan (whats-next bundle): `docs/superpowers/plans/2026-07-22-rustline-whatsnext-bundle.md`
 - Spec (whats-next bundle #2): `docs/superpowers/specs/2026-07-23-rustline-whatsnext-bundle-2-design.md`
 - Plan (whats-next bundle #2): `docs/superpowers/plans/2026-07-23-rustline-whatsnext-bundle-2.md`
+- Spec (whats-next bundle #3): `docs/superpowers/specs/2026-07-23-rustline-whatsnext-bundle-3-design.md`
+- Plan (whats-next bundle #3): `docs/superpowers/plans/2026-07-23-rustline-whatsnext-bundle-3.md`
 - Note (W43 compiled-module cache feasibility): `docs/superpowers/notes/2026-07-23-w43-compiled-module-cache-feasibility.md`
