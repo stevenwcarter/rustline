@@ -56,6 +56,13 @@ pub struct Context {
     /// time (only when the `disk` widget is in the active layout — see
     /// `build_context.rs`); `None` when the mount can't be `statvfs`'d.
     pub disk: Option<DiskInfo>,
+    /// System uptime in seconds, read once at build time (only when the
+    /// `uptime` widget is in the active layout — see `build_context.rs`);
+    /// `None` when the platform is unsupported or the read failed.
+    /// `#[serde(default)]` keeps deserialization total across host/guest
+    /// version skew (invariant #2), matching `toggled`/`colors` below.
+    #[serde(default)]
+    pub uptime: Option<u64>,
     /// Host OS (`std::env::consts::OS`, e.g. `"linux"`, `"macos"`). Additive
     /// platform metadata for WASM guests.
     pub os: String,
@@ -100,6 +107,7 @@ impl Default for Context {
             memory: None,
             git: None,
             disk: None,
+            uptime: None,
             os: String::new(),
             arch: String::new(),
             toggled: BTreeSet::default(),

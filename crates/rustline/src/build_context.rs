@@ -50,8 +50,8 @@ pub(crate) fn read_interfaces() -> Vec<NetIface> {
 /// Whether `layout` (a region's widget-name list) references `name`.
 ///
 /// The one predicate behind every "only pay for a read the region actually
-/// renders" gate below (cpu/memory/git/disk/battery/interfaces) — factored
-/// out so each gate is the same one-line check instead of its own
+/// renders" gate below (cpu/memory/git/disk/battery/uptime/interfaces) —
+/// factored out so each gate is the same one-line check instead of its own
 /// `.iter().any(...)`.
 fn layout_needs(layout: &[String], name: &str) -> bool {
     layout.iter().any(|w| w == name)
@@ -61,12 +61,13 @@ fn layout_needs(layout: &[String], name: &str) -> bool {
 /// format-variable values passed on the command line, plus live host state.
 ///
 /// `layout` is the region's widget-name list; the expensive cpu/memory/git/
-/// disk/battery/interfaces reads (`read_cpu` sleeps ~120ms on Linux;
+/// disk/battery/uptime/interfaces reads (`read_cpu` sleeps ~120ms on Linux;
 /// `read_memory` on macOS spawns `vm_stat`; `read_git` shells out to `git`;
-/// `read_disk` calls `statvfs(2)`; `read_battery` scans sysfs; `read_interfaces`
-/// calls `getifaddrs(3)`) are taken ONLY when that region actually renders
-/// them — the same "pay only for what the region references" gating
-/// `register_plugins` uses. `disk_mount` is the configured
+/// `read_disk` calls `statvfs(2)`; `read_battery` scans sysfs; `read_uptime`
+/// reads `/proc/uptime` (Linux) or shells out to `sysctl` (macOS);
+/// `read_interfaces` calls `getifaddrs(3)`) are taken ONLY when that region
+/// actually renders them — the same "pay only for what the region
+/// references" gating `register_plugins` uses. `disk_mount` is the configured
 /// `[widgets.disk].mount` (unused unless `layout` names `disk`).
 pub fn build_region_context(
     args: &RegionArgs,
@@ -96,6 +97,11 @@ pub fn build_region_context(
     } else {
         None
     };
+    let uptime = if layout_needs(layout, "uptime") {
+        crate::uptime::read_uptime()
+    } else {
+        None
+    };
     Context {
         session_name: args.session.clone().unwrap_or_default(),
         window_index: args.window.clone().unwrap_or_default(),
@@ -120,6 +126,7 @@ pub fn build_region_context(
         },
         git,
         disk,
+        uptime,
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         toggled: crate::toggles::read_toggles(),
@@ -241,6 +248,24 @@ mod tests {
             "",
         );
         assert_eq!(ctx.battery, crate::battery::read_battery());
+    }
+
+    #[test]
+    fn uptime_sampled_only_when_region_names_it() {
+        // Empty layout: the read never runs, so it stays None — same
+        // "pay only for what the region references" gating as battery.
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
+        assert!(ctx.uptime.is_none());
+
+        // Named in the layout: the real read runs, matching a direct
+        // read_uptime() call.
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &["uptime".to_string()],
+            &Theme::default(),
+            "",
+        );
+        assert_eq!(ctx.uptime, crate::uptime::read_uptime());
     }
 
     #[test]
@@ -380,5 +405,6 @@ mod tests {
         assert!(ctx.battery.is_none());
         assert!(ctx.cpu.is_none() && ctx.memory.is_none());
         assert!(ctx.git.is_none() && ctx.disk.is_none());
+        assert!(ctx.uptime.is_none());
     }
 }

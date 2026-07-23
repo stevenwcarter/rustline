@@ -57,6 +57,7 @@ mod tests {
             disk: None,
             os: String::new(),
             arch: String::new(),
+            uptime: None,
             toggled: toggled
                 .iter()
                 .map(|s| s.to_string())

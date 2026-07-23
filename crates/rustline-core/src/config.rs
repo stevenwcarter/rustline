@@ -495,6 +495,32 @@ impl Default for DiskOpts {
     }
 }
 
+/// Default `format` for the `uptime` widget: the bare humanized reading.
+fn default_uptime_format() -> String {
+    "{uptime}".into()
+}
+
+/// Options for the `uptime` widget.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UptimeOpts {
+    #[serde(default = "default_uptime_format")]
+    pub format: String,
+    #[serde(default)]
+    pub alt_format: String,
+    #[serde(default)]
+    pub down_format: String,
+}
+
+impl Default for UptimeOpts {
+    fn default() -> Self {
+        Self {
+            format: default_uptime_format(),
+            alt_format: String::new(),
+            down_format: String::new(),
+        }
+    }
+}
+
 /// Per-widget option overrides, keyed by widget name.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WidgetOpts {
@@ -522,6 +548,8 @@ pub struct WidgetOpts {
     pub git: GitOpts,
     #[serde(default)]
     pub disk: DiskOpts,
+    #[serde(default)]
+    pub uptime: UptimeOpts,
 }
 
 /// Optional theme overrides layered onto a base [`Theme`] by

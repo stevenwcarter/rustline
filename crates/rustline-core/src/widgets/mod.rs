@@ -14,6 +14,7 @@ mod net;
 pub mod pane_id;
 pub mod tailscale_ip;
 mod toggle;
+pub mod uptime;
 pub mod windows;
 
 pub use battery::BatteryWidget;
@@ -31,6 +32,7 @@ pub use tailscale_ip::TailscaleIp;
 // Re-exported for assemble.rs (Task 3) and the widgets' alt_format toggling
 // (Task 4+) of the click-toggle plan.
 pub(crate) use toggle::{active_format, clickable_range};
+pub use uptime::Uptime;
 pub use windows::Windows;
 
 // Re-exported for the numeric widgets (cpu/memory/battery/loadavg, Tasks
@@ -51,10 +53,10 @@ fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDe
 }
 
 impl Registry {
-    /// Build a [`Registry`] pre-populated with all thirteen built-in widgets,
+    /// Build a [`Registry`] pre-populated with all fourteen built-in widgets,
     /// configuring the ones that carry options (`pane_id`, `hostname`,
     /// `datetime`, `cwd`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`,
-    /// `memory`, `loadavg`, `git`, `disk`) from `cfg`.
+    /// `memory`, `loadavg`, `git`, `disk`, `uptime`) from `cfg`.
     pub fn with_builtins(cfg: &Config) -> Registry {
         let mut registry = Registry::new();
         let pane_id = cfg.widgets.pane_id.clone();
@@ -243,6 +245,18 @@ impl Registry {
             }),
         );
 
+        let uptime = cfg.widgets.uptime.clone();
+        registry.register_described(
+            builtin_descriptor("uptime", "system uptime", true),
+            Box::new(move || {
+                Box::new(Uptime {
+                    format: uptime.format.clone(),
+                    alt_format: uptime.alt_format.clone(),
+                    down_format: uptime.down_format.clone(),
+                })
+            }),
+        );
+
         registry
     }
 }
@@ -275,13 +289,14 @@ mod tests {
             disk: None,
             os: String::new(),
             arch: String::new(),
+            uptime: None,
             toggled: Default::default(),
             colors: Default::default(),
         }
     }
 
     #[test]
-    fn with_builtins_descriptors_cover_all_thirteen_with_correct_configurable_flags() {
+    fn with_builtins_descriptors_cover_all_fourteen_with_correct_configurable_flags() {
         let cfg = Config::default();
         let reg = Registry::with_builtins(&cfg);
         let names: Vec<&str> = reg.available_names().collect();
@@ -299,10 +314,11 @@ mod tests {
             "memory",
             "git",
             "disk",
+            "uptime",
         ] {
             assert!(names.contains(&expected), "missing descriptor: {expected}");
         }
-        assert_eq!(names.len(), 13);
+        assert_eq!(names.len(), 14);
 
         let configurable = |name: &str| {
             reg.descriptors()
@@ -503,6 +519,35 @@ mod tests {
         let mut c0 = ctx(Vec::new());
         c0.disk = None;
         let widgets = reg.resolve(&["disk".into()]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|w| w.render(&c0))
+            .map(|s| s.text)
+            .collect();
+        assert!(texts.is_empty());
+    }
+
+    #[test]
+    fn uptime_registered_and_renders_from_context() {
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        assert!(reg.contains("uptime"));
+
+        let mut c = ctx(Vec::new());
+        c.uptime = Some(86_400 * 3 + 3600 * 4);
+        let widgets = reg.resolve(&["uptime".into()]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|w| w.render(&c))
+            .map(|s| s.text)
+            .collect();
+        // default format "{uptime}".
+        assert_eq!(texts, vec!["3d 4h".to_string()]);
+
+        // No uptime reading + default (empty) down_format -> widget skipped.
+        let mut c0 = ctx(Vec::new());
+        c0.uptime = None;
+        let widgets = reg.resolve(&["uptime".into()]);
         let texts: Vec<String> = widgets
             .iter()
             .flat_map(|w| w.render(&c0))

@@ -101,6 +101,7 @@ mod tests {
             disk,
             os: String::new(),
             arch: String::new(),
+            uptime: None,
             toggled: Default::default(),
             colors: Default::default(),
         }

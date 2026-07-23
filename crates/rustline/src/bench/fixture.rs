@@ -70,6 +70,7 @@ pub fn fabricated_context() -> Context {
         }),
         os: "linux".into(),
         arch: "x86_64".into(),
+        uptime: Some(86_400 * 3 + 3600 * 4), // 3d 4h
         toggled: Default::default(),
         // Theme-derived colors added when the theme feature landed on main; the
         // fixture's readings sit below every alert threshold, so no widget takes

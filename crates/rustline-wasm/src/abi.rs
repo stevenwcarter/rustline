@@ -121,6 +121,7 @@ mod tests {
             }),
             os: "linux".into(),
             arch: "x86_64".into(),
+            uptime: Some(86_400 * 3 + 3600 * 4), // 3d 4h
             toggled: BTreeSet::from(["weather".to_string()]),
             colors: ThemeColors {
                 error: Color::Rgb(1, 2, 3),

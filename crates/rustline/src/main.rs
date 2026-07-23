@@ -15,6 +15,7 @@ mod plugin_cmd;
 mod theme_cmd;
 mod tmux_conf;
 mod toggles;
+mod uptime;
 
 use std::env;
 use std::path::PathBuf;
