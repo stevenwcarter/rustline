@@ -176,8 +176,15 @@ fn main() {
             rustline_wasm::register_plugins(&mut registry, &cfg, &plugin_dir, &cfg.layout.left);
             let ctx =
                 build_region_context(&args, &cfg.layout.left, &theme, &cfg.widgets.disk.mount);
-            let out =
-                render_named_region(Direction::Left, &cfg.layout.left, &ctx, &registry, &theme);
+            let overrides = cfg.color_overrides();
+            let out = render_named_region(
+                Direction::Left,
+                &cfg.layout.left,
+                &ctx,
+                &registry,
+                &theme,
+                &overrides,
+            );
             emit(&out, args.preview);
         }
         Command::Render(Render::Right(args)) => {
@@ -186,8 +193,15 @@ fn main() {
             rustline_wasm::register_plugins(&mut registry, &cfg, &plugin_dir, &cfg.layout.right);
             let ctx =
                 build_region_context(&args, &cfg.layout.right, &theme, &cfg.widgets.disk.mount);
-            let out =
-                render_named_region(Direction::Right, &cfg.layout.right, &ctx, &registry, &theme);
+            let overrides = cfg.color_overrides();
+            let out = render_named_region(
+                Direction::Right,
+                &cfg.layout.right,
+                &ctx,
+                &registry,
+                &theme,
+                &overrides,
+            );
             emit(&out, args.preview);
         }
         Command::Render(Render::Window(args)) => {

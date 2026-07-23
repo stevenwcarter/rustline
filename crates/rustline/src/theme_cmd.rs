@@ -205,8 +205,19 @@ fn preview_theme_ansi(theme: &Theme, show_alerts: bool) -> String {
         "loadavg".to_string(),
         "datetime".to_string(),
     ];
-    let left = render_named_region(Direction::Left, &cfg.layout.left, &ctx, &reg, theme);
-    let right_out = render_named_region(Direction::Right, &right, &ctx, &reg, theme);
+    // `cfg` is `Config::default()` here (a synthetic preview, not the user's
+    // real config), so this is always empty — kept for parity with the real
+    // render call sites rather than hand-passing an empty map.
+    let overrides = cfg.color_overrides();
+    let left = render_named_region(
+        Direction::Left,
+        &cfg.layout.left,
+        &ctx,
+        &reg,
+        theme,
+        &overrides,
+    );
+    let right_out = render_named_region(Direction::Right, &right, &ctx, &reg, theme, &overrides);
     ctx.window = Some(WindowCtx {
         index: "1".into(),
         name: "shell".into(),

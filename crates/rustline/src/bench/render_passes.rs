@@ -57,23 +57,40 @@ pub fn bench_regions_pure(cfg: &Config, iters: usize, warmup: usize) -> Group {
     let ctx = fabricated_context();
     let left = cfg.layout.left.clone();
     let right = cfg.layout.right.clone();
+    // Computed once, outside every timed closure below, so building the map
+    // itself is never part of what's measured.
+    let overrides = cfg.color_overrides();
     let row = |label: &str, f: &mut dyn FnMut()| Row {
         label: label.to_string(),
         stats: summarize(&measure(warmup, iters, f)),
     };
     let mut rows = Vec::new();
     rows.push(row("left", &mut || {
-        let _ = render_named_region(Direction::Left, &left, &ctx, &registry, &theme);
+        let _ = render_named_region(Direction::Left, &left, &ctx, &registry, &theme, &overrides);
     }));
     rows.push(row("right", &mut || {
-        let _ = render_named_region(Direction::Right, &right, &ctx, &registry, &theme);
+        let _ = render_named_region(
+            Direction::Right,
+            &right,
+            &ctx,
+            &registry,
+            &theme,
+            &overrides,
+        );
     }));
     rows.push(row("window", &mut || {
         let _ = render_window(&ctx, &registry, &theme);
     }));
     rows.push(row("full-bar", &mut || {
-        let _ = render_named_region(Direction::Left, &left, &ctx, &registry, &theme);
-        let _ = render_named_region(Direction::Right, &right, &ctx, &registry, &theme);
+        let _ = render_named_region(Direction::Left, &left, &ctx, &registry, &theme, &overrides);
+        let _ = render_named_region(
+            Direction::Right,
+            &right,
+            &ctx,
+            &registry,
+            &theme,
+            &overrides,
+        );
         let _ = render_window(&ctx, &registry, &theme);
     }));
     Group {
@@ -100,19 +117,30 @@ pub fn bench_regions_real(cfg: &Config, real_iters: usize, warmup: usize) -> Gro
         flags: "*".into(),
         preview: false,
     };
+    // Computed once, outside every timed closure below, so building the map
+    // itself is never part of what's measured.
+    let overrides = cfg.color_overrides();
     let mut rows = Vec::new();
     rows.push(Row {
         label: "left".into(),
         stats: summarize(&measure(warmup, real_iters, || {
             let ctx = build_region_context(&region_args, &left, &theme, &cfg.widgets.disk.mount);
-            let _ = render_named_region(Direction::Left, &left, &ctx, &registry, &theme);
+            let _ =
+                render_named_region(Direction::Left, &left, &ctx, &registry, &theme, &overrides);
         })),
     });
     rows.push(Row {
         label: "right".into(),
         stats: summarize(&measure(warmup, real_iters, || {
             let ctx = build_region_context(&region_args, &right, &theme, &cfg.widgets.disk.mount);
-            let _ = render_named_region(Direction::Right, &right, &ctx, &registry, &theme);
+            let _ = render_named_region(
+                Direction::Right,
+                &right,
+                &ctx,
+                &registry,
+                &theme,
+                &overrides,
+            );
         })),
     });
     rows.push(Row {

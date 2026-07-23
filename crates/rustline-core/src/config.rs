@@ -71,6 +71,8 @@ pub struct DateTimeOpts {
     /// logged and falls back to local time rather than erroring.
     #[serde(default)]
     pub timezone: Option<String>,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
 }
 
 fn default_dt_format() -> String {
@@ -83,6 +85,7 @@ impl Default for DateTimeOpts {
             format: default_dt_format(),
             alt_format: String::new(),
             timezone: None,
+            color: ColorOverride::default(),
         }
     }
 }
@@ -98,12 +101,15 @@ fn default_hostname_format() -> String {
 pub struct HostnameOpts {
     #[serde(default = "default_hostname_format")]
     pub format: String,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
 }
 
 impl Default for HostnameOpts {
     fn default() -> Self {
         Self {
             format: default_hostname_format(),
+            color: ColorOverride::default(),
         }
     }
 }
@@ -119,12 +125,15 @@ fn default_pane_id_format() -> String {
 pub struct PaneIdOpts {
     #[serde(default = "default_pane_id_format")]
     pub format: String,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
 }
 
 impl Default for PaneIdOpts {
     fn default() -> Self {
         Self {
             format: default_pane_id_format(),
+            color: ColorOverride::default(),
         }
     }
 }
@@ -154,6 +163,8 @@ pub struct CwdOpts {
     /// reduced to its first character.
     #[serde(default)]
     pub abbreviate: bool,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
 }
 
 fn default_true() -> bool {
@@ -168,6 +179,7 @@ impl Default for CwdOpts {
             max_depth: 0,
             max_len: 0,
             abbreviate: false,
+            color: ColorOverride::default(),
         }
     }
 }
@@ -188,6 +200,8 @@ pub struct LanIpOpts {
     pub down_format: String,
     #[serde(default)]
     pub interface: Option<String>,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
 }
 
 impl Default for LanIpOpts {
@@ -197,6 +211,7 @@ impl Default for LanIpOpts {
             alt_format: String::new(),
             down_format: String::new(),
             interface: None,
+            color: ColorOverride::default(),
         }
     }
 }
@@ -210,6 +225,8 @@ pub struct TailscaleIpOpts {
     pub alt_format: String,
     #[serde(default)]
     pub down_format: String,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
 }
 
 impl Default for TailscaleIpOpts {
@@ -218,6 +235,7 @@ impl Default for TailscaleIpOpts {
             format: default_ip_format(),
             alt_format: String::new(),
             down_format: String::new(),
+            color: ColorOverride::default(),
         }
     }
 }
@@ -255,6 +273,8 @@ pub struct BatteryOpts {
     /// computed glyph, for non-Nerd-Font users to substitute their own.
     #[serde(default)]
     pub icon: Option<String>,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
 }
 
 impl Default for BatteryOpts {
@@ -266,6 +286,7 @@ impl Default for BatteryOpts {
             warn_percent: default_bat_warn(),
             crit_percent: default_bat_crit(),
             icon: None,
+            color: ColorOverride::default(),
         }
     }
 }
@@ -323,6 +344,8 @@ pub struct CpuOpts {
     /// for non-Nerd-Font users to substitute their own.
     #[serde(default)]
     pub icon: Option<String>,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
 }
 
 impl Default for CpuOpts {
@@ -335,6 +358,7 @@ impl Default for CpuOpts {
             warn_percent: default_cpu_warn(),
             crit_percent: default_cpu_crit(),
             icon: None,
+            color: ColorOverride::default(),
         }
     }
 }
@@ -359,6 +383,8 @@ pub struct MemoryOpts {
     /// for non-Nerd-Font users to substitute their own.
     #[serde(default)]
     pub icon: Option<String>,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
 }
 
 impl Default for MemoryOpts {
@@ -371,6 +397,7 @@ impl Default for MemoryOpts {
             warn_percent: default_mem_warn(),
             crit_percent: default_mem_crit(),
             icon: None,
+            color: ColorOverride::default(),
         }
     }
 }
@@ -399,6 +426,8 @@ pub struct LoadAvgOpts {
     /// this tier.
     #[serde(default)]
     pub crit_load: f64,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
 }
 
 impl Default for LoadAvgOpts {
@@ -409,6 +438,7 @@ impl Default for LoadAvgOpts {
             down_format: String::new(),
             warn_load: 0.0,
             crit_load: 0.0,
+            color: ColorOverride::default(),
         }
     }
 }
@@ -437,6 +467,8 @@ pub struct GitOpts {
     /// change; the empty string when clean.
     #[serde(default = "default_dirty_glyph")]
     pub dirty_glyph: String,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
 }
 
 impl Default for GitOpts {
@@ -446,6 +478,7 @@ impl Default for GitOpts {
             down_format: String::new(),
             alt_format: String::new(),
             dirty_glyph: default_dirty_glyph(),
+            color: ColorOverride::default(),
         }
     }
 }
@@ -486,6 +519,8 @@ pub struct DiskOpts {
     pub crit_percent: f64,
     #[serde(default)]
     pub alt_format: String,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
 }
 
 impl Default for DiskOpts {
@@ -498,6 +533,7 @@ impl Default for DiskOpts {
             warn_percent: default_disk_warn(),
             crit_percent: default_disk_crit(),
             alt_format: String::new(),
+            color: ColorOverride::default(),
         }
     }
 }
@@ -516,6 +552,8 @@ pub struct UptimeOpts {
     pub alt_format: String,
     #[serde(default)]
     pub down_format: String,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
 }
 
 impl Default for UptimeOpts {
@@ -524,6 +562,7 @@ impl Default for UptimeOpts {
             format: default_uptime_format(),
             alt_format: String::new(),
             down_format: String::new(),
+            color: ColorOverride::default(),
         }
     }
 }
@@ -542,6 +581,8 @@ pub struct MediaOpts {
     pub alt_format: String,
     #[serde(default)]
     pub down_format: String,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
 }
 
 impl Default for MediaOpts {
@@ -550,8 +591,32 @@ impl Default for MediaOpts {
             format: default_media_format(),
             alt_format: String::new(),
             down_format: String::new(),
+            color: ColorOverride::default(),
         }
     }
+}
+
+/// An explicit per-widget foreground/background color pin (W29), surfaced as
+/// `fg`/`bg` keys flattened into a `[widgets.<name>]` table alongside that
+/// widget's other options.
+///
+/// Applied centrally by
+/// [`render_named_region`](crate::assemble::render_named_region) — after a
+/// widget renders and before
+/// [`assign_palette`](crate::assemble::assign_palette) fills in the cycling
+/// palette color — never inside a widget itself, so widgets stay
+/// `Context`-only (invariant #1). `bg` only takes effect on a segment that
+/// doesn't already carry an explicit background (the same rule
+/// `assign_palette` itself follows, e.g. for an alert badge); `fg` applies
+/// unconditionally wherever set. Both default to `None` (no override), so an
+/// absent/default config renders byte-identically to before this feature
+/// (invariant #3).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ColorOverride {
+    #[serde(default)]
+    pub fg: Option<Color>,
+    #[serde(default)]
+    pub bg: Option<Color>,
 }
 
 /// Per-widget option overrides, keyed by widget name.
@@ -851,6 +916,38 @@ impl Config {
             .and_then(crate::builtin_theme)
             .unwrap_or_default();
         self.to_theme_over(base)
+    }
+
+    /// Project this config's per-widget `fg`/`bg` overrides into a
+    /// name→[`ColorOverride`] map, keyed by the same widget name used in
+    /// `layout.*` — the shape
+    /// [`render_named_region`](crate::assemble::render_named_region) consumes
+    /// to pin a widget's segment colors ahead of `assign_palette` (W29). Only
+    /// widgets that actually set `fg` and/or `bg` are included, so an
+    /// unconfigured widget's entry is simply absent (keeping the empty-map,
+    /// byte-identical case cheap and the common case).
+    pub fn color_overrides(&self) -> HashMap<String, ColorOverride> {
+        let candidates: [(&str, &ColorOverride); 14] = [
+            ("hostname", &self.widgets.hostname.color),
+            ("pane_id", &self.widgets.pane_id.color),
+            ("datetime", &self.widgets.datetime.color),
+            ("cwd", &self.widgets.cwd.color),
+            ("lan_ip", &self.widgets.lan_ip.color),
+            ("tailscale_ip", &self.widgets.tailscale_ip.color),
+            ("battery", &self.widgets.battery.color),
+            ("cpu", &self.widgets.cpu.color),
+            ("memory", &self.widgets.memory.color),
+            ("loadavg", &self.widgets.loadavg.color),
+            ("git", &self.widgets.git.color),
+            ("disk", &self.widgets.disk.color),
+            ("uptime", &self.widgets.uptime.color),
+            ("media", &self.widgets.media.color),
+        ];
+        candidates
+            .into_iter()
+            .filter(|(_, color)| color.fg.is_some() || color.bg.is_some())
+            .map(|(name, color)| (name.to_string(), color.clone()))
+            .collect()
     }
 }
 
@@ -1444,5 +1541,62 @@ alt_format = "{status}: {title}"
         let c = Config::load(&p);
         assert_eq!(c.widgets.media.format, "{title} — {artist}");
         assert_eq!(c.layout.left, Config::default().layout.left);
+    }
+
+    #[test]
+    fn color_override_defaults_to_none_and_flattens_into_widget_tables() {
+        let c = Config::default();
+        assert_eq!(c.widgets.datetime.color, ColorOverride::default());
+        assert_eq!(c.widgets.cpu.color.fg, None);
+        assert_eq!(c.widgets.cpu.color.bg, None);
+
+        let toml = r#"
+[widgets.datetime]
+format = "%H:%M"
+fg = { Named = "black" }
+bg = { Named = "blue" }
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.widgets.datetime.format, "%H:%M"); // sibling field untouched
+        assert_eq!(
+            c.widgets.datetime.color.fg,
+            Some(Color::Named("black".into()))
+        );
+        assert_eq!(
+            c.widgets.datetime.color.bg,
+            Some(Color::Named("blue".into()))
+        );
+    }
+
+    #[test]
+    fn malformed_color_override_falls_back_to_default() {
+        let dir = std::env::temp_dir().join("rustline_test_badcoloroverride");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        // `bg` must be a Color table, not a bare string.
+        std::fs::write(&p, "[widgets.cpu]\nbg = \"blue\"\n").unwrap();
+        let c = Config::load(&p);
+        assert_eq!(c.widgets.cpu.color, ColorOverride::default());
+        assert_eq!(c.layout.left, Config::default().layout.left);
+    }
+
+    #[test]
+    fn color_overrides_projects_only_configured_widgets() {
+        let mut cfg = Config::default();
+        cfg.widgets.datetime.color.bg = Some(Color::Named("blue".into()));
+        cfg.widgets.cpu.color.fg = Some(Color::Indexed(1));
+        let overrides = cfg.color_overrides();
+        assert_eq!(overrides.len(), 2);
+        assert_eq!(
+            overrides.get("datetime").unwrap().bg,
+            Some(Color::Named("blue".into()))
+        );
+        assert_eq!(overrides.get("cpu").unwrap().fg, Some(Color::Indexed(1)));
+        assert!(!overrides.contains_key("hostname"));
+    }
+
+    #[test]
+    fn color_overrides_is_empty_by_default() {
+        assert!(Config::default().color_overrides().is_empty());
     }
 }

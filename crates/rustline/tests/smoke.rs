@@ -1134,6 +1134,35 @@ fn render_right_with_media_renders_gracefully() {
 }
 
 #[test]
+fn render_right_with_color_override_pins_widget_bg() {
+    // W29: a `[widgets.<name>].bg` override must reach the actual rendered
+    // markup end to end (Config::color_overrides -> render_named_region ->
+    // render_region_ranged), pinning the segment's background rather than
+    // letting `assign_palette` cycle it in as usual.
+    let tmp = tempfile::tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    std::fs::write(
+        cfgdir.join("config.toml"),
+        "[layout]\nright = [\"datetime\"]\n\n[widgets.datetime]\nbg = { Named = \"blue\" }\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["render", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("bg=blue"), "override bg reaches markup: {s}");
+}
+
+#[test]
 fn plugin_add_on_unparseable_config_preserves_file() {
     // A pre-existing config with a TOML *syntax* error must abort with exit 1
     // and leave the file byte-for-byte intact — never truncate the user's whole

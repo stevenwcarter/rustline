@@ -3,8 +3,10 @@
 //! [`Registry`] resolution, per-segment palette assignment, and
 //! [`render_region`](crate::render::render_region).
 
+use std::collections::HashMap;
+
 use crate::render::{Direction, RangeGroup, Theme, render_region_ranged, render_window_pill};
-use crate::{Context, Registry, Segment, Widget};
+use crate::{ColorOverride, Context, Registry, Segment, Widget};
 
 /// Fill in each segment's background from `theme.palette`, cycling through
 /// it in order, but only where a segment doesn't already carry an explicit
@@ -38,30 +40,66 @@ fn render_guarded(widget: &dyn Widget, ctx: &Context) -> Vec<Segment> {
     }
 }
 
+/// Apply a widget's configured [`ColorOverride`] to its own just-rendered
+/// segments, ahead of `assign_palette` (W29): `bg` is set only on a segment
+/// that doesn't already carry an explicit one — the same rule
+/// `assign_palette` itself follows, so a segment this touches is then simply
+/// skipped there, same as any other hand-styled segment (e.g. an alert
+/// badge) — while `fg` is set unconditionally wherever the override
+/// specifies it. A `None` field (or no override at all) leaves that half of
+/// the style untouched, which is what keeps an empty override map
+/// byte-identical to before this feature.
+fn apply_color_override(segments: &mut [Segment], over: &ColorOverride) {
+    for seg in segments {
+        if over.bg.is_some() && seg.style.bg.is_none() {
+            seg.style.bg = over.bg.clone();
+        }
+        if over.fg.is_some() {
+            seg.style.fg = over.fg.clone();
+        }
+    }
+}
+
 /// Resolve `names` against `registry`, render each widget (panic-guarded),
-/// flatten the resulting segments in the given order, assign palette
-/// backgrounds to any that lack one, and render the region for `dir`.
+/// apply any configured [`ColorOverride`] for its name, flatten the
+/// resulting segments in the given order, assign palette backgrounds to any
+/// that lack one, and render the region for `dir`.
 ///
 /// Widget order is preserved as given in `names`: `render_region` always
 /// places `segments[0]` leftmost regardless of `dir`, so callers are
 /// responsible for passing widgets in the visual left-to-right order for
 /// their region.
+///
+/// `overrides` is keyed by the same widget/plugin name used in `names`
+/// (`Config::color_overrides()` builds it); a name absent from the map gets
+/// no override, so an empty map renders byte-identically to before this
+/// feature existed.
 pub fn render_named_region(
     dir: Direction,
     names: &[String],
     ctx: &Context,
     registry: &Registry,
     theme: &Theme,
+    overrides: &HashMap<String, ColorOverride>,
 ) -> String {
     let widgets = registry.resolve(names);
-    // Render each widget (panic-guarded), keeping its clickable range name.
+    // `resolve` silently drops unknown names (in order), so re-filter `names`
+    // the same way to recover each resolved widget's own registry name —
+    // needed to look up its color override — without changing `Registry`'s
+    // public API just for this.
+    let resolved_names = names.iter().filter(|name| registry.contains(name));
+
+    // Render each widget (panic-guarded), apply its color override (if any),
+    // and keep its clickable range name.
     let rendered: Vec<(Option<String>, Vec<Segment>)> = widgets
         .iter()
-        .map(|w| {
-            (
-                w.range_name().map(str::to_string),
-                render_guarded(w.as_ref(), ctx),
-            )
+        .zip(resolved_names)
+        .map(|(w, name)| {
+            let mut segments = render_guarded(w.as_ref(), ctx);
+            if let Some(over) = overrides.get(name) {
+                apply_color_override(&mut segments, over);
+            }
+            (w.range_name().map(str::to_string), segments)
         })
         .collect();
 
@@ -132,7 +170,14 @@ mod tests {
         let cfg = Config::default();
         let reg = Registry::with_builtins(&cfg);
         let theme = cfg.to_theme();
-        let out = render_named_region(Direction::Left, &cfg.layout.left, &ctx(), &reg, &theme);
+        let out = render_named_region(
+            Direction::Left,
+            &cfg.layout.left,
+            &ctx(),
+            &reg,
+            &theme,
+            &HashMap::new(),
+        );
         assert!(out.contains("0:0.0"), "pane_id: {out}");
         assert!(out.contains("scadrial"), "hostname: {out}");
         assert!(out.contains("#["), "styled: {out}");
@@ -245,7 +290,14 @@ mod tests {
         reg.register("boom", Box::new(|| Box::new(Boom)));
         let theme = Theme::default();
         let names = vec!["boom".to_string(), "hostname".to_string()];
-        let out = render_named_region(Direction::Left, &names, &ctx(), &reg, &theme);
+        let out = render_named_region(
+            Direction::Left,
+            &names,
+            &ctx(),
+            &reg,
+            &theme,
+            &HashMap::new(),
+        );
         assert!(
             out.contains("scadrial"),
             "surviving widget still renders: {out}"
@@ -269,7 +321,14 @@ mod tests {
             bar_bg: crate::Color::Indexed(234),
             ..Default::default()
         };
-        let out = render_named_region(Direction::Right, &["cpu".to_string()], &c, &reg, &theme);
+        let out = render_named_region(
+            Direction::Right,
+            &["cpu".to_string()],
+            &c,
+            &reg,
+            &theme,
+            &HashMap::new(),
+        );
         assert!(out.contains("bg=colour196"), "alert badge bg: {out}");
         assert!(out.contains("bold"), "alert badge bold: {out}");
     }
@@ -294,6 +353,7 @@ mod tests {
             &ctx(),
             &reg,
             &Theme::default(),
+            &HashMap::new(),
         );
         assert!(
             out.contains("#[range=user|clicky]"),
@@ -301,5 +361,89 @@ mod tests {
         );
         assert!(out.contains("#[norange]"), "closes range: {out}");
         assert!(out.contains("hi"), "text present: {out}");
+    }
+
+    #[test]
+    fn per_widget_color_override_pins_bg() {
+        // W29: an explicit `bg` override on one widget must survive
+        // `assign_palette` untouched, while a widget with no override still
+        // gets its usual palette-cycled color.
+        use crate::Color;
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        let theme = cfg.to_theme(); // palette [colour31, colour238]
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "datetime".to_string(),
+            ColorOverride {
+                fg: None,
+                bg: Some(Color::Named("blue".into())),
+            },
+        );
+        let names = vec!["hostname".to_string(), "datetime".to_string()];
+        let out = render_named_region(Direction::Left, &names, &ctx(), &reg, &theme, &overrides);
+        assert!(
+            out.contains("bg=blue"),
+            "datetime bg pinned by override: {out}"
+        );
+        assert!(
+            out.contains(&format!("bg={}", theme.palette[0].to_tmux())),
+            "hostname (no override) still gets a palette color: {out}"
+        );
+        assert!(
+            !out.contains(&format!("bg={}", theme.palette[1].to_tmux())),
+            "datetime's own palette slot must not appear once overridden: {out}"
+        );
+    }
+
+    #[test]
+    fn color_override_fg_applied_where_specified() {
+        // W29: an `fg` override applies unconditionally, composing with
+        // whatever `bg` the segment ends up with (palette-cycled here, since
+        // this override sets only `fg`).
+        use crate::Color;
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        let theme = cfg.to_theme();
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "hostname".to_string(),
+            ColorOverride {
+                fg: Some(Color::Named("black".into())),
+                bg: None,
+            },
+        );
+        let names = vec!["hostname".to_string(), "datetime".to_string()];
+        let out = render_named_region(Direction::Left, &names, &ctx(), &reg, &theme, &overrides);
+        assert!(
+            out.contains(&format!("fg=black,bg={}", theme.palette[0].to_tmux())),
+            "fg override composes with the palette-assigned bg: {out}"
+        );
+    }
+
+    #[test]
+    fn empty_overrides_are_byte_identical() {
+        // Characterization (W29): the exact markup below was captured from
+        // this same scenario (Direction::Left, the default left layout, this
+        // module's `ctx()`) BEFORE the `overrides` parameter existed. An
+        // empty map must reproduce it byte-for-byte, pinning that the new
+        // parameter changes nothing when unused.
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        let theme = cfg.to_theme();
+        let out = render_named_region(
+            Direction::Left,
+            &cfg.layout.left,
+            &ctx(),
+            &reg,
+            &theme,
+            &HashMap::new(),
+        );
+        assert_eq!(
+            out,
+            "#[fg=colour234,bg=colour31]\u{e0b0}#[fg=colour255,bg=colour31] 0:0.0 \
+             #[fg=colour31,bg=colour238]\u{e0b0}#[fg=colour255,bg=colour238] scadrial \
+             #[fg=colour238,bg=colour234]\u{e0b0}#[default]"
+        );
     }
 }
