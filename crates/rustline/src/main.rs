@@ -201,7 +201,10 @@ fn main() {
             }
         },
         Command::Config(cmd) => config_cmd::run(cmd, &config_path()),
-        Command::Plugin(cmd) => plugin_cmd::run(cmd, &config_path()),
+        Command::Plugin(cmd) => {
+            let plugin_dir = resolve_plugin_dir(None, &cfg);
+            plugin_cmd::run(cmd, &config_path(), &plugin_dir);
+        }
         Command::Theme(cmd) => theme_cmd::run(cmd, &config_path(), &themes_dir()),
         Command::Click(args) => run_click(&args),
         Command::Doctor => {

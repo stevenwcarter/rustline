@@ -143,6 +143,18 @@ pub enum PluginCmd {
     /// Manage a plugin's filesystem-path allowlist.
     #[command(subcommand)]
     Path(PatternCmd),
+    /// Approve a plugin's declared capability manifest into its allowlists.
+    Approve(ApproveArgs),
+}
+
+/// Arguments for `rustline plugin approve`.
+#[derive(Args)]
+pub struct ApproveArgs {
+    /// The plugin name (its `.wasm`/manifest stem).
+    pub plugin: String,
+    /// Skip the interactive confirmation prompt (for scripts / non-TTY use).
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// list/add/remove operations over one allowlist of a named plugin.

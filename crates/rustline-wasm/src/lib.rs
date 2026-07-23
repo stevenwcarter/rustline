@@ -10,6 +10,7 @@ pub mod cache;
 pub mod capability;
 pub mod fetch;
 pub mod host;
+pub mod manifest;
 pub mod paths;
 pub mod perform;
 pub mod state;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use rustline_core::{Config, RANGE_NAME_MAX_BYTES, Registry, WidgetDescriptor, WidgetSource};
 
 pub use host::{WasmWidget, build_plugin};
+pub use manifest::{PluginManifest, resolve_manifest};
 pub use paths::{data_root, default_plugin_dir, expand_tilde, state_root};
 
 /// Discover `*.wasm` in `plugin_dir` and register each **needed** plugin as a

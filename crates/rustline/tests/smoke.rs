@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write as _;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
 /// Point `HOME` and `XDG_DATA_HOME` at throwaway dirs under `tmp` (and strip
@@ -1612,5 +1613,130 @@ fn doctor_runs_and_prints_resolved_paths() {
     assert!(
         stdout.contains(&expected_log.display().to_string()),
         "resolved log path present: {stdout}"
+    );
+}
+
+/// `plugin approve <name> --yes` resolves the plugin's sidecar manifest and
+/// writes exactly its requested urls/paths into `[plugins.<name>]`, preserving
+/// comments, and is idempotent.
+#[test]
+fn plugin_approve_yes_writes_requested_capabilities() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(&cfg, "# keepme\n[plugins.weather]\nallowed_urls = []\n").unwrap();
+
+    // Sidecar manifest in the default plugin dir ($XDG_DATA_HOME/rustline/plugins).
+    let plugin_dir = tmp.path().join("data/rustline/plugins");
+    fs::create_dir_all(&plugin_dir).unwrap();
+    fs::write(
+        plugin_dir.join("weather.toml"),
+        concat!(
+            "name = \"weather\"\n",
+            "version = \"0.1.0\"\n",
+            "requested_urls = [\"https://wttr.in/*\"]\n",
+            "requested_paths = [\"/tmp/weather\"]\n",
+        ),
+    )
+    .unwrap();
+
+    let approve = || {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+        cmd.args(["plugin", "approve", "weather", "--yes"])
+            .env("XDG_CONFIG_HOME", tmp.path());
+        isolate(&mut cmd, tmp.path());
+        cmd.output().unwrap()
+    };
+
+    let out = approve();
+    assert!(
+        out.status.success(),
+        "approve --yes exits 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    assert!(after.contains("# keepme"), "comment preserved: {after}");
+    assert!(after.contains("https://wttr.in/*"), "url written: {after}");
+    assert!(after.contains("/tmp/weather"), "path written: {after}");
+
+    // Second approval is a no-op (idempotent), not a duplicate.
+    assert!(approve().status.success());
+    let again = fs::read_to_string(&cfg).unwrap();
+    assert_eq!(
+        again.matches("https://wttr.in/*").count(),
+        1,
+        "no dup url: {again}"
+    );
+    assert_eq!(
+        again.matches("/tmp/weather").count(),
+        1,
+        "no dup path: {again}"
+    );
+}
+
+/// Declining the `plugin approve` prompt (no `--yes`, `n` on stdin) writes
+/// nothing.
+#[test]
+fn plugin_approve_declined_writes_nothing() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    let original = "[plugins.weather]\nallowed_urls = []\n";
+    fs::write(&cfg, original).unwrap();
+
+    let plugin_dir = tmp.path().join("data/rustline/plugins");
+    fs::create_dir_all(&plugin_dir).unwrap();
+    fs::write(
+        plugin_dir.join("weather.toml"),
+        "requested_urls = [\"https://wttr.in/*\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "approve", "weather"])
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    isolate(&mut cmd, tmp.path());
+    let mut child = cmd.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(b"n\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+
+    assert!(out.status.success());
+    assert_eq!(
+        fs::read_to_string(&cfg).unwrap(),
+        original,
+        "declined approval leaves config untouched"
+    );
+}
+
+/// `plugin approve` with no manifest present reports it and writes nothing.
+#[test]
+fn plugin_approve_no_manifest_writes_nothing() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    let original = "[plugins.weather]\nallowed_urls = []\n";
+    fs::write(&cfg, original).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "approve", "weather", "--yes"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no manifest found"),
+        "reports missing manifest: {stdout}"
+    );
+    assert_eq!(
+        fs::read_to_string(&cfg).unwrap(),
+        original,
+        "no manifest leaves config untouched"
     );
 }
