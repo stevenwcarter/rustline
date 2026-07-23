@@ -16,7 +16,9 @@ mod memory;
 mod plugin_cmd;
 mod plugin_install;
 mod sample_context;
+mod sample_store;
 mod theme_cmd;
+mod throughput;
 mod tmux_conf;
 mod toggles;
 mod uptime;
@@ -175,8 +177,13 @@ fn main() {
             let plugin_dir = resolve_plugin_dir(args.plugin_dir.as_deref(), &cfg);
             let mut registry = Registry::with_builtins(&cfg);
             rustline_wasm::register_plugins(&mut registry, &cfg, &plugin_dir, &cfg.layout.left);
-            let ctx =
-                build_region_context(&args, &cfg.layout.left, &theme, &cfg.widgets.disk.mount);
+            let ctx = build_region_context(
+                &args,
+                &cfg.layout.left,
+                &theme,
+                &cfg.widgets.disk.mount,
+                cfg.widgets.throughput.interface.as_deref(),
+            );
             let overrides = cfg.color_overrides();
             let out = render_named_region(
                 Direction::Left,
@@ -192,8 +199,13 @@ fn main() {
             let plugin_dir = resolve_plugin_dir(args.plugin_dir.as_deref(), &cfg);
             let mut registry = Registry::with_builtins(&cfg);
             rustline_wasm::register_plugins(&mut registry, &cfg, &plugin_dir, &cfg.layout.right);
-            let ctx =
-                build_region_context(&args, &cfg.layout.right, &theme, &cfg.widgets.disk.mount);
+            let ctx = build_region_context(
+                &args,
+                &cfg.layout.right,
+                &theme,
+                &cfg.widgets.disk.mount,
+                cfg.widgets.throughput.interface.as_deref(),
+            );
             let overrides = cfg.color_overrides();
             let out = render_named_region(
                 Direction::Right,

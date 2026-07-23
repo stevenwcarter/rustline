@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 // keep resolving, mirroring the `Segment`/`Style`/`Color` precedent in
 // `segment.rs`.
 pub use rustline_abi::{
-    Battery, BatteryState, CpuUsage, DiskInfo, GitInfo, MediaInfo, MemInfo, NetIface,
+    Battery, BatteryState, CpuUsage, DiskInfo, GitInfo, MediaInfo, MemInfo, NetIface, Throughput,
 };
 
 /// Metadata about a single tmux window, used to render per-window segments
@@ -58,6 +58,15 @@ pub struct Context {
     /// time (only when the `disk` widget is in the active layout — see
     /// `build_context.rs`); `None` when the mount can't be `statvfs`'d.
     pub disk: Option<DiskInfo>,
+    /// Network throughput (down/up bytes-per-second) snapshot, read once at
+    /// build time (only when the `throughput` widget is in the active layout
+    /// — see `build_context.rs`); `None` on the first invocation (nothing yet
+    /// to diff against), on an unsupported platform, or when the read
+    /// failed. `#[serde(default)]` keeps deserialization total across
+    /// host/guest version skew (invariant #2), matching `uptime`/`media`
+    /// below.
+    #[serde(default)]
+    pub throughput: Option<Throughput>,
     /// System uptime in seconds, read once at build time (only when the
     /// `uptime` widget is in the active layout — see `build_context.rs`);
     /// `None` when the platform is unsupported or the read failed.
@@ -116,6 +125,7 @@ impl Default for Context {
             memory: None,
             git: None,
             disk: None,
+            throughput: None,
             uptime: None,
             media: None,
             os: String::new(),
@@ -171,6 +181,7 @@ mod tests {
         assert!(ctx.session_name.is_empty());
         assert!(ctx.battery.is_none());
         assert!(ctx.interfaces.is_empty());
+        assert!(ctx.throughput.is_none());
     }
 
     #[test]

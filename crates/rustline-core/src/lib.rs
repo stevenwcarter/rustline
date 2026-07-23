@@ -17,7 +17,7 @@ pub use config::{
 };
 pub use context::{
     Battery, BatteryState, Context, CpuUsage, DiskInfo, GitInfo, MediaInfo, MemInfo, NetIface,
-    WindowCtx,
+    Throughput, WindowCtx,
 };
 pub use render::{Direction, RANGE_NAME_MAX_BYTES, Theme, render_region};
 pub use segment::{Color, Segment, Style, ThemeColors};

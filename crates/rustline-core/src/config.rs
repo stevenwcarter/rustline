@@ -632,6 +632,45 @@ impl Default for MediaOpts {
     }
 }
 
+/// Default `format` for the `throughput` widget: down/up rates, no icon
+/// placeholder (mirrors `disk`'s icon-less default).
+fn default_throughput_format() -> String {
+    " {down} {up}".into()
+}
+
+/// Options for the `throughput` widget.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ThroughputOpts {
+    #[serde(default = "default_throughput_format")]
+    pub format: String,
+    #[serde(default)]
+    pub alt_format: String,
+    #[serde(default)]
+    pub down_format: String,
+    /// Pin the read to a single named network interface instead of
+    /// aggregating every non-loopback interface. `None` (the default)
+    /// aggregates.
+    #[serde(default)]
+    pub interface: Option<String>,
+    #[serde(default, flatten)]
+    pub color: ColorOverride,
+    #[serde(default, flatten)]
+    pub click: ClickBindings,
+}
+
+impl Default for ThroughputOpts {
+    fn default() -> Self {
+        Self {
+            format: default_throughput_format(),
+            alt_format: String::new(),
+            down_format: String::new(),
+            interface: None,
+            color: ColorOverride::default(),
+            click: ClickBindings::default(),
+        }
+    }
+}
+
 /// An explicit per-widget foreground/background color pin (W29), surfaced as
 /// `fg`/`bg` keys flattened into a `[widgets.<name>]` table alongside that
 /// widget's other options.
@@ -753,6 +792,8 @@ pub struct WidgetOpts {
     pub uptime: UptimeOpts,
     #[serde(default)]
     pub media: MediaOpts,
+    #[serde(default)]
+    pub throughput: ThroughputOpts,
 }
 
 /// Optional theme overrides layered onto a base [`Theme`] by
@@ -1132,7 +1173,7 @@ impl Config {
     /// unconfigured widget's entry is simply absent (keeping the empty-map,
     /// byte-identical case cheap and the common case).
     pub fn color_overrides(&self) -> HashMap<String, ColorOverride> {
-        let candidates: [(&str, &ColorOverride); 14] = [
+        let candidates: [(&str, &ColorOverride); 15] = [
             ("hostname", &self.widgets.hostname.color),
             ("pane_id", &self.widgets.pane_id.color),
             ("datetime", &self.widgets.datetime.color),
@@ -1147,6 +1188,7 @@ impl Config {
             ("disk", &self.widgets.disk.color),
             ("uptime", &self.widgets.uptime.color),
             ("media", &self.widgets.media.color),
+            ("throughput", &self.widgets.throughput.color),
         ];
         candidates
             .into_iter()
@@ -1168,7 +1210,7 @@ impl Config {
     /// (invariant #7). Mirrors [`Config::color_overrides`]'s candidate-table
     /// projector.
     pub fn click_map(&self) -> HashMap<String, WidgetClick> {
-        let candidates: [(&str, &str, &ClickBindings); 11] = [
+        let candidates: [(&str, &str, &ClickBindings); 12] = [
             (
                 "datetime",
                 &self.widgets.datetime.alt_format,
@@ -1215,6 +1257,11 @@ impl Config {
                 "media",
                 &self.widgets.media.alt_format,
                 &self.widgets.media.click,
+            ),
+            (
+                "throughput",
+                &self.widgets.throughput.alt_format,
+                &self.widgets.throughput.click,
             ),
         ];
         candidates
@@ -1891,6 +1938,41 @@ alt_format = "{status}: {title}"
     }
 
     #[test]
+    fn throughput_opts_parse_with_defaults() {
+        let toml = r#"
+[widgets.throughput]
+format = "{down} {up}"
+interface = "eth0"
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.widgets.throughput.format, "{down} {up}");
+        assert_eq!(c.widgets.throughput.interface.as_deref(), Some("eth0"));
+        assert_eq!(c.widgets.throughput.down_format, ""); // omitted -> default
+        assert_eq!(c.widgets.throughput.alt_format, ""); // omitted -> default
+    }
+
+    #[test]
+    fn throughput_opts_default_when_absent() {
+        let c = Config::default();
+        assert_eq!(c.widgets.throughput.format, " {down} {up}");
+        assert_eq!(c.widgets.throughput.interface, None);
+        assert_eq!(c.widgets.throughput.down_format, "");
+        assert_eq!(c.widgets.throughput.alt_format, "");
+    }
+
+    #[test]
+    fn malformed_throughput_table_falls_back_to_default() {
+        let dir = std::env::temp_dir().join("rustline_test_badthroughput");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        // format must be a string; an integer makes the table invalid.
+        std::fs::write(&p, "[widgets.throughput]\nformat = 5\n").unwrap();
+        let c = Config::load(&p);
+        assert_eq!(c.widgets.throughput.format, " {down} {up}");
+        assert_eq!(c.layout.left, Config::default().layout.left);
+    }
+
+    #[test]
     fn color_override_defaults_to_none_and_flattens_into_widget_tables() {
         let c = Config::default();
         assert_eq!(c.widgets.datetime.color, ColorOverride::default());
@@ -2064,7 +2146,7 @@ middle_click = { open_url = "https://example.com" }
     }
 
     #[test]
-    fn click_map_covers_all_eleven_clickable_widgets_by_default() {
+    fn click_map_covers_all_twelve_clickable_widgets_by_default() {
         let map = Config::default().click_map();
         for name in [
             "datetime",
@@ -2078,6 +2160,7 @@ middle_click = { open_url = "https://example.com" }
             "disk",
             "uptime",
             "media",
+            "throughput",
         ] {
             let wc = map.get(name).unwrap_or_else(|| panic!("{name} in map"));
             assert!(!wc.toggleable, "{name} not toggleable by default");

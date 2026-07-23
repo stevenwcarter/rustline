@@ -204,6 +204,19 @@ pub struct MediaInfo {
     pub status: String,
 }
 
+/// A network throughput snapshot: download/upload bytes-per-second, computed
+/// from two `/proc/net/dev` counter samples taken across invocations (see
+/// `rustline::throughput::read_throughput` and `rustline::sample_store`).
+/// `Context::throughput` is `None` on the very first invocation (a rate is a
+/// delta, so there's nothing yet to diff against), on an unsupported
+/// platform, or when the read failed — never a fabricated `0` (invariant
+/// #6), mirroring `GitInfo`/`DiskInfo`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Throughput {
+    pub down_bytes_per_sec: u64,
+    pub up_bytes_per_sec: u64,
+}
+
 /// The guest-side wire mirror of `rustline_core::WindowCtx`. A WASM guest
 /// deserializes this typed struct rather than hand-walking the JSON.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

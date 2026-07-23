@@ -92,6 +92,7 @@ mod tests {
                 used_bytes: 200 * 1024 * 1024 * 1024,
                 available_bytes: 300 * 1024 * 1024 * 1024,
             }),
+            throughput: None,
             os: "linux".into(),
             arch: "x86_64".into(),
             uptime: Some(86_400 * 3 + 3600 * 4), // 3d 4h

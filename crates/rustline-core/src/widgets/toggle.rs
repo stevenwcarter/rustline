@@ -55,6 +55,7 @@ mod tests {
             memory: None,
             git: None,
             disk: None,
+            throughput: None,
             os: String::new(),
             arch: String::new(),
             uptime: None,

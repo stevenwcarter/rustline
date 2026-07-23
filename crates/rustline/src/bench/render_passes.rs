@@ -124,7 +124,13 @@ pub fn bench_regions_real(cfg: &Config, real_iters: usize, warmup: usize) -> Gro
     rows.push(Row {
         label: "left".into(),
         stats: summarize(&measure(warmup, real_iters, || {
-            let ctx = build_region_context(&region_args, &left, &theme, &cfg.widgets.disk.mount);
+            let ctx = build_region_context(
+                &region_args,
+                &left,
+                &theme,
+                &cfg.widgets.disk.mount,
+                cfg.widgets.throughput.interface.as_deref(),
+            );
             let _ =
                 render_named_region(Direction::Left, &left, &ctx, &registry, &theme, &overrides);
         })),
@@ -132,7 +138,13 @@ pub fn bench_regions_real(cfg: &Config, real_iters: usize, warmup: usize) -> Gro
     rows.push(Row {
         label: "right".into(),
         stats: summarize(&measure(warmup, real_iters, || {
-            let ctx = build_region_context(&region_args, &right, &theme, &cfg.widgets.disk.mount);
+            let ctx = build_region_context(
+                &region_args,
+                &right,
+                &theme,
+                &cfg.widgets.disk.mount,
+                cfg.widgets.throughput.interface.as_deref(),
+            );
             let _ = render_named_region(
                 Direction::Right,
                 &right,

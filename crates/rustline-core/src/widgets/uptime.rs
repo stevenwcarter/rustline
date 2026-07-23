@@ -85,6 +85,7 @@ mod tests {
             memory: None,
             git: None,
             disk: None,
+            throughput: None,
             uptime,
             media: None,
             os: String::new(),

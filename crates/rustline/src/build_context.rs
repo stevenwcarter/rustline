@@ -50,9 +50,9 @@ pub(crate) fn read_interfaces() -> Vec<NetIface> {
 /// Whether `layout` (a region's widget-name list) references `name`.
 ///
 /// The one predicate behind every "only pay for a read the region actually
-/// renders" gate below (cpu/memory/git/disk/battery/uptime/media/interfaces) —
-/// factored out so each gate is the same one-line check instead of its own
-/// `.iter().any(...)`.
+/// renders" gate below (cpu/memory/git/disk/throughput/battery/uptime/media/
+/// interfaces) — factored out so each gate is the same one-line check
+/// instead of its own `.iter().any(...)`.
 fn layout_needs(layout: &[String], name: &str) -> bool {
     layout.iter().any(|w| w == name)
 }
@@ -61,20 +61,26 @@ fn layout_needs(layout: &[String], name: &str) -> bool {
 /// format-variable values passed on the command line, plus live host state.
 ///
 /// `layout` is the region's widget-name list; the expensive cpu/memory/git/
-/// disk/battery/uptime/media/interfaces reads (`read_cpu` sleeps ~120ms on
-/// Linux; `read_memory` on macOS spawns `vm_stat`; `read_git` shells out to
-/// `git`; `read_disk` calls `statvfs(2)`; `read_battery` scans sysfs;
+/// disk/throughput/battery/uptime/media/interfaces reads (`read_cpu` sleeps
+/// ~120ms on Linux; `read_memory` on macOS spawns `vm_stat`; `read_git`
+/// shells out to `git`; `read_disk` calls `statvfs(2)`; `read_throughput`
+/// reads `/proc/net/dev` (Linux only); `read_battery` scans sysfs;
 /// `read_uptime` reads `/proc/uptime` (Linux) or shells out to `sysctl`
 /// (macOS); `read_media` shells out to `playerctl` (Linux only);
 /// `read_interfaces` calls `getifaddrs(3)`) are taken ONLY when that region
 /// actually renders them — the same "pay only for what the region
 /// references" gating `register_plugins` uses. `disk_mount` is the configured
-/// `[widgets.disk].mount` (unused unless `layout` names `disk`).
+/// `[widgets.disk].mount` (unused unless `layout` names `disk`);
+/// `throughput_interface` is the configured `[widgets.throughput].interface`
+/// (unused unless `layout` names `throughput`) — neither is otherwise
+/// available inside this module, unlike `git`, which reuses
+/// `pane_current_path` already on hand.
 pub fn build_region_context(
     args: &RegionArgs,
     layout: &[String],
     theme: &Theme,
     disk_mount: &str,
+    throughput_interface: Option<&str>,
 ) -> Context {
     let pane_current_path = args.pane_path.clone().unwrap_or_default();
     let git = if layout_needs(layout, "git") {
@@ -84,6 +90,11 @@ pub fn build_region_context(
     };
     let disk = if layout_needs(layout, "disk") {
         crate::disk::read_disk(disk_mount)
+    } else {
+        None
+    };
+    let throughput = if layout_needs(layout, "throughput") {
+        crate::throughput::read_throughput(&rustline_wasm::state_root(), throughput_interface)
     } else {
         None
     };
@@ -132,6 +143,7 @@ pub fn build_region_context(
         },
         git,
         disk,
+        throughput,
         uptime,
         media,
         os: std::env::consts::OS.to_string(),
@@ -171,18 +183,19 @@ mod tests {
 
     use super::*;
 
-    /// Guards the two tests below that mutate the process-global
+    /// Guards the three tests below that mutate the process-global
     /// `XDG_DATA_HOME` env var: cargo's test harness runs tests in the same
-    /// process concurrently, and both tests' assertions depend on the value
-    /// `read_toggles()` sees during their own critical section, so an
-    /// unguarded interleaving of one test's `set_var`/`remove_var` with the
-    /// other's read would be a real race, not just a theoretical one.
+    /// process concurrently, and each test's assertions depend on the value
+    /// `read_toggles()`/`read_throughput()` (via `rustline_wasm::state_root()`)
+    /// sees during its own critical section, so an unguarded interleaving of
+    /// one test's `set_var`/`remove_var` with another's read would be a real
+    /// race, not just a theoretical one.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn home_from_env_used_when_present() {
         // build_context reads $HOME; assert the field is populated non-empty
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
         assert!(!ctx.home.is_empty() || std::env::var("HOME").is_err());
     }
 
@@ -203,6 +216,7 @@ mod tests {
             &["lan_ip".to_string()],
             &Theme::default(),
             "",
+            None,
         );
         assert!(
             ctx.interfaces
@@ -224,7 +238,7 @@ mod tests {
     fn interfaces_sampled_only_when_region_names_an_ip_widget() {
         // Empty layout: getifaddrs never runs, so interfaces stays at its
         // not-found value (empty), never a stale/fabricated read.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
         assert!(ctx.interfaces.is_empty());
 
         // Named in the layout (either IP widget triggers the shared read):
@@ -235,6 +249,7 @@ mod tests {
                 &[name.to_string()],
                 &Theme::default(),
                 "",
+                None,
             );
             assert_eq!(ctx.interfaces, read_interfaces());
         }
@@ -243,7 +258,7 @@ mod tests {
     #[test]
     fn battery_sampled_only_when_region_names_it() {
         // Empty layout: the sysfs scan never runs, so it stays None.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
         assert!(ctx.battery.is_none());
 
         // Named in the layout: the real read runs, matching a direct
@@ -253,6 +268,7 @@ mod tests {
             &["battery".to_string()],
             &Theme::default(),
             "",
+            None,
         );
         assert_eq!(ctx.battery, crate::battery::read_battery());
     }
@@ -261,7 +277,7 @@ mod tests {
     fn uptime_sampled_only_when_region_names_it() {
         // Empty layout: the read never runs, so it stays None — same
         // "pay only for what the region references" gating as battery.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
         assert!(ctx.uptime.is_none());
 
         // Named in the layout: the real read runs, matching a direct
@@ -271,6 +287,7 @@ mod tests {
             &["uptime".to_string()],
             &Theme::default(),
             "",
+            None,
         );
         assert_eq!(ctx.uptime, crate::uptime::read_uptime());
     }
@@ -280,7 +297,7 @@ mod tests {
         // Empty layout: the playerctl shell-out never runs, so it stays None —
         // same "pay only for what the region references" gating as
         // cpu/memory/git/disk/battery/uptime.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
         assert!(ctx.media.is_none());
 
         // Named in the layout: the real read runs, matching a direct
@@ -290,6 +307,7 @@ mod tests {
             &["media".to_string()],
             &Theme::default(),
             "",
+            None,
         );
         assert_eq!(ctx.media, crate::media::read_media());
     }
@@ -319,7 +337,7 @@ mod tests {
         unsafe {
             std::env::set_var("XDG_DATA_HOME", tmp.path());
         }
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
         // SAFETY: matches the set above; restores the process env for other tests.
         unsafe {
             std::env::remove_var("XDG_DATA_HOME");
@@ -332,7 +350,7 @@ mod tests {
     fn cpu_memory_sampled_only_when_region_names_them() {
         // Empty layout: neither expensive read runs, so both stay None — this is
         // what spares `render left` / `render window` the read_cpu sleep.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
         assert!(ctx.cpu.is_none() && ctx.memory.is_none());
         // The window path never samples cpu/memory at all.
         let wctx = build_window_context(&WindowArgs {
@@ -349,7 +367,7 @@ mod tests {
     fn git_read_only_when_region_names_it() {
         // Empty layout: the git shell-out never runs, so it stays None — same
         // "pay only for what the region references" gating as cpu/memory.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
         assert!(ctx.git.is_none());
     }
 
@@ -357,7 +375,7 @@ mod tests {
     fn disk_read_only_when_region_names_it() {
         // Empty layout: the statvfs read never runs, so it stays None — same
         // "pay only for what the region references" gating as cpu/memory/git.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "/");
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "/", None);
         assert!(ctx.disk.is_none());
     }
 
@@ -369,6 +387,7 @@ mod tests {
             &["disk".to_string()],
             &Theme::default(),
             "/",
+            None,
         );
         assert!(ctx.disk.is_some());
     }
@@ -431,7 +450,52 @@ mod tests {
         assert!(ctx.battery.is_none());
         assert!(ctx.cpu.is_none() && ctx.memory.is_none());
         assert!(ctx.git.is_none() && ctx.disk.is_none());
+        assert!(ctx.throughput.is_none());
         assert!(ctx.uptime.is_none());
         assert!(ctx.media.is_none());
+    }
+
+    #[test]
+    fn throughput_sampled_only_when_region_names_it() {
+        // Empty layout: the /proc/net/dev read never runs, so it stays None —
+        // same "pay only for what the region references" gating as
+        // cpu/memory/git/disk. `layout_needs` short-circuits this before
+        // `crate::throughput::read_throughput` (and thus `state_root()`) is
+        // ever touched, so this half needs no env isolation.
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
+        assert!(ctx.throughput.is_none());
+
+        // Named in the layout: the real read fires. `read_throughput` is
+        // stateful (persists a sample it diffs the *next* call against), so
+        // — like `build_region_context_reads_toggles_from_state_file` above —
+        // this redirects `XDG_DATA_HOME` to an isolated tempdir first: partly
+        // so the assertion is deterministic (first call: no prior sample ->
+        // None; second call: diffs against what the first call persisted ->
+        // Some, proving the gate actually let the read through), and partly
+        // so a throughput test never writes into the developer's real
+        // `~/.local/share/rustline/state/`.
+        let tmp = tempfile::tempdir().unwrap();
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by `ENV_LOCK` against the other tests in this
+        // module that also mutate this var.
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", tmp.path());
+        }
+        let layout = ["throughput".to_string()];
+        let first =
+            build_region_context(&RegionArgs::default(), &layout, &Theme::default(), "", None);
+        let second =
+            build_region_context(&RegionArgs::default(), &layout, &Theme::default(), "", None);
+        // SAFETY: matches the set above; restores the process env for other tests.
+        unsafe {
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        drop(guard);
+
+        assert!(first.throughput.is_none(), "first run has no prior sample");
+        assert!(
+            second.throughput.is_some(),
+            "second run diffs against the sample the first run persisted"
+        );
     }
 }

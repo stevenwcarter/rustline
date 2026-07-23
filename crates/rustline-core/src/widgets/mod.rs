@@ -14,6 +14,7 @@ pub mod memory;
 mod net;
 pub mod pane_id;
 pub mod tailscale_ip;
+pub mod throughput;
 mod toggle;
 pub mod uptime;
 pub mod windows;
@@ -33,6 +34,7 @@ pub use pane_id::PaneId;
 pub use tailscale_ip::TailscaleIp;
 // Re-exported for assemble.rs (Task 3) and the widgets' alt_format toggling
 // (Task 4+) of the click-toggle plan.
+pub use throughput::ThroughputWidget;
 pub(crate) use toggle::{active_format, clickable_range};
 pub use uptime::Uptime;
 pub use windows::Windows;
@@ -55,10 +57,11 @@ fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDe
 }
 
 impl Registry {
-    /// Build a [`Registry`] pre-populated with all fifteen built-in widgets,
+    /// Build a [`Registry`] pre-populated with all sixteen built-in widgets,
     /// configuring the ones that carry options (`pane_id`, `hostname`,
     /// `datetime`, `cwd`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`,
-    /// `memory`, `loadavg`, `git`, `disk`, `uptime`, `media`) from `cfg`.
+    /// `memory`, `loadavg`, `git`, `disk`, `uptime`, `media`, `throughput`)
+    /// from `cfg`.
     pub fn with_builtins(cfg: &Config) -> Registry {
         let mut registry = Registry::new();
         let pane_id = cfg.widgets.pane_id.clone();
@@ -276,6 +279,22 @@ impl Registry {
             }),
         );
 
+        let throughput = cfg.widgets.throughput.clone();
+        registry.register_described(
+            builtin_descriptor(
+                "throughput",
+                "Network download/upload throughput (bytes-per-second)",
+                true,
+            ),
+            Box::new(move || {
+                Box::new(ThroughputWidget {
+                    format: throughput.format.clone(),
+                    alt_format: throughput.alt_format.clone(),
+                    down_format: throughput.down_format.clone(),
+                })
+            }),
+        );
+
         registry
     }
 }
@@ -306,6 +325,7 @@ mod tests {
             memory: None,
             git: None,
             disk: None,
+            throughput: None,
             os: String::new(),
             arch: String::new(),
             uptime: None,
@@ -316,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn with_builtins_descriptors_cover_all_fifteen_with_correct_configurable_flags() {
+    fn with_builtins_descriptors_cover_all_sixteen_with_correct_configurable_flags() {
         let cfg = Config::default();
         let reg = Registry::with_builtins(&cfg);
         let names: Vec<&str> = reg.available_names().collect();
@@ -336,10 +356,11 @@ mod tests {
             "disk",
             "uptime",
             "media",
+            "throughput",
         ] {
             assert!(names.contains(&expected), "missing descriptor: {expected}");
         }
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 16);
 
         let configurable = |name: &str| {
             reg.descriptors()
@@ -603,6 +624,39 @@ mod tests {
         let mut c0 = ctx(Vec::new());
         c0.media = None;
         let widgets = reg.resolve(&["media".into()]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|(_, w)| w.render(&c0))
+            .map(|s| s.text)
+            .collect();
+        assert!(texts.is_empty());
+    }
+
+    #[test]
+    fn throughput_registered_and_renders_from_context() {
+        use crate::Throughput;
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        assert!(reg.contains("throughput"));
+
+        let mut c = ctx(Vec::new());
+        c.throughput = Some(Throughput {
+            down_bytes_per_sec: 1024,
+            up_bytes_per_sec: 2048,
+        });
+        let widgets = reg.resolve(&["throughput".into()]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|(_, w)| w.render(&c))
+            .map(|s| s.text)
+            .collect();
+        // default format " {down} {up}".
+        assert_eq!(texts, vec![" 1.0K/s 2.0K/s".to_string()]);
+
+        // No throughput reading + default (empty) down_format -> widget skipped.
+        let mut c0 = ctx(Vec::new());
+        c0.throughput = None;
+        let widgets = reg.resolve(&["throughput".into()]);
         let texts: Vec<String> = widgets
             .iter()
             .flat_map(|(_, w)| w.render(&c0))

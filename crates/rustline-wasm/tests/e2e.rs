@@ -63,6 +63,7 @@ fn ctx_now(rfc3339: &str) -> Context {
         memory: None,
         git: None,
         disk: None,
+        throughput: None,
         os: String::new(),
         arch: String::new(),
         uptime: None,

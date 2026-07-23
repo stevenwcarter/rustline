@@ -99,6 +99,7 @@ mod tests {
             memory: None,
             git: None,
             disk,
+            throughput: None,
             os: String::new(),
             arch: String::new(),
             uptime: None,

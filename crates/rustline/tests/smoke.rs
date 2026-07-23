@@ -1134,6 +1134,49 @@ fn render_right_with_media_renders_gracefully() {
 }
 
 #[test]
+fn render_right_with_throughput_renders_gracefully() {
+    // `throughput` in a layout must render alongside built-ins and exit 0 —
+    // including on the FIRST invocation, which is the common case here: a
+    // throughput rate needs a prior persisted sample to diff against (see
+    // `crate::throughput::read_throughput`), so a fresh, isolated
+    // `XDG_DATA_HOME` (this test's, via `isolate`) has no prior sample and
+    // `Context.throughput` stays `None` on this very first render. Proves
+    // the build_context -> read_throughput -> Context -> widget wiring
+    // degrades to `down_format` rather than crashing or fabricating a rate
+    // (invariant #6), mirroring
+    // `render_right_with_git_outside_repo_renders_gracefully`/
+    // `render_right_with_disk_on_bogus_mount_renders_gracefully` above. A
+    // `down_format` marker makes the degrade path deterministically visible
+    // rather than merely inferred from "still exits 0".
+    let tmp = tempfile::tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    std::fs::write(
+        cfgdir.join("config.toml"),
+        "[layout]\nright = [\"throughput\", \"datetime\"]\n\n\
+         [widgets.throughput]\ndown_format = \"THROUGHPUT-DOWN\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["render", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("#["), "built-ins still render: {s}");
+    assert!(
+        s.contains("THROUGHPUT-DOWN"),
+        "first-run (no prior sample) degrades to down_format: {s}"
+    );
+}
+
+#[test]
 fn render_right_with_color_override_pins_widget_bg() {
     // W29: a `[widgets.<name>].bg` override must reach the actual rendered
     // markup end to end (Config::color_overrides -> render_named_region ->
