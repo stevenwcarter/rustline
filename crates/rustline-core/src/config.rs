@@ -80,6 +80,48 @@ impl Default for DateTimeOpts {
     }
 }
 
+/// Default `format` for the `hostname` widget: the bare truncated hostname,
+/// reproducing the pre-config output byte-for-byte.
+fn default_hostname_format() -> String {
+    "{host}".into()
+}
+
+/// Options for the `hostname` widget.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HostnameOpts {
+    #[serde(default = "default_hostname_format")]
+    pub format: String,
+}
+
+impl Default for HostnameOpts {
+    fn default() -> Self {
+        Self {
+            format: default_hostname_format(),
+        }
+    }
+}
+
+/// Default `format` for the `pane_id` widget: `session:window.pane`,
+/// reproducing the pre-config output byte-for-byte.
+fn default_pane_id_format() -> String {
+    "{session}:{window}.{pane}".into()
+}
+
+/// Options for the `pane_id` widget.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaneIdOpts {
+    #[serde(default = "default_pane_id_format")]
+    pub format: String,
+}
+
+impl Default for PaneIdOpts {
+    fn default() -> Self {
+        Self {
+            format: default_pane_id_format(),
+        }
+    }
+}
+
 /// Options for the `cwd` widget.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CwdOpts {
@@ -325,6 +367,10 @@ impl Default for LoadAvgOpts {
 /// Per-widget option overrides, keyed by widget name.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WidgetOpts {
+    #[serde(default)]
+    pub hostname: HostnameOpts,
+    #[serde(default)]
+    pub pane_id: PaneIdOpts,
     #[serde(default)]
     pub datetime: DateTimeOpts,
     #[serde(default)]
@@ -760,6 +806,38 @@ zip = "48183"
         std::fs::write(&p, "[plugins.weather]\nmax_state_bytes = \"lots\"\n").unwrap();
         let c = Config::load(&p);
         assert!(c.plugins.is_empty());
+        assert_eq!(c.layout.left, Config::default().layout.left);
+    }
+
+    #[test]
+    fn hostname_pane_id_opts_parse_with_defaults() {
+        let toml = r#"
+[widgets.hostname]
+format = "host: {host}"
+[widgets.pane_id]
+format = "{session}/{window}/{pane}"
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.widgets.hostname.format, "host: {host}");
+        assert_eq!(c.widgets.pane_id.format, "{session}/{window}/{pane}");
+    }
+
+    #[test]
+    fn hostname_pane_id_opts_default_when_absent() {
+        let c = Config::default();
+        assert_eq!(c.widgets.hostname.format, "{host}");
+        assert_eq!(c.widgets.pane_id.format, "{session}:{window}.{pane}");
+    }
+
+    #[test]
+    fn malformed_hostname_table_falls_back_to_default() {
+        let dir = std::env::temp_dir().join("rustline_test_badhostname");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        // format must be a string; an integer makes the table invalid.
+        std::fs::write(&p, "[widgets.hostname]\nformat = 5\n").unwrap();
+        let c = Config::load(&p);
+        assert_eq!(c.widgets.hostname.format, "{host}");
         assert_eq!(c.layout.left, Config::default().layout.left);
     }
 

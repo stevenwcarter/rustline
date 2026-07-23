@@ -1,15 +1,30 @@
 use crate::{Context, Segment, Widget};
 
 /// Renders the tmux target triple for the current pane, e.g. `0:0.0`
-/// (`session:window.pane`).
-pub struct PaneId;
+/// (`session:window.pane`), via a `format` template (default
+/// `"{session}:{window}.{pane}"`) whose `{session}`/`{window}`/`{pane}`
+/// placeholders are replaced; any other text (e.g. a Nerd-Font icon or
+/// label) is emitted verbatim. Unknown placeholders pass through untouched.
+pub struct PaneId {
+    pub format: String,
+}
+
+impl Default for PaneId {
+    fn default() -> Self {
+        Self {
+            format: "{session}:{window}.{pane}".into(),
+        }
+    }
+}
 
 impl Widget for PaneId {
     fn render(&self, ctx: &Context) -> Vec<Segment> {
-        vec![Segment::new(format!(
-            "{}:{}.{}",
-            ctx.session_name, ctx.window_index, ctx.pane_index
-        ))]
+        let text = self
+            .format
+            .replace("{session}", &ctx.session_name)
+            .replace("{window}", &ctx.window_index)
+            .replace("{pane}", &ctx.pane_index);
+        vec![Segment::new(text)]
     }
 }
 
@@ -46,7 +61,15 @@ mod tests {
     }
 
     #[test]
-    fn pane_id_formats_session_window_pane() {
-        assert_eq!(PaneId.render(&ctx())[0].text, "0:0.0");
+    fn pane_id_default_format_matches_current() {
+        assert_eq!(PaneId::default().render(&ctx())[0].text, "0:0.0");
+    }
+
+    #[test]
+    fn pane_id_custom_format() {
+        let w = PaneId {
+            format: "\u{f120} {session}/{window}/{pane}".into(),
+        };
+        assert_eq!(w.render(&ctx())[0].text, "\u{f120} 0/0/0");
     }
 }

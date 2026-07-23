@@ -48,25 +48,36 @@ fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDe
 
 impl Registry {
     /// Build a [`Registry`] pre-populated with all eleven built-in widgets,
-    /// configuring the ones that carry options (`datetime`, `cwd`, `lan_ip`,
-    /// `tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg`) from `cfg`.
+    /// configuring the ones that carry options (`pane_id`, `hostname`,
+    /// `datetime`, `cwd`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`,
+    /// `memory`, `loadavg`) from `cfg`.
     pub fn with_builtins(cfg: &Config) -> Registry {
         let mut registry = Registry::new();
+        let pane_id = cfg.widgets.pane_id.clone();
         registry.register_described(
             builtin_descriptor(
                 "pane_id",
                 "The tmux pane target triple (session:window.pane)",
-                false,
+                true,
             ),
-            Box::new(|| Box::new(PaneId)),
+            Box::new(move || {
+                Box::new(PaneId {
+                    format: pane_id.format.clone(),
+                })
+            }),
         );
+        let hostname = cfg.widgets.hostname.clone();
         registry.register_described(
             builtin_descriptor(
                 "hostname",
                 "The local hostname, truncated at the first dot",
-                false,
+                true,
             ),
-            Box::new(|| Box::new(Hostname)),
+            Box::new(move || {
+                Box::new(Hostname {
+                    format: hostname.format.clone(),
+                })
+            }),
         );
         registry.register_described(
             builtin_descriptor(
@@ -249,7 +260,8 @@ mod tests {
         };
         assert_eq!(configurable("cpu"), Some(true));
         assert_eq!(configurable("datetime"), Some(true));
-        assert_eq!(configurable("pane_id"), Some(false));
+        assert_eq!(configurable("pane_id"), Some(true));
+        assert_eq!(configurable("hostname"), Some(true));
     }
 
     #[test]
