@@ -715,8 +715,12 @@ Optional TOML at `~/.config/rustline/config.toml` (or
 `$XDG_CONFIG_HOME/rustline/config.toml`). Zero-config works. Default layout:
 left = `[pane_id, hostname]`, center = `[windows]`,
 right = `[cwd, cpu, memory, loadavg, datetime]`. Default datetime format
-`"%a < %Y-%m-%d < %H:%M"` (the `<` are literal). Unknown widget names in a layout
-are skipped, not fatal.
+`"%a < %Y-%m-%d < %H:%M"` (the `<` are literal). `datetime` also takes an
+optional `timezone` (an IANA zone name, e.g. `"America/New_York"`; default
+`None` renders `ctx.now` in the local zone, unchanged from before this
+option) that formats in that zone instead via `chrono-tz`; an unrecognized
+name is logged and falls back to local time rather than erroring. Unknown
+widget names in a layout are skipped, not fatal.
 
 **Hostname and pane_id widgets:** both are in the default layout (`left =
 [pane_id, hostname]`) and each now take a `format` option (previously a fixed

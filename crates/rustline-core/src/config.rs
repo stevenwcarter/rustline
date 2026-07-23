@@ -65,6 +65,12 @@ pub struct DateTimeOpts {
     pub format: String,
     #[serde(default)]
     pub alt_format: String,
+    /// An IANA zone name (e.g. `"America/New_York"`) to render in, instead
+    /// of the local timezone. `None` (the default) keeps the pre-feature
+    /// behavior of formatting `ctx.now` as-is. An unrecognized name is
+    /// logged and falls back to local time rather than erroring.
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 fn default_dt_format() -> String {
@@ -76,6 +82,7 @@ impl Default for DateTimeOpts {
         Self {
             format: default_dt_format(),
             alt_format: String::new(),
+            timezone: None,
         }
     }
 }

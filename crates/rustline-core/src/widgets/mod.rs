@@ -118,6 +118,7 @@ impl Registry {
                 Box::new(DateTime {
                     format: datetime.format.clone(),
                     alt_format: datetime.alt_format.clone(),
+                    timezone: datetime.timezone.clone(),
                 })
             }),
         );
