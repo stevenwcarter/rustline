@@ -1,5 +1,7 @@
 //! rustline-abi: the serde-serializable types that cross the WASM plugin
 //! boundary (Segment/Style/Color). No I/O, no chrono — the wire-format ABI.
+use std::net::Ipv4Addr;
+
 use serde::{Deserialize, Serialize};
 
 /// A terminal color, expressible in the ways tmux understands colors.
@@ -85,9 +87,73 @@ impl Segment {
     }
 }
 
+/// One non-loopback IPv4 network interface, captured at `Context`-build time.
+///
+/// The widgets (`lan_ip`, `tailscale_ip`) select from this list rather than
+/// reading the OS, keeping invariant #1 (Context is the sole render input).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetIface {
+    pub name: String,
+    pub ipv4: Ipv4Addr,
+}
+
+/// Charge state of the host battery. A small typed domain — not a stringly
+/// value — mapped from the Linux sysfs `status` file and macOS `pmset` state
+/// words at Context-build time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatteryState {
+    Charging,
+    Discharging,
+    Full,
+    Unknown,
+}
+
+/// A battery snapshot captured at Context-build time. `percent` is `0..=100`.
+///
+/// `Context::battery` is `None` on hosts without a battery, on unsupported
+/// platforms, or when the read failed — never a fabricated `0%` (invariant #6),
+/// mirroring `loadavg`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Battery {
+    pub percent: u8,
+    pub state: BatteryState,
+}
+
+/// A memory snapshot captured at Context-build time. All values are bytes;
+/// `used_bytes = total_bytes - available_bytes` (saturating). `Context::memory`
+/// is `None` on unsupported platforms or when the read failed — never a
+/// fabricated `0` (invariant #6), mirroring `loadavg`/`battery`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemInfo {
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub available_bytes: u64,
+}
+
+/// A CPU-utilization snapshot: the busy fraction measured over a short sampling
+/// window at Context-build time, as a percentage clamped to `0.0..=100.0`.
+/// `Context::cpu` is `None` on unsupported platforms or when the read failed.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CpuUsage {
+    pub percent: f32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn battery_state_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&BatteryState::Discharging).unwrap(),
+            "\"discharging\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BatteryState::Full).unwrap(),
+            "\"full\""
+        );
+    }
 
     #[test]
     fn color_to_tmux_named_indexed_rgb() {

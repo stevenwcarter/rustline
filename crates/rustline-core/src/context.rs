@@ -1,8 +1,14 @@
 use std::collections::BTreeSet;
-use std::net::Ipv4Addr;
 
 use chrono::{DateTime, Local, TimeZone};
 use serde::{Deserialize, Serialize};
+
+// `Battery`/`BatteryState`/`MemInfo`/`CpuUsage`/`NetIface` live in
+// `rustline-abi` (chrono-free, so a WASM guest can share them); re-exported
+// here so existing `rustline_core::context::…` / `rustline_core::…` paths
+// keep resolving, mirroring the `Segment`/`Style`/`Color` precedent in
+// `segment.rs`.
+pub use rustline_abi::{Battery, BatteryState, CpuUsage, MemInfo, NetIface};
 
 /// Metadata about a single tmux window, used to render per-window segments
 /// (e.g. the window list).
@@ -12,58 +18,6 @@ pub struct WindowCtx {
     pub name: String,
     pub flags: String,
     pub is_current: bool,
-}
-
-/// One non-loopback IPv4 network interface, captured at `Context`-build time.
-///
-/// The widgets (`lan_ip`, `tailscale_ip`) select from this list rather than
-/// reading the OS, keeping invariant #1 (Context is the sole render input).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NetIface {
-    pub name: String,
-    pub ipv4: Ipv4Addr,
-}
-
-/// Charge state of the host battery. A small typed domain — not a stringly
-/// value — mapped from the Linux sysfs `status` file and macOS `pmset` state
-/// words at Context-build time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BatteryState {
-    Charging,
-    Discharging,
-    Full,
-    Unknown,
-}
-
-/// A battery snapshot captured at Context-build time. `percent` is `0..=100`.
-///
-/// `Context::battery` is `None` on hosts without a battery, on unsupported
-/// platforms, or when the read failed — never a fabricated `0%` (invariant #6),
-/// mirroring `loadavg`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Battery {
-    pub percent: u8,
-    pub state: BatteryState,
-}
-
-/// A memory snapshot captured at Context-build time. All values are bytes;
-/// `used_bytes = total_bytes - available_bytes` (saturating). `Context::memory`
-/// is `None` on unsupported platforms or when the read failed — never a
-/// fabricated `0` (invariant #6), mirroring `loadavg`/`battery`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MemInfo {
-    pub total_bytes: u64,
-    pub used_bytes: u64,
-    pub available_bytes: u64,
-}
-
-/// A CPU-utilization snapshot: the busy fraction measured over a short sampling
-/// window at Context-build time, as a percentage clamped to `0.0..=100.0`.
-/// `Context::cpu` is `None` on unsupported platforms or when the read failed.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CpuUsage {
-    pub percent: f32,
 }
 
 /// Everything the renderer needs to know about the current tmux session,
@@ -221,18 +175,6 @@ mod tests {
         assert_eq!(back.battery, ctx.battery);
         assert_eq!(back.os, "linux");
         assert_eq!(back.arch, "x86_64");
-    }
-
-    #[test]
-    fn battery_state_serializes_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&BatteryState::Discharging).unwrap(),
-            "\"discharging\""
-        );
-        assert_eq!(
-            serde_json::to_string(&BatteryState::Full).unwrap(),
-            "\"full\""
-        );
     }
 
     #[test]
