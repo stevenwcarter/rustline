@@ -8,12 +8,13 @@
 
 use crate::abi::{CachedHttpResult, HttpResult, ReadResult, WriteResult};
 use crate::cache::{CacheEntry, age_secs, cache_path, is_fresh, read_entry, write_entry};
-use crate::capability::CapabilityCtx;
+use crate::capability::{CapabilityCtx, DenialKind};
 use crate::fetch::Fetcher;
 use crate::state::{check_cap, normalize_abs, sanitize_relpath};
 
 pub fn perform_http_get(ctx: &CapabilityCtx, url: &str, fetcher: &dyn Fetcher) -> HttpResult {
     if !ctx.allowed_urls.allows(url) {
+        ctx.observe_denial(DenialKind::Url, url);
         return HttpResult {
             ok: false,
             error: format!("url not allowed: {url}"),
@@ -48,6 +49,7 @@ pub fn perform_http_get_cached(
     // 1) gate first (invariant N1): a denied url makes no network call and
     //    touches no cache file.
     if !ctx.allowed_urls.allows(url) {
+        ctx.observe_denial(DenialKind::Url, url);
         return CachedHttpResult {
             ok: false,
             error: format!("url not allowed: {url}"),
@@ -198,6 +200,7 @@ pub fn perform_file_read(ctx: &CapabilityCtx, path: &str) -> ReadResult {
         }
     };
     if !ctx.allowed_paths.allows(&norm) {
+        ctx.observe_denial(DenialKind::Path, &norm);
         return ReadResult {
             ok: false,
             error: format!("path not allowed: {norm}"),
@@ -230,6 +233,7 @@ pub fn perform_file_write(ctx: &CapabilityCtx, path: &str, contents: &str) -> Wr
         Err(error) => return WriteResult { ok: false, error },
     };
     if !ctx.allowed_paths.allows(&norm) {
+        ctx.observe_denial(DenialKind::Path, &norm);
         return WriteResult {
             ok: false,
             error: format!("path not allowed: {norm}"),
@@ -274,10 +278,32 @@ pub fn perform_log(plugin: &str, level: &str, msg: &str) {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::capability::CapabilityCtx;
+    use crate::capability::{CapabilityCtx, DenialKind, DenialObserver};
     use rustline_core::PluginConfig;
+
+    /// A spy [`DenialObserver`] that records every `(plugin, kind, target)`
+    /// it's told about, so a denied-case test can assert the seam fired
+    /// alongside the existing `ok:false`/no-side-effect assertions.
+    #[derive(Default, Clone)]
+    struct SpyObserver(Arc<Mutex<Vec<(String, DenialKind, String)>>>);
+
+    impl DenialObserver for SpyObserver {
+        fn observe(&self, plugin: &str, kind: DenialKind, target: &str) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((plugin.to_string(), kind, target.to_string()));
+        }
+    }
+
+    impl SpyObserver {
+        fn records(&self) -> Vec<(String, DenialKind, String)> {
+            self.0.lock().unwrap().clone()
+        }
+    }
 
     struct FakeFetcher(u16, &'static str);
     impl crate::fetch::Fetcher for FakeFetcher {
@@ -327,10 +353,19 @@ mod tests {
 
     #[test]
     fn http_denied_when_not_allowlisted_makes_no_request() {
-        let ctx = ctx_with(&[], std::env::temp_dir());
+        let spy = SpyObserver::default();
+        let ctx = ctx_with(&[], std::env::temp_dir()).with_observer(Arc::new(spy.clone()));
         let r = perform_http_get(&ctx, "https://wttr.in/48183", &FakeFetcher(200, "hi"));
         assert!(!r.ok);
         assert!(r.error.contains("not allowed"));
+        assert_eq!(
+            spy.records(),
+            vec![(
+                "weather".to_string(),
+                DenialKind::Url,
+                "https://wttr.in/48183".to_string()
+            )]
+        );
     }
 
     #[test]
@@ -379,27 +414,46 @@ mod tests {
 
     #[test]
     fn file_read_denied_when_not_allowlisted() {
-        let ctx = ctx_with(&[], std::env::temp_dir());
+        let spy = SpyObserver::default();
+        let ctx = ctx_with(&[], std::env::temp_dir()).with_observer(Arc::new(spy.clone()));
         let r = perform_file_read(&ctx, "/etc/hostname");
         assert!(!r.ok);
         assert!(r.error.contains("not allowed"));
+        assert_eq!(
+            spy.records(),
+            vec![(
+                "weather".to_string(),
+                DenialKind::Path,
+                "/etc/hostname".to_string()
+            )]
+        );
     }
 
     #[test]
     fn file_write_denied_when_not_allowlisted() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("should_not_be_written.txt");
-        let ctx = ctx_with(&[], std::env::temp_dir());
+        let spy = SpyObserver::default();
+        let ctx = ctx_with(&[], std::env::temp_dir()).with_observer(Arc::new(spy.clone()));
         let w = perform_file_write(&ctx, target.to_str().unwrap(), "secret");
         assert!(!w.ok);
         assert!(w.error.contains("not allowed"));
         assert!(!target.exists(), "denied write must not create the file");
+        assert_eq!(
+            spy.records(),
+            vec![(
+                "weather".to_string(),
+                DenialKind::Path,
+                target.to_str().unwrap().to_string()
+            )]
+        );
     }
 
     #[test]
     fn cached_denied_url_makes_no_request_and_no_cache_file() {
         let root = tempfile::tempdir().unwrap();
-        let ctx = ctx_with(&[], root.path().to_path_buf()); // empty allowlist
+        let spy = SpyObserver::default();
+        let ctx = ctx_with(&[], root.path().to_path_buf()).with_observer(Arc::new(spy.clone())); // empty allowlist
         let calls = std::sync::Arc::new(AtomicUsize::new(0));
         let f = CountingFetcher {
             calls: calls.clone(),
@@ -422,6 +476,14 @@ mod tests {
         );
         // gate-first: no cache dir/file was created either
         assert!(!ctx.state_dir().join("__http_cache__").exists());
+        assert_eq!(
+            spy.records(),
+            vec![(
+                "weather".to_string(),
+                DenialKind::Url,
+                "https://wttr.in/48183".to_string()
+            )]
+        );
     }
 
     #[test]
