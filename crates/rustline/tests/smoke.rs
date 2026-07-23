@@ -1102,6 +1102,38 @@ fn render_right_with_uptime_renders_humanized_reading() {
 }
 
 #[test]
+fn render_right_with_media_renders_gracefully() {
+    // `media` in a layout must render alongside built-ins and exit 0 on ANY
+    // host, whether or not `playerctl` is installed or anything is playing —
+    // proves the build_context -> read_media -> Context -> widget wiring does
+    // not crash when the shell-out fails/is absent (invariant #6), mirroring
+    // `render_right_with_git_outside_repo_renders_gracefully` above. The
+    // media widget itself may render nothing (its default down_format is
+    // empty), so `datetime` is the one asserted to still produce markup.
+    let tmp = tempfile::tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    std::fs::write(
+        cfgdir.join("config.toml"),
+        "[layout]\nright = [\"media\", \"datetime\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["render", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("#["), "built-ins still render: {s}");
+}
+
+#[test]
 fn plugin_add_on_unparseable_config_preserves_file() {
     // A pre-existing config with a TOML *syntax* error must abort with exit 1
     // and leave the file byte-for-byte intact — never truncate the user's whole

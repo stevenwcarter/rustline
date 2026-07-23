@@ -10,6 +10,7 @@ mod doctor;
 mod git;
 mod init;
 mod logging;
+mod media;
 mod memory;
 mod plugin_cmd;
 mod theme_cmd;

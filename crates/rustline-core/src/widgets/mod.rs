@@ -9,6 +9,7 @@ pub mod git;
 pub mod hostname;
 pub mod lan_ip;
 pub mod loadavg;
+pub mod media;
 pub mod memory;
 mod net;
 pub mod pane_id;
@@ -26,6 +27,7 @@ pub use git::GitWidget;
 pub use hostname::Hostname;
 pub use lan_ip::LanIp;
 pub use loadavg::LoadAvg;
+pub use media::Media;
 pub use memory::MemoryWidget;
 pub use pane_id::PaneId;
 pub use tailscale_ip::TailscaleIp;
@@ -53,10 +55,10 @@ fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDe
 }
 
 impl Registry {
-    /// Build a [`Registry`] pre-populated with all fourteen built-in widgets,
+    /// Build a [`Registry`] pre-populated with all fifteen built-in widgets,
     /// configuring the ones that carry options (`pane_id`, `hostname`,
     /// `datetime`, `cwd`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`,
-    /// `memory`, `loadavg`, `git`, `disk`, `uptime`) from `cfg`.
+    /// `memory`, `loadavg`, `git`, `disk`, `uptime`, `media`) from `cfg`.
     pub fn with_builtins(cfg: &Config) -> Registry {
         let mut registry = Registry::new();
         let pane_id = cfg.widgets.pane_id.clone();
@@ -258,6 +260,22 @@ impl Registry {
             }),
         );
 
+        let media = cfg.widgets.media.clone();
+        registry.register_described(
+            builtin_descriptor(
+                "media",
+                "Now-playing artist/title/status via playerctl",
+                true,
+            ),
+            Box::new(move || {
+                Box::new(Media {
+                    format: media.format.clone(),
+                    alt_format: media.alt_format.clone(),
+                    down_format: media.down_format.clone(),
+                })
+            }),
+        );
+
         registry
     }
 }
@@ -291,13 +309,14 @@ mod tests {
             os: String::new(),
             arch: String::new(),
             uptime: None,
+            media: None,
             toggled: Default::default(),
             colors: Default::default(),
         }
     }
 
     #[test]
-    fn with_builtins_descriptors_cover_all_fourteen_with_correct_configurable_flags() {
+    fn with_builtins_descriptors_cover_all_fifteen_with_correct_configurable_flags() {
         let cfg = Config::default();
         let reg = Registry::with_builtins(&cfg);
         let names: Vec<&str> = reg.available_names().collect();
@@ -316,10 +335,11 @@ mod tests {
             "git",
             "disk",
             "uptime",
+            "media",
         ] {
             assert!(names.contains(&expected), "missing descriptor: {expected}");
         }
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 15);
 
         let configurable = |name: &str| {
             reg.descriptors()
@@ -549,6 +569,40 @@ mod tests {
         let mut c0 = ctx(Vec::new());
         c0.uptime = None;
         let widgets = reg.resolve(&["uptime".into()]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|w| w.render(&c0))
+            .map(|s| s.text)
+            .collect();
+        assert!(texts.is_empty());
+    }
+
+    #[test]
+    fn media_registered_and_renders_from_context() {
+        use crate::MediaInfo;
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        assert!(reg.contains("media"));
+
+        let mut c = ctx(Vec::new());
+        c.media = Some(MediaInfo {
+            artist: "Radiohead".into(),
+            title: "Karma Police".into(),
+            status: "Playing".into(),
+        });
+        let widgets = reg.resolve(&["media".into()]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|w| w.render(&c))
+            .map(|s| s.text)
+            .collect();
+        // default format "{title} — {artist}".
+        assert_eq!(texts, vec!["Karma Police — Radiohead".to_string()]);
+
+        // No media reading + default (empty) down_format -> widget skipped.
+        let mut c0 = ctx(Vec::new());
+        c0.media = None;
+        let widgets = reg.resolve(&["media".into()]);
         let texts: Vec<String> = widgets
             .iter()
             .flat_map(|w| w.render(&c0))

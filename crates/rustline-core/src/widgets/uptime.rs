@@ -86,6 +86,7 @@ mod tests {
             git: None,
             disk: None,
             uptime,
+            media: None,
             os: String::new(),
             arch: String::new(),
             toggled: Default::default(),

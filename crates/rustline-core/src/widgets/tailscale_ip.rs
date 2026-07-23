@@ -54,6 +54,7 @@ mod tests {
             os: String::new(),
             arch: String::new(),
             uptime: None,
+            media: None,
             toggled: Default::default(),
             colors: Default::default(),
         }

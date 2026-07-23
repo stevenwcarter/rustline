@@ -6,8 +6,8 @@
 
 use chrono::{Local, TimeZone};
 use rustline_core::{
-    Battery, BatteryState, Context, CpuUsage, DiskInfo, GitInfo, MemInfo, NetIface, ThemeColors,
-    WindowCtx,
+    Battery, BatteryState, Context, CpuUsage, DiskInfo, GitInfo, MediaInfo, MemInfo, NetIface,
+    ThemeColors, WindowCtx,
 };
 
 /// A representative, fully-populated `Context`. Every widget renders its real
@@ -71,6 +71,11 @@ pub fn fabricated_context() -> Context {
         os: "linux".into(),
         arch: "x86_64".into(),
         uptime: Some(86_400 * 3 + 3600 * 4), // 3d 4h
+        media: Some(MediaInfo {
+            artist: "Radiohead".into(),
+            title: "Karma Police".into(),
+            status: "Playing".into(),
+        }),
         toggled: Default::default(),
         // Theme-derived colors added when the theme feature landed on main; the
         // fixture's readings sit below every alert threshold, so no widget takes

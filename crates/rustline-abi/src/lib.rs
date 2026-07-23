@@ -177,6 +177,17 @@ pub struct DiskInfo {
     pub available_bytes: u64,
 }
 
+/// A now-playing media snapshot, captured at Context-build time by shelling
+/// out to `playerctl metadata`. `Context::media` is `None` when `playerctl`
+/// is missing, no player is running, or the read failed — never a fabricated
+/// "not playing" reading (invariant #6), mirroring `GitInfo`/`DiskInfo`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaInfo {
+    pub artist: String,
+    pub title: String,
+    pub status: String,
+}
+
 /// The guest-side wire mirror of `rustline_core::WindowCtx`. A WASM guest
 /// deserializes this typed struct rather than hand-walking the JSON.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

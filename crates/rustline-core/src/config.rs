@@ -528,6 +528,32 @@ impl Default for UptimeOpts {
     }
 }
 
+/// Default `format` for the `media` widget: title em-dash artist.
+fn default_media_format() -> String {
+    "{title} — {artist}".into()
+}
+
+/// Options for the `media` widget.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MediaOpts {
+    #[serde(default = "default_media_format")]
+    pub format: String,
+    #[serde(default)]
+    pub alt_format: String,
+    #[serde(default)]
+    pub down_format: String,
+}
+
+impl Default for MediaOpts {
+    fn default() -> Self {
+        Self {
+            format: default_media_format(),
+            alt_format: String::new(),
+            down_format: String::new(),
+        }
+    }
+}
+
 /// Per-widget option overrides, keyed by widget name.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WidgetOpts {
@@ -557,6 +583,8 @@ pub struct WidgetOpts {
     pub disk: DiskOpts,
     #[serde(default)]
     pub uptime: UptimeOpts,
+    #[serde(default)]
+    pub media: MediaOpts,
 }
 
 /// Optional theme overrides layered onto a base [`Theme`] by
@@ -1383,5 +1411,38 @@ hard_left = "X"
         assert_eq!(parsed.widgets.cpu.warn_percent, 70.0);
         assert_eq!(parsed.widgets.cpu.crit_percent, 95.0); // untouched default
         assert_eq!(parsed.widgets.loadavg.crit_load, 8.0);
+    }
+
+    #[test]
+    fn media_opts_parse_with_defaults() {
+        let toml = r#"
+[widgets.media]
+format = "{artist} - {title}"
+alt_format = "{status}: {title}"
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.widgets.media.format, "{artist} - {title}");
+        assert_eq!(c.widgets.media.alt_format, "{status}: {title}");
+        assert_eq!(c.widgets.media.down_format, ""); // omitted -> default
+    }
+
+    #[test]
+    fn media_opts_default_when_absent() {
+        let c = Config::default();
+        assert_eq!(c.widgets.media.format, "{title} — {artist}");
+        assert_eq!(c.widgets.media.alt_format, "");
+        assert_eq!(c.widgets.media.down_format, "");
+    }
+
+    #[test]
+    fn malformed_media_table_falls_back_to_default() {
+        let dir = std::env::temp_dir().join("rustline_test_badmedia");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        // format must be a string; an integer makes the table invalid.
+        std::fs::write(&p, "[widgets.media]\nformat = 5\n").unwrap();
+        let c = Config::load(&p);
+        assert_eq!(c.widgets.media.format, "{title} — {artist}");
+        assert_eq!(c.layout.left, Config::default().layout.left);
     }
 }

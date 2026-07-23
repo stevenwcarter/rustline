@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 // here so existing `rustline_core::context::…` / `rustline_core::…` paths
 // keep resolving, mirroring the `Segment`/`Style`/`Color` precedent in
 // `segment.rs`.
-pub use rustline_abi::{Battery, BatteryState, CpuUsage, DiskInfo, GitInfo, MemInfo, NetIface};
+pub use rustline_abi::{
+    Battery, BatteryState, CpuUsage, DiskInfo, GitInfo, MediaInfo, MemInfo, NetIface,
+};
 
 /// Metadata about a single tmux window, used to render per-window segments
 /// (e.g. the window list).
@@ -63,6 +65,13 @@ pub struct Context {
     /// version skew (invariant #2), matching `toggled`/`colors` below.
     #[serde(default)]
     pub uptime: Option<u64>,
+    /// Now-playing media snapshot, read once at build time (only when the
+    /// `media` widget is in the active layout — see `build_context.rs`);
+    /// `None` when `playerctl` is missing, nothing is playing, or the read
+    /// failed. `#[serde(default)]` keeps deserialization total across
+    /// host/guest version skew (invariant #2), matching `uptime` above.
+    #[serde(default)]
+    pub media: Option<MediaInfo>,
     /// Host OS (`std::env::consts::OS`, e.g. `"linux"`, `"macos"`). Additive
     /// platform metadata for WASM guests.
     pub os: String,
@@ -108,6 +117,7 @@ impl Default for Context {
             git: None,
             disk: None,
             uptime: None,
+            media: None,
             os: String::new(),
             arch: String::new(),
             toggled: BTreeSet::default(),

@@ -65,8 +65,8 @@ mod tests {
 
     use chrono::{DateTime, Local, TimeZone};
     use rustline_core::{
-        Battery, BatteryState, Color, Context, CpuUsage, DiskInfo, GitInfo, MemInfo, NetIface,
-        ThemeColors, WindowCtx,
+        Battery, BatteryState, Color, Context, CpuUsage, DiskInfo, GitInfo, MediaInfo, MemInfo,
+        NetIface, ThemeColors, WindowCtx,
     };
 
     use super::*;
@@ -122,6 +122,11 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
             uptime: Some(86_400 * 3 + 3600 * 4), // 3d 4h
+            media: Some(MediaInfo {
+                artist: "Radiohead".into(),
+                title: "Karma Police".into(),
+                status: "Playing".into(),
+            }),
             toggled: BTreeSet::from(["weather".to_string()]),
             colors: ThemeColors {
                 error: Color::Rgb(1, 2, 3),

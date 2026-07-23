@@ -50,7 +50,7 @@ pub(crate) fn read_interfaces() -> Vec<NetIface> {
 /// Whether `layout` (a region's widget-name list) references `name`.
 ///
 /// The one predicate behind every "only pay for a read the region actually
-/// renders" gate below (cpu/memory/git/disk/battery/uptime/interfaces) —
+/// renders" gate below (cpu/memory/git/disk/battery/uptime/media/interfaces) —
 /// factored out so each gate is the same one-line check instead of its own
 /// `.iter().any(...)`.
 fn layout_needs(layout: &[String], name: &str) -> bool {
@@ -61,10 +61,11 @@ fn layout_needs(layout: &[String], name: &str) -> bool {
 /// format-variable values passed on the command line, plus live host state.
 ///
 /// `layout` is the region's widget-name list; the expensive cpu/memory/git/
-/// disk/battery/uptime/interfaces reads (`read_cpu` sleeps ~120ms on Linux;
-/// `read_memory` on macOS spawns `vm_stat`; `read_git` shells out to `git`;
-/// `read_disk` calls `statvfs(2)`; `read_battery` scans sysfs; `read_uptime`
-/// reads `/proc/uptime` (Linux) or shells out to `sysctl` (macOS);
+/// disk/battery/uptime/media/interfaces reads (`read_cpu` sleeps ~120ms on
+/// Linux; `read_memory` on macOS spawns `vm_stat`; `read_git` shells out to
+/// `git`; `read_disk` calls `statvfs(2)`; `read_battery` scans sysfs;
+/// `read_uptime` reads `/proc/uptime` (Linux) or shells out to `sysctl`
+/// (macOS); `read_media` shells out to `playerctl` (Linux only);
 /// `read_interfaces` calls `getifaddrs(3)`) are taken ONLY when that region
 /// actually renders them — the same "pay only for what the region
 /// references" gating `register_plugins` uses. `disk_mount` is the configured
@@ -102,6 +103,11 @@ pub fn build_region_context(
     } else {
         None
     };
+    let media = if layout_needs(layout, "media") {
+        crate::media::read_media()
+    } else {
+        None
+    };
     Context {
         session_name: args.session.clone().unwrap_or_default(),
         window_index: args.window.clone().unwrap_or_default(),
@@ -127,6 +133,7 @@ pub fn build_region_context(
         git,
         disk,
         uptime,
+        media,
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         toggled: crate::toggles::read_toggles(),
@@ -269,6 +276,18 @@ mod tests {
     }
 
     #[test]
+    fn media_read_only_when_region_names_it() {
+        // Empty layout: the playerctl shell-out never runs, so it stays None —
+        // same "pay only for what the region references" gating as
+        // cpu/memory/git/disk/battery/uptime. `MediaInfo` (unlike `Battery`)
+        // has no `PartialEq`, so (mirroring `git_read_only_when_region_names_it`
+        // above) this only asserts the negative/gated case; the positive
+        // read -> Context -> widget path is covered by the smoke test.
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
+        assert!(ctx.media.is_none());
+    }
+
+    #[test]
     fn build_region_context_reads_toggles_from_state_file() {
         let tmp = tempfile::tempdir().unwrap();
         // Write the state file via the absolute tempdir path FIRST, before the
@@ -406,5 +425,6 @@ mod tests {
         assert!(ctx.cpu.is_none() && ctx.memory.is_none());
         assert!(ctx.git.is_none() && ctx.disk.is_none());
         assert!(ctx.uptime.is_none());
+        assert!(ctx.media.is_none());
     }
 }
