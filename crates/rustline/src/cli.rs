@@ -152,6 +152,16 @@ pub enum PluginCmd {
     Path(PatternCmd),
     /// Approve a plugin's declared capability manifest into its allowlists.
     Approve(ApproveArgs),
+    /// Download a plugin's `.wasm` from its GitHub release into the plugin dir
+    /// and record its provenance — granting NO capabilities (use `approve` or
+    /// `url|path add` afterward).
+    Install(InstallArgs),
+    /// Re-resolve the latest release for a recorded `owner/repo` source,
+    /// re-download, and update the plugin's `checksum`/`tag`.
+    Update(UpdateArgs),
+    /// Delete an installed plugin's `.wasm`; with `--yes` also drop its
+    /// `[plugins.<name>]` config entry.
+    Remove(RemoveArgs),
     /// Scaffold a new WASM guest plugin crate skeleton.
     New(NewPluginArgs),
     /// Build any WASM guest plugin crate (not limited to this repo's own
@@ -208,6 +218,48 @@ pub struct NewPluginArgs {
     /// Overwrite an existing `<name>/` directory.
     #[arg(long)]
     pub force: bool,
+}
+
+/// Arguments for `rustline plugin install`.
+#[derive(Args)]
+pub struct InstallArgs {
+    /// The plugin's GitHub `owner/repo` (e.g. `steve/rustline-weather`).
+    pub repo: String,
+    /// Override the installed plugin name (default: the repo name). This
+    /// becomes the `.wasm` stem and the `[plugins.<name>]` key, so it must
+    /// match the plugin's exported `name()` for discovery to find it.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Install a specific release tag instead of the latest release.
+    #[arg(long)]
+    pub tag: Option<String>,
+    /// Override the plugin install dir (default: `--plugin-dir` resolution used
+    /// elsewhere — config `plugin_dir`, or the XDG default).
+    #[arg(long)]
+    pub plugin_dir: Option<String>,
+}
+
+/// Arguments for `rustline plugin update`.
+#[derive(Args)]
+pub struct UpdateArgs {
+    /// The installed plugin name (its `.wasm` stem / config key).
+    pub name: String,
+    /// Override the plugin install dir (same resolution as `install`).
+    #[arg(long)]
+    pub plugin_dir: Option<String>,
+}
+
+/// Arguments for `rustline plugin remove`.
+#[derive(Args)]
+pub struct RemoveArgs {
+    /// The installed plugin name (its `.wasm` stem / config key).
+    pub name: String,
+    /// Also remove the `[plugins.<name>]` config entry without prompting.
+    #[arg(long)]
+    pub yes: bool,
+    /// Override the plugin install dir (same resolution as `install`).
+    #[arg(long)]
+    pub plugin_dir: Option<String>,
 }
 
 /// Arguments for `rustline plugin approve`.

@@ -7,10 +7,13 @@
 //! line.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use toml::Value;
 
 use crate::Color;
@@ -897,6 +900,98 @@ impl Default for LogConfig {
     }
 }
 
+/// Where a plugin's `.wasm` came from, recorded in `[plugins.<name>].source`
+/// (W38). `rustline plugin install <owner/repo>` writes an
+/// [`PluginSource::OwnerRepo`]; the `Url`/`Path` variants are reserved for a
+/// future install-by-URL / install-by-path.
+///
+/// Deserialization accepts a **bare string** as [`PluginSource::OwnerRepo`], so
+/// pre-W38 configs (`source = "steve/rustline-weather"`) keep parsing unchanged
+/// — load-bearing back-compat, so a pre-existing config never fails to load
+/// (invariant #3). The `Url`/`Path` variants take an inline table
+/// (`{ url = "…" }` / `{ path = "…" }`); `{ owner_repo = "…" }` is also
+/// accepted for symmetry. `OwnerRepo` serializes back to a bare string so a
+/// round-trip is stable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PluginSource {
+    /// A GitHub `owner/repo` slug — what `plugin install` records.
+    OwnerRepo(String),
+    /// A direct URL to a `.wasm` (reserved for a future install-by-URL).
+    Url(String),
+    /// A local filesystem path to a `.wasm` (reserved for install-by-path).
+    Path(String),
+}
+
+impl fmt::Display for PluginSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PluginSource::OwnerRepo(s) => write!(f, "{s}"),
+            PluginSource::Url(s) => write!(f, "url: {s}"),
+            PluginSource::Path(s) => write!(f, "path: {s}"),
+        }
+    }
+}
+
+impl Serialize for PluginSource {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // Bare string keeps parity with pre-W38 configs and re-parses as
+            // OwnerRepo, so a round-trip is stable.
+            PluginSource::OwnerRepo(s) => serializer.serialize_str(s),
+            PluginSource::Url(s) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("url", s)?;
+                map.end()
+            }
+            PluginSource::Path(s) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("path", s)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PluginSource {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct SourceVisitor;
+
+        impl<'de> Visitor<'de> for SourceVisitor {
+            type Value = PluginSource;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(
+                    "an \"owner/repo\" string or a { owner_repo | url | path = \"…\" } table",
+                )
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<PluginSource, E> {
+                Ok(PluginSource::OwnerRepo(v.to_string()))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<PluginSource, A::Error> {
+                let Some((key, val)) = map.next_entry::<String, String>()? else {
+                    return Err(de::Error::custom("empty plugin source table"));
+                };
+                let source = match key.as_str() {
+                    "owner_repo" => PluginSource::OwnerRepo(val),
+                    "url" => PluginSource::Url(val),
+                    "path" => PluginSource::Path(val),
+                    other => {
+                        return Err(de::Error::unknown_field(
+                            other,
+                            &["owner_repo", "url", "path"],
+                        ));
+                    }
+                };
+                Ok(source)
+            }
+        }
+
+        deserializer.deserialize_any(SourceVisitor)
+    }
+}
+
 /// Per-plugin configuration, keyed by plugin name in [`Config::plugins`].
 ///
 /// Capability fields (`allowed_urls`, `allowed_paths`, `max_state_bytes`) are
@@ -905,13 +1000,21 @@ impl Default for LogConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PluginConfig {
     #[serde(default)]
-    pub source: Option<String>,
+    pub source: Option<PluginSource>,
     #[serde(default)]
     pub allowed_urls: Vec<String>,
     #[serde(default)]
     pub allowed_paths: Vec<String>,
     #[serde(default = "default_max_state_bytes")]
     pub max_state_bytes: u64,
+    /// sha256 hex of the installed `.wasm`, recorded by `plugin install`/
+    /// `update` so a later integrity check can verify the file on disk.
+    #[serde(default)]
+    pub checksum: Option<String>,
+    /// The resolved release tag `plugin install`/`update` pinned (e.g.
+    /// `"v1.2.0"`); `None` for a hand-installed plugin.
+    #[serde(default)]
+    pub tag: Option<String>,
     #[serde(default = "empty_table")]
     pub options: Value,
 }
@@ -932,6 +1035,8 @@ impl Default for PluginConfig {
             allowed_urls: Vec::new(),
             allowed_paths: Vec::new(),
             max_state_bytes: default_max_state_bytes(),
+            checksum: None,
+            tag: None,
             options: empty_table(),
         }
     }
@@ -1242,7 +1347,10 @@ format = "{icon} {temp_f}°F"
             Some("~/.local/share/rustline/plugins")
         );
         let w = c.plugins.get("weather").expect("weather entry");
-        assert_eq!(w.source.as_deref(), Some("steve/rustline-weather"));
+        assert_eq!(
+            w.source,
+            Some(PluginSource::OwnerRepo("steve/rustline-weather".into()))
+        );
         assert_eq!(w.allowed_urls, vec!["https://wttr.in/*".to_string()]);
         assert!(w.allowed_paths.is_empty());
         // omitted -> default 50 MB
@@ -1266,6 +1374,69 @@ zip = "48183"
         assert_eq!(w.max_state_bytes, 100);
         assert_eq!(w.allowed_urls, vec!["https://wttr.in/*".to_string()]);
         assert_eq!(w.options.get("zip").and_then(Value::as_str), Some("48183"));
+    }
+
+    #[test]
+    fn plugin_source_bare_string_is_owner_repo() {
+        // Load-bearing back-compat (invariant #3): a pre-W38 config that writes
+        // `source` as a bare string must keep parsing, now as an OwnerRepo.
+        let toml = "[plugins.weather]\nsource = \"steve/rustline-weather\"\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        let w = c.plugins.get("weather").unwrap();
+        assert_eq!(
+            w.source,
+            Some(PluginSource::OwnerRepo("steve/rustline-weather".into()))
+        );
+    }
+
+    #[test]
+    fn plugin_source_table_forms_and_roundtrip() {
+        // The Url/Path variants take an inline table, and OwnerRepo round-trips
+        // back to a bare string through serialize→parse.
+        let toml = concat!(
+            "[plugins.a]\nsource = { url = \"https://x/y.wasm\" }\n",
+            "[plugins.b]\nsource = { path = \"/opt/z.wasm\" }\n",
+            "[plugins.c]\nsource = \"o/r\"\n",
+        );
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            c.plugins["a"].source,
+            Some(PluginSource::Url("https://x/y.wasm".into()))
+        );
+        assert_eq!(
+            c.plugins["b"].source,
+            Some(PluginSource::Path("/opt/z.wasm".into()))
+        );
+        // OwnerRepo serializes to a bare string, so it re-parses unchanged.
+        let owner = PluginSource::OwnerRepo("o/r".into());
+        let text = toml::to_string(&Wrapper { v: owner.clone() }).unwrap();
+        assert_eq!(text.trim(), "v = \"o/r\"");
+        let round: Wrapper = toml::from_str(&text).unwrap();
+        assert_eq!(round.v, owner);
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Wrapper {
+        v: PluginSource,
+    }
+
+    #[test]
+    fn plugin_checksum_and_tag_default_and_parse() {
+        // Absent -> None (invariant #3); present -> captured.
+        let none: PluginConfig = toml::from_str("").unwrap();
+        assert_eq!(none.checksum, None);
+        assert_eq!(none.tag, None);
+
+        let toml = concat!(
+            "[plugins.weather]\n",
+            "source = \"steve/rustline-weather\"\n",
+            "tag = \"v1.2.0\"\n",
+            "checksum = \"deadbeef\"\n",
+        );
+        let c: Config = toml::from_str(toml).unwrap();
+        let w = c.plugins.get("weather").unwrap();
+        assert_eq!(w.tag.as_deref(), Some("v1.2.0"));
+        assert_eq!(w.checksum.as_deref(), Some("deadbeef"));
     }
 
     #[test]

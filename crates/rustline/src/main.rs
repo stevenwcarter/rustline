@@ -14,6 +14,7 @@ mod logging;
 mod media;
 mod memory;
 mod plugin_cmd;
+mod plugin_install;
 mod theme_cmd;
 mod tmux_conf;
 mod toggles;
@@ -235,6 +236,9 @@ fn main() {
             let dir_override = match &cmd {
                 PluginCmd::Build(args) => args.plugin_dir.as_deref(),
                 PluginCmd::Run(args) => args.plugin_dir.as_deref(),
+                PluginCmd::Install(args) => args.plugin_dir.as_deref(),
+                PluginCmd::Update(args) => args.plugin_dir.as_deref(),
+                PluginCmd::Remove(args) => args.plugin_dir.as_deref(),
                 _ => None,
             };
             let plugin_dir = resolve_plugin_dir(dir_override, &cfg);

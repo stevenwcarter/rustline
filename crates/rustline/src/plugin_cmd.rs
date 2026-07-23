@@ -21,11 +21,11 @@ use crate::cli::{ApproveArgs, BuildArgs, NewPluginArgs, PatternCmd, PluginCmd, R
 
 /// The reserved widget name that a plugin must never claim (it names the
 /// built-in window-list renderer, which isn't a plugin-resolvable slot).
-const RESERVED_PLUGIN_NAME: &str = "window";
+pub(crate) const RESERVED_PLUGIN_NAME: &str = "window";
 
 /// `tmux`'s `range=user|X` status-range argument is byte-capped; a plugin
 /// name longer than this can never be click-toggleable (invariant #7).
-const MAX_PLUGIN_NAME_BYTES: usize = 15;
+pub(crate) const MAX_PLUGIN_NAME_BYTES: usize = 15;
 
 /// The embedded `Cargo.toml`/`src/lib.rs` templates `plugin new` scaffolds,
 /// mirroring how `init.rs` embeds its starter config template.
@@ -55,6 +55,9 @@ pub fn run(cmd: PluginCmd, config_path: &Path, plugin_dir: &Path) {
         PluginCmd::Url(pc) => pattern_cmd(pc, Kind::Url, config_path),
         PluginCmd::Path(pc) => pattern_cmd(pc, Kind::Path, config_path),
         PluginCmd::Approve(args) => approve(args, config_path, plugin_dir),
+        PluginCmd::Install(args) => crate::plugin_install::install(&args, config_path, plugin_dir),
+        PluginCmd::Update(args) => crate::plugin_install::update(&args, config_path, plugin_dir),
+        PluginCmd::Remove(args) => crate::plugin_install::remove(&args, config_path, plugin_dir),
         PluginCmd::New(args) => new_plugin(&args),
         PluginCmd::Build(args) => {
             if let Err(error) = build_plugin(&args, plugin_dir) {
@@ -239,6 +242,9 @@ fn list(config_path: &Path, plugin_dir: &Path) {
         println!("{name}");
         if let Some(src) = &pc.source {
             println!("  source: {src}");
+            if let Some(tag) = &pc.tag {
+                println!("  tag: {tag}");
+            }
         }
         println!("  allowed_urls: {:?}", pc.allowed_urls);
         println!("  allowed_paths: {:?}", pc.allowed_paths);
