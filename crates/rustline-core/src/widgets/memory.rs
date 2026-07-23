@@ -12,6 +12,9 @@ pub struct MemoryWidget {
     pub bar_width: usize,
     pub warn_percent: f64,
     pub crit_percent: f64,
+    /// Overrides `{icon}` with a fixed glyph instead of [`MEMORY_ICON`].
+    /// `None` keeps the built-in glyph.
+    pub icon: Option<String>,
 }
 
 impl MemoryWidget {
@@ -57,7 +60,7 @@ impl Widget for MemoryWidget {
                     .replace("{avail}", &format_bytes(m.available_bytes))
                     .replace("{percent}", &percent.to_string())
                     .replace("{bar}", &bar::gauge_bar(fraction, self.bar_width))
-                    .replace("{icon}", MEMORY_ICON);
+                    .replace("{icon}", self.icon.as_deref().unwrap_or(MEMORY_ICON));
                 let kind = crate::widgets::alert_over(
                     fraction * 100.0,
                     self.warn_percent,
@@ -137,6 +140,7 @@ mod tests {
             bar_width: 8,
             warn_percent: 80.0,
             crit_percent: 92.0,
+            icon: None,
         }
     }
 
@@ -196,6 +200,7 @@ mod tests {
             bar_width: 8,
             warn_percent: 80.0,
             crit_percent: 92.0,
+            icon: None,
         }
         .render(&c);
         assert_eq!(out[0].text, "\u{f035b} ████░░░░");
@@ -210,6 +215,7 @@ mod tests {
             bar_width: 8,
             warn_percent: 80.0,
             crit_percent: 92.0,
+            icon: None,
         };
         assert_eq!(base.range_name(), None);
         let alt = MemoryWidget {
@@ -219,8 +225,26 @@ mod tests {
             bar_width: 8,
             warn_percent: 80.0,
             crit_percent: 92.0,
+            icon: None,
         };
         assert_eq!(alt.range_name(), Some("memory"));
+    }
+
+    #[test]
+    fn memory_icon_override_replaces_glyph() {
+        let g = 1024u64.pow(3);
+        let mut widget = w("{icon} {percent}%", "");
+        widget.icon = Some("M".into());
+        let out = widget.render(&ctx(mem(16 * g, 8 * g, 8 * g)));
+        assert_eq!(out[0].text, "M 50%");
+    }
+
+    #[test]
+    fn memory_icon_none_uses_default() {
+        // Characterization: an unset icon renders the built-in glyph unchanged.
+        let g = 1024u64.pow(3);
+        let out = w("{icon} {percent}%", "").render(&ctx(mem(16 * g, 8 * g, 8 * g)));
+        assert_eq!(out[0].text, "\u{f035b} 50%");
     }
 
     #[test]

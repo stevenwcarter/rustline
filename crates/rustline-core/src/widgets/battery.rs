@@ -8,6 +8,10 @@ pub struct BatteryWidget {
     pub down_format: String,
     pub warn_percent: f64,
     pub crit_percent: f64,
+    /// Overrides `{icon}` with a fixed glyph, replacing the level-bucketed,
+    /// charging-aware computed icon ([`battery_icon`]) entirely. `None`
+    /// keeps the computed glyph.
+    pub icon: Option<String>,
 }
 
 impl BatteryWidget {
@@ -51,8 +55,9 @@ impl Widget for BatteryWidget {
             Some(b) => {
                 let fmt =
                     crate::widgets::active_format(ctx, Self::NAME, &self.format, &self.alt_format);
+                let icon = self.icon.as_deref().unwrap_or_else(|| battery_icon(&b));
                 let text = fmt
-                    .replace("{icon}", battery_icon(&b))
+                    .replace("{icon}", icon)
                     .replace("{percent}", &b.percent.to_string())
                     .replace("{state}", state_word(b.state));
                 let kind = if b.state == BatteryState::Discharging {
@@ -131,6 +136,7 @@ mod tests {
             down_format: String::new(),
             warn_percent: 20.0,
             crit_percent: 10.0,
+            icon: None,
         }
     }
 
@@ -142,6 +148,7 @@ mod tests {
             down_format: String::new(),
             warn_percent: 20.0,
             crit_percent: 10.0,
+            icon: None,
         };
         let out = widget.render(&ctx(bat(73, BatteryState::Discharging)));
         assert_eq!(out[0].text, "\u{f0080} 73% discharging");
@@ -242,6 +249,7 @@ mod tests {
             down_format: "no-batt {percent}{icon}{state}".into(),
             warn_percent: 20.0,
             crit_percent: 10.0,
+            icon: None,
         };
         let out = widget.render(&ctx(None));
         assert_eq!(out[0].text, "no-batt ");
@@ -257,6 +265,7 @@ mod tests {
             down_format: String::new(),
             warn_percent: 20.0,
             crit_percent: 10.0,
+            icon: None,
         }
         .render(&c);
         assert_eq!(out[0].text, "\u{f0080} 73% discharging");
@@ -271,6 +280,7 @@ mod tests {
                 down_format: String::new(),
                 warn_percent: 20.0,
                 crit_percent: 10.0,
+                icon: None,
             }
             .range_name(),
             None
@@ -282,10 +292,28 @@ mod tests {
                 down_format: String::new(),
                 warn_percent: 20.0,
                 crit_percent: 10.0,
+                icon: None,
             }
             .range_name(),
             Some("battery")
         );
+    }
+
+    #[test]
+    fn battery_icon_override_replaces_bucketed_glyph() {
+        let mut widget = w();
+        widget.icon = Some("B".into());
+        // 73% discharging would normally bucket to \u{f0080}; the override wins.
+        let out = widget.render(&ctx(bat(73, BatteryState::Discharging)));
+        assert_eq!(out[0].text, "B 73%");
+    }
+
+    #[test]
+    fn battery_icon_none_uses_default() {
+        // Characterization: an unset icon renders the computed bucketed glyph
+        // unchanged.
+        let out = w().render(&ctx(bat(73, BatteryState::Discharging)));
+        assert_eq!(out[0].text, "\u{f0080} 73%");
     }
 
     #[test]

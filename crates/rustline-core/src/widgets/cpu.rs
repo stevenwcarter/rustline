@@ -12,6 +12,9 @@ pub struct CpuWidget {
     pub bar_width: usize,
     pub warn_percent: f64,
     pub crit_percent: f64,
+    /// Overrides `{icon}` with a fixed glyph instead of [`CPU_ICON`]. `None`
+    /// keeps the built-in glyph.
+    pub icon: Option<String>,
 }
 
 impl CpuWidget {
@@ -32,7 +35,7 @@ impl Widget for CpuWidget {
                         "{bar}",
                         &bar::gauge_bar(c.percent as f64 / 100.0, self.bar_width),
                     )
-                    .replace("{icon}", CPU_ICON);
+                    .replace("{icon}", self.icon.as_deref().unwrap_or(CPU_ICON));
                 let kind = crate::widgets::alert_over(
                     c.percent as f64,
                     self.warn_percent,
@@ -101,6 +104,7 @@ mod tests {
             bar_width: 8,
             warn_percent: 80.0,
             crit_percent: 95.0,
+            icon: None,
         }
     }
 
@@ -112,6 +116,7 @@ mod tests {
             bar_width: 8,
             warn_percent: 80.0,
             crit_percent: 95.0,
+            icon: None,
         }
     }
 
@@ -184,6 +189,21 @@ mod tests {
         c.cpu = Some(CpuUsage { percent: 96.0 });
         let out = w("{percent}%", "").render(&c);
         assert_eq!(out[0].style.bg, Some(crate::Color::Indexed(196))); // crit
+    }
+
+    #[test]
+    fn cpu_icon_override_replaces_glyph() {
+        let mut widget = w("{icon} {percent}%", "");
+        widget.icon = Some("C".into());
+        let out = widget.render(&ctx(Some(CpuUsage { percent: 50.0 })));
+        assert_eq!(out[0].text, "C 50%");
+    }
+
+    #[test]
+    fn cpu_icon_none_uses_default() {
+        // Characterization: an unset icon renders the built-in glyph unchanged.
+        let out = w("{icon} {percent}%", "").render(&ctx(Some(CpuUsage { percent: 50.0 })));
+        assert_eq!(out[0].text, "\u{f061a} 50%");
     }
 
     #[test]

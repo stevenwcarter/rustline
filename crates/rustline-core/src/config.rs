@@ -243,6 +243,11 @@ pub struct BatteryOpts {
     pub warn_percent: f64,
     #[serde(default = "default_bat_crit")]
     pub crit_percent: f64,
+    /// Overrides `{icon}` with a fixed glyph, replacing the level-bucketed,
+    /// charging-aware computed icon entirely. `None` (the default) keeps the
+    /// computed glyph, for non-Nerd-Font users to substitute their own.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 impl Default for BatteryOpts {
@@ -253,6 +258,7 @@ impl Default for BatteryOpts {
             alt_format: String::new(),
             warn_percent: default_bat_warn(),
             crit_percent: default_bat_crit(),
+            icon: None,
         }
     }
 }
@@ -305,6 +311,11 @@ pub struct CpuOpts {
     pub warn_percent: f64,
     #[serde(default = "default_cpu_crit")]
     pub crit_percent: f64,
+    /// Overrides `{icon}` with a fixed glyph instead of the built-in
+    /// Nerd-Font chip icon. `None` (the default) keeps the built-in glyph,
+    /// for non-Nerd-Font users to substitute their own.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 impl Default for CpuOpts {
@@ -316,6 +327,7 @@ impl Default for CpuOpts {
             bar_width: default_bar_width(),
             warn_percent: default_cpu_warn(),
             crit_percent: default_cpu_crit(),
+            icon: None,
         }
     }
 }
@@ -335,6 +347,11 @@ pub struct MemoryOpts {
     pub warn_percent: f64,
     #[serde(default = "default_mem_crit")]
     pub crit_percent: f64,
+    /// Overrides `{icon}` with a fixed glyph instead of the built-in
+    /// Nerd-Font memory icon. `None` (the default) keeps the built-in glyph,
+    /// for non-Nerd-Font users to substitute their own.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 impl Default for MemoryOpts {
@@ -346,6 +363,7 @@ impl Default for MemoryOpts {
             bar_width: default_bar_width(),
             warn_percent: default_mem_warn(),
             crit_percent: default_mem_crit(),
+            icon: None,
         }
     }
 }
@@ -1022,6 +1040,27 @@ bar_width = 12
         assert_eq!(c.widgets.cpu.bar_width, 8);
         assert_eq!(c.widgets.memory.format, "{icon} {used}/{total}");
         assert_eq!(c.widgets.memory.bar_width, 8);
+    }
+
+    #[test]
+    fn icon_override_defaults_to_none_and_parses() {
+        let c = Config::default();
+        assert_eq!(c.widgets.cpu.icon, None);
+        assert_eq!(c.widgets.memory.icon, None);
+        assert_eq!(c.widgets.battery.icon, None);
+
+        let toml = r#"
+[widgets.cpu]
+icon = "C"
+[widgets.memory]
+icon = "M"
+[widgets.battery]
+icon = "B"
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.widgets.cpu.icon.as_deref(), Some("C"));
+        assert_eq!(c.widgets.memory.icon.as_deref(), Some("M"));
+        assert_eq!(c.widgets.battery.icon.as_deref(), Some("B"));
     }
 
     #[test]

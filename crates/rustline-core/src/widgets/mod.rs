@@ -169,6 +169,7 @@ impl Registry {
                     down_format: battery.down_format.clone(),
                     warn_percent: battery.warn_percent,
                     crit_percent: battery.crit_percent,
+                    icon: battery.icon.clone(),
                 })
             }),
         );
@@ -184,6 +185,7 @@ impl Registry {
                     bar_width: cpu.bar_width,
                     warn_percent: cpu.warn_percent,
                     crit_percent: cpu.crit_percent,
+                    icon: cpu.icon.clone(),
                 })
             }),
         );
@@ -199,6 +201,7 @@ impl Registry {
                     bar_width: memory.bar_width,
                     warn_percent: memory.warn_percent,
                     crit_percent: memory.crit_percent,
+                    icon: memory.icon.clone(),
                 })
             }),
         );
