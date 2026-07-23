@@ -629,6 +629,103 @@ fn init_uninstall_and_print_together_print_wins() {
 }
 
 #[test]
+fn init_uninstall_dry_run_previews_only_and_writes_nothing() {
+    // CRITICAL regression (Phase 4 data-safety review): `--dry-run` must be a
+    // true no-write modifier for `--uninstall` too. Before the fix, `run`
+    // checked `--uninstall` before `--dry-run`, so `--uninstall --dry-run`
+    // silently performed the REAL removal + backup despite `--dry-run`'s
+    // doc-commented promise of "without touching disk".
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let run = |args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+        cmd.arg("init").args(args);
+        cmd.env("HOME", &home)
+            .env("XDG_DATA_HOME", tmp.path().join("data"))
+            .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+            .env_remove("RUST_LOG");
+        cmd.output().unwrap()
+    };
+    // Seed a real tmux.conf (with the managed block) via --defaults, then
+    // wrap it with user lines on both sides, same as
+    // `init_uninstall_removes_block_and_backs_up`.
+    let out = run(&["--defaults"]);
+    assert!(out.status.success(), "seed init --defaults ok: {out:?}");
+    let tmux_path = home.join(".tmux.conf");
+    let seeded = fs::read_to_string(&tmux_path).expect("seeded tmux.conf");
+    let wrapped = format!("# my own line\n{seeded}# trailing user line\n");
+    fs::write(&tmux_path, &wrapped).unwrap();
+
+    let out = run(&["--uninstall", "--dry-run"]);
+    assert!(
+        out.status.success(),
+        "uninstall --dry-run exits 0; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("tmux block"),
+        "prints a preview of the tmux block change: {s}"
+    );
+    assert!(
+        s.contains("-# >>> rustline >>>"),
+        "diff shows the managed block would be removed: {s}"
+    );
+
+    let after = fs::read_to_string(&tmux_path).unwrap();
+    assert_eq!(
+        after, wrapped,
+        "--dry-run must leave ~/.tmux.conf byte-for-byte unchanged"
+    );
+    assert!(
+        !Path::new(&format!("{}.rustline.bak", tmux_path.display())).exists(),
+        "--dry-run must create no backup file"
+    );
+}
+
+#[test]
+fn init_uninstall_without_dry_run_still_performs_real_uninstall() {
+    // Companion to the regression above: plain `--uninstall` (no --dry-run)
+    // must be unaffected by the fix and still perform the real write. This
+    // guards against a fix that accidentally makes --uninstall a no-op.
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let run = |args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+        cmd.arg("init").args(args);
+        cmd.env("HOME", &home)
+            .env("XDG_DATA_HOME", tmp.path().join("data"))
+            .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+            .env_remove("RUST_LOG");
+        cmd.output().unwrap()
+    };
+    let out = run(&["--defaults"]);
+    assert!(out.status.success(), "seed init --defaults ok: {out:?}");
+    let tmux_path = home.join(".tmux.conf");
+    let seeded = fs::read_to_string(&tmux_path).expect("seeded tmux.conf");
+
+    let out = run(&["--uninstall"]);
+    assert!(
+        out.status.success(),
+        "uninstall exits ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&tmux_path).unwrap();
+    assert!(
+        !after.contains("# >>> rustline >>>"),
+        "real uninstall still removes the block: {after}"
+    );
+    assert!(
+        Path::new(&format!("{}.rustline.bak", tmux_path.display())).exists(),
+        "real uninstall still writes a backup"
+    );
+    let bak = fs::read_to_string(format!("{}.rustline.bak", tmux_path.display())).unwrap();
+    assert_eq!(bak, seeded, "backup matches pre-uninstall content");
+}
+
+#[test]
 fn render_right_with_missing_plugin_degrades_gracefully() {
     // A layout naming a plugin with no .wasm present must not crash: the bar
     // still renders the built-in widgets and exits 0.

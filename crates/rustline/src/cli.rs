@@ -69,17 +69,19 @@ pub struct InitArgs {
     /// Print the raw one-line tmux block to stdout and write nothing (legacy).
     #[arg(long)]
     pub print: bool,
-    /// Preview the config.toml and tmux block that would be written, without
-    /// touching disk. Answers are gathered the same way as a real run
-    /// (`--defaults`, or the interactive wizard on a TTY); `--print` takes
-    /// precedence if both are given.
+    /// Preview, without touching disk, what a real run would do: the
+    /// config.toml and tmux block that would be written (answers gathered the
+    /// same way as a real run — `--defaults`, or the interactive wizard on a
+    /// TTY), or, combined with `--uninstall`, the tmux-block removal that
+    /// would be performed. `--print` takes precedence over both.
     #[arg(long)]
     pub dry_run: bool,
     /// Remove the rustline-managed tmux marker-block from `~/.tmux.conf`
     /// (backing it up first) and print the reload command; touches nothing
     /// else — `config.toml` is left alone — and needs no TTY. Checked before
     /// `--defaults`/the interactive wizard; `--print` still wins if both are
-    /// given (see `init::run`).
+    /// given. Combined with `--dry-run`, only previews the removal and writes
+    /// nothing at all (no file, no backup) — see `init::run`.
     #[arg(long)]
     pub uninstall: bool,
     /// Override the binary path baked into the tmux block's `#(...)` calls

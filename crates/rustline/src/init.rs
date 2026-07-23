@@ -232,13 +232,16 @@ pub fn defaults() -> InitAnswers {
 /// `current_theme` (`[theme].base` plus any inline `[theme]` overrides), so
 /// its `status-style` colors stay byte-identical to today's `rustline init`.
 /// Next, `--uninstall` is checked: it's its own mode, independent of
-/// `--defaults`/`--dry-run` (no `InitAnswers` needed), and never touches
-/// `config.toml` or requires a TTY (see [`uninstall`]). Otherwise, gather
-/// answers (`--defaults` or the interactive prompt) the same way a real run
-/// would. `--dry-run` then previews both artifacts and writes nothing (see
-/// [`preview`]); otherwise `apply` writes both files. A non-interactive
-/// invocation (stdin not a TTY) without `--defaults` errors rather than
-/// writing/previewing silently, whether or not `--dry-run` was also given.
+/// `--defaults` (no `InitAnswers` needed) and never touches `config.toml` or
+/// requires a TTY. `--dry-run` is honored here too — `--uninstall --dry-run`
+/// only *previews* the removal (see [`preview_uninstall`]) and writes
+/// nothing, while plain `--uninstall` performs the real removal (see
+/// [`uninstall`]). Otherwise, gather answers (`--defaults` or the interactive
+/// prompt) the same way a real run would. `--dry-run` then previews both
+/// artifacts and writes nothing (see [`preview`]); otherwise `apply` writes
+/// both files. A non-interactive invocation (stdin not a TTY) without
+/// `--defaults` errors rather than writing/previewing silently, whether or
+/// not `--dry-run` was also given.
 ///
 /// `binary` is the resolved absolute path substituted into the tmux block's
 /// `#(...)` calls in place of a bare `rustline` (see `crate::resolve_binary`);
@@ -268,7 +271,11 @@ pub fn run(
         return;
     }
     if args.uninstall {
-        uninstall(tmux_conf_path);
+        if args.dry_run {
+            preview_uninstall(tmux_conf_path);
+        } else {
+            uninstall(tmux_conf_path);
+        }
         return;
     }
     let answers = if args.defaults {
@@ -400,6 +407,43 @@ fn uninstall(tmux_conf_path: &Path) {
         bak.display(),
         tmux_conf_path.display()
     );
+}
+
+/// `init --uninstall --dry-run`'s entry point: print, but never perform, what
+/// [`uninstall`] would do to `tmux_conf_path`. Writes absolutely nothing — no
+/// backup, no file — unlike [`uninstall`], which this must stay independent
+/// of (a previous defect let `--uninstall` reach [`uninstall`] even when
+/// `--dry-run` was also given, silently truncating the file; see `run`'s
+/// branch order). A missing file, or one with no managed block, gets a
+/// "nothing to remove" note instead of a diff; otherwise reuses the same
+/// [`print_artifact`]/[`line_diff`] machinery [`preview`] uses for the
+/// install path, so the two dry-run paths read consistently.
+fn preview_uninstall(tmux_conf_path: &Path) {
+    let existing = match fs::read_to_string(tmux_conf_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("# --- tmux block ({}) ---", tmux_conf_path.display());
+            println!(
+                "# nothing to remove: {} not found",
+                tmux_conf_path.display()
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!("failed to preview {}: {e}", tmux_conf_path.display());
+            std::process::exit(1);
+        }
+    };
+    let stripped = tmux_conf::remove_tmux_block(&existing);
+    if stripped == existing {
+        println!("# --- tmux block ({}) ---", tmux_conf_path.display());
+        println!(
+            "# nothing to remove: no rustline block found in {}",
+            tmux_conf_path.display()
+        );
+        return;
+    }
+    print_artifact("tmux block", tmux_conf_path, Some(&existing), &stripped);
 }
 
 /// `init --dry-run`'s entry point: print, but never write, the config.toml and
