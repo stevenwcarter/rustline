@@ -91,6 +91,8 @@ mod tests {
             os: String::new(),
             arch: String::new(),
             toggled: Default::default(),
+            cpu_history: Vec::new(),
+            mem_history: Vec::new(),
             colors: Default::default(),
         }
     }

@@ -9,6 +9,7 @@ mod cpu;
 mod disk;
 mod doctor;
 mod git;
+mod history;
 mod init;
 mod logging;
 mod media;
@@ -26,7 +27,7 @@ mod uptime;
 use std::env;
 use std::path::PathBuf;
 
-use build_context::{build_region_context, build_window_context};
+use build_context::{build_region_context, build_window_context, spark_opts};
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Command, PluginCmd, Render};
 use rustline_core::{
@@ -183,6 +184,7 @@ fn main() {
                 &theme,
                 &cfg.widgets.disk.mount,
                 cfg.widgets.throughput.interface.as_deref(),
+                &spark_opts(&cfg),
             );
             let overrides = cfg.color_overrides();
             let out = render_named_region(
@@ -205,6 +207,7 @@ fn main() {
                 &theme,
                 &cfg.widgets.disk.mount,
                 cfg.widgets.throughput.interface.as_deref(),
+                &spark_opts(&cfg),
             );
             let overrides = cfg.color_overrides();
             let out = render_named_region(

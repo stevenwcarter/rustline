@@ -9,8 +9,9 @@
 //! under `test` on any host and carry the unit tests, while only the file-read /
 //! subprocess / sleep / snapshot-persistence is `#[cfg]`-gated.
 
+use std::path::Path;
 #[cfg(target_os = "linux")]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -46,6 +47,33 @@ pub fn read_cpu() -> Option<CpuUsage> {
     {
         None
     }
+}
+
+/// State-file name (under `sample_store`'s state dir) the persisted cpu%
+/// `{spark}` history ring is kept at — distinct from `SAMPLE_NAME` above
+/// (the linux-only two-field delta snapshot). This one is platform-agnostic:
+/// it just needs a completed [`CpuUsage`] reading, not a platform-specific
+/// delta, so it's written/read the same way on every OS.
+const HISTORY_SAMPLE_NAME: &str = "cpu-history";
+
+/// Push `current_percent` onto the persisted cpu% history ring, truncate to
+/// the last `spark_width` readings, persist it back, and return the
+/// resulting history (oldest first) for `Context.cpu_history`. Called only
+/// when the `cpu` widget's `format` actually references `{spark}` (see
+/// `build_context.rs`) — an unreferenced history costs a read+write for
+/// nothing, keeping `{spark}`-absent output byte-identical (no I/O at all).
+pub fn read_cpu_history(state_dir: &Path, current_percent: f32, spark_width: usize) -> Vec<f32> {
+    let mut history = crate::sample_store::read_sample(state_dir, HISTORY_SAMPLE_NAME)
+        .as_deref()
+        .map(crate::history::parse_history)
+        .unwrap_or_default();
+    crate::history::push_truncate(&mut history, current_percent, spark_width);
+    crate::sample_store::write_sample(
+        state_dir,
+        HISTORY_SAMPLE_NAME,
+        &crate::history::serialize_history(&history),
+    );
+    history
 }
 
 #[cfg(target_os = "linux")]
@@ -428,5 +456,24 @@ mod tests {
             parse_snapshot("1000 800 42 leftover\n"),
             Some(snap(1000, 800, 42))
         );
+    }
+
+    #[test]
+    fn read_cpu_history_appends_and_persists_across_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = read_cpu_history(dir.path(), 10.0, 8);
+        assert_eq!(first, vec![10.0]);
+        let second = read_cpu_history(dir.path(), 20.0, 8);
+        assert_eq!(second, vec![10.0, 20.0]);
+    }
+
+    #[test]
+    fn read_cpu_history_truncates_to_spark_width() {
+        let dir = tempfile::tempdir().unwrap();
+        for v in [1.0, 2.0, 3.0, 4.0] {
+            read_cpu_history(dir.path(), v, 2);
+        }
+        // Only the most recent 2 readings survive the ring.
+        assert_eq!(read_cpu_history(dir.path(), 5.0, 2), vec![4.0, 5.0]);
     }
 }

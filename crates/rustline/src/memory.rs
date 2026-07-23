@@ -4,6 +4,8 @@
 //! parsers compile under `test` on any host, so both are unit-tested on the
 //! Linux dev box even though only one reader arm compiles per platform.
 
+use std::path::Path;
+
 use rustline_core::MemInfo;
 
 /// Read host memory, or `None` if the platform is unsupported or the read
@@ -21,6 +23,29 @@ pub fn read_memory() -> Option<MemInfo> {
     {
         None
     }
+}
+
+/// State-file name (under `sample_store`'s state dir) the persisted
+/// memory-used% `{spark}` history ring is kept at.
+const HISTORY_SAMPLE_NAME: &str = "memory-history";
+
+/// Push `current_percent` onto the persisted memory-used% history ring,
+/// truncate to the last `spark_width` readings, persist it back, and return
+/// the resulting history (oldest first) for `Context.mem_history`. Called
+/// only when the `memory` widget's `format` actually references `{spark}`
+/// (see `build_context.rs`) — mirrors `cpu.rs`'s `read_cpu_history`.
+pub fn read_memory_history(state_dir: &Path, current_percent: f32, spark_width: usize) -> Vec<f32> {
+    let mut history = crate::sample_store::read_sample(state_dir, HISTORY_SAMPLE_NAME)
+        .as_deref()
+        .map(crate::history::parse_history)
+        .unwrap_or_default();
+    crate::history::push_truncate(&mut history, current_percent, spark_width);
+    crate::sample_store::write_sample(
+        state_dir,
+        HISTORY_SAMPLE_NAME,
+        &crate::history::serialize_history(&history),
+    );
+    history
 }
 
 #[cfg(target_os = "linux")]
@@ -155,5 +180,23 @@ mod tests {
         if let Some(m) = read_memory() {
             assert!(m.used_bytes <= m.total_bytes);
         }
+    }
+
+    #[test]
+    fn read_memory_history_appends_and_persists_across_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = read_memory_history(dir.path(), 10.0, 8);
+        assert_eq!(first, vec![10.0]);
+        let second = read_memory_history(dir.path(), 20.0, 8);
+        assert_eq!(second, vec![10.0, 20.0]);
+    }
+
+    #[test]
+    fn read_memory_history_truncates_to_spark_width() {
+        let dir = tempfile::tempdir().unwrap();
+        for v in [1.0, 2.0, 3.0, 4.0] {
+            read_memory_history(dir.path(), v, 2);
+        }
+        assert_eq!(read_memory_history(dir.path(), 5.0, 2), vec![4.0, 5.0]);
     }
 }

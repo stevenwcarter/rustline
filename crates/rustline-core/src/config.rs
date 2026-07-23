@@ -321,6 +321,13 @@ fn default_bar_width() -> usize {
     8
 }
 
+/// Default length (readings) of the `{spark}` history ring for cpu/memory —
+/// also the persisted ring's max length (see `crates/rustline/src/cpu.rs`'s
+/// `read_cpu_history`/`memory.rs`'s `read_memory_history`).
+fn default_spark_width() -> usize {
+    8
+}
+
 /// Default cpu `warn_percent`/`crit_percent`.
 fn default_cpu_warn() -> f64 {
     80.0
@@ -350,6 +357,10 @@ pub struct CpuOpts {
     pub alt_format: String,
     #[serde(default = "default_bar_width")]
     pub bar_width: usize,
+    /// Max length (readings) of the `{spark}` history ring. Only consulted
+    /// when `format` references `{spark}` — see `Context::cpu_history`.
+    #[serde(default = "default_spark_width")]
+    pub spark_width: usize,
     #[serde(default = "default_cpu_warn")]
     pub warn_percent: f64,
     #[serde(default = "default_cpu_crit")]
@@ -372,6 +383,7 @@ impl Default for CpuOpts {
             down_format: String::new(),
             alt_format: String::new(),
             bar_width: default_bar_width(),
+            spark_width: default_spark_width(),
             warn_percent: default_cpu_warn(),
             crit_percent: default_cpu_crit(),
             icon: None,
@@ -392,6 +404,10 @@ pub struct MemoryOpts {
     pub alt_format: String,
     #[serde(default = "default_bar_width")]
     pub bar_width: usize,
+    /// Max length (readings) of the `{spark}` history ring. Only consulted
+    /// when `format` references `{spark}` — see `Context::mem_history`.
+    #[serde(default = "default_spark_width")]
+    pub spark_width: usize,
     #[serde(default = "default_mem_warn")]
     pub warn_percent: f64,
     #[serde(default = "default_mem_crit")]
@@ -414,6 +430,7 @@ impl Default for MemoryOpts {
             down_format: String::new(),
             alt_format: String::new(),
             bar_width: default_bar_width(),
+            spark_width: default_spark_width(),
             warn_percent: default_mem_warn(),
             crit_percent: default_mem_crit(),
             icon: None,
@@ -1687,6 +1704,21 @@ bar_width = 12
         assert_eq!(c.widgets.cpu.bar_width, 8);
         assert_eq!(c.widgets.memory.format, "{icon} {used}/{total}");
         assert_eq!(c.widgets.memory.bar_width, 8);
+    }
+
+    #[test]
+    fn cpu_memory_spark_width_parses_and_defaults() {
+        let c = Config::default();
+        assert_eq!(c.widgets.cpu.spark_width, 8);
+        assert_eq!(c.widgets.memory.spark_width, 8);
+
+        let toml = r#"
+[widgets.cpu]
+spark_width = 12
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.widgets.cpu.spark_width, 12);
+        assert_eq!(c.widgets.memory.spark_width, 8); // omitted -> default
     }
 
     #[test]

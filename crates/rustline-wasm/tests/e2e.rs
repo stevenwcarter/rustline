@@ -68,6 +68,8 @@ fn ctx_now(rfc3339: &str) -> Context {
         arch: String::new(),
         uptime: None,
         media: None,
+        cpu_history: Vec::new(),
+        mem_history: Vec::new(),
         toggled: Default::default(),
         colors: Default::default(),
     }

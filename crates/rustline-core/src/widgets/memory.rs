@@ -1,4 +1,5 @@
 use crate::widgets::bar;
+use crate::widgets::spark::sparkline;
 use crate::{Context, Segment, Widget};
 
 /// Nerd-Font memory/RAM glyph (nf-md-memory 󰍛).
@@ -61,6 +62,7 @@ impl Widget for MemoryWidget {
                     .replace("{avail}", &format_bytes(m.available_bytes))
                     .replace("{percent}", &percent.to_string())
                     .replace("{bar}", &bar::gauge_bar(fraction, self.bar_width))
+                    .replace("{spark}", &sparkline(&ctx.mem_history, 100.0))
                     .replace("{icon}", self.icon.as_deref().unwrap_or(MEMORY_ICON));
                 let kind = crate::widgets::alert_over(
                     fraction * 100.0,
@@ -83,6 +85,7 @@ impl Widget for MemoryWidget {
                     .replace("{avail}", "")
                     .replace("{percent}", "")
                     .replace("{bar}", "")
+                    .replace("{spark}", "")
                     .replace("{icon}", "");
                 vec![Segment::new(text)]
             }
@@ -126,6 +129,8 @@ mod tests {
             uptime: None,
             media: None,
             toggled: Default::default(),
+            cpu_history: Vec::new(),
+            mem_history: Vec::new(),
             colors: Default::default(),
         }
     }
@@ -270,5 +275,36 @@ mod tests {
         let out = w("{percent}%", "").render(&c);
         assert_eq!(out[0].style.bg, Some(crate::Color::Indexed(196)));
         assert!(out[0].style.bold);
+    }
+
+    #[test]
+    fn spark_placeholder_renders_history_sparkline() {
+        let g = 1024u64.pow(3);
+        let mut c = ctx(mem(16 * g, 8 * g, 8 * g));
+        c.mem_history = vec![0.0, 50.0, 100.0];
+        let out = w("{spark}", "").render(&c);
+        assert_eq!(out[0].text, "▁▅█");
+    }
+
+    #[test]
+    fn spark_placeholder_empty_history_is_empty_string() {
+        let g = 1024u64.pow(3);
+        let out = w("{spark}", "").render(&ctx(mem(16 * g, 8 * g, 8 * g)));
+        assert_eq!(out[0].text, "");
+    }
+
+    #[test]
+    fn spark_absent_from_format_is_byte_identical_regardless_of_history() {
+        // Characterization (W45): a format that never references {spark}
+        // renders identically whether or not Context.mem_history happens to
+        // be populated -- the bin only populates it when {spark} is used, but
+        // the widget itself must not depend on that invariant either.
+        let g = 1024u64.pow(3);
+        let mut c = ctx(mem(16 * g, 6 * g, 10 * g));
+        let without_history = w("{used}/{total} {percent}%", "").render(&c);
+        c.mem_history = vec![10.0, 20.0, 30.0];
+        let with_history = w("{used}/{total} {percent}%", "").render(&c);
+        assert_eq!(without_history[0].text, with_history[0].text);
+        assert_eq!(with_history[0].text, "6.0G/16G 38%");
     }
 }

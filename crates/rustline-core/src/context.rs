@@ -47,8 +47,24 @@ pub struct Context {
     /// CPU-utilization snapshot read once at build time; `None` when
     /// absent/unsupported.
     pub cpu: Option<CpuUsage>,
+    /// Recent cpu% readings (oldest first), persisted across invocations and
+    /// read once at build time — ONLY when the `cpu` widget's configured
+    /// `format` contains the literal `{spark}` (see
+    /// `crates/rustline/src/build_context.rs`); otherwise left empty, doing no
+    /// history I/O at all. Feeds the `cpu` widget's `{spark}` placeholder
+    /// (`widgets::spark::sparkline`). `#[serde(default)]` keeps
+    /// deserialization total across host/guest version skew (invariant #2),
+    /// matching `throughput`/`uptime`/`media` above.
+    #[serde(default)]
+    pub cpu_history: Vec<f32>,
     /// Memory snapshot read once at build time; `None` when absent/unsupported.
     pub memory: Option<MemInfo>,
+    /// Recent memory-used% readings (oldest first), same gating/persistence
+    /// story as [`Context::cpu_history`] but keyed on the `memory` widget's
+    /// format; feeds `memory`'s `{spark}` placeholder. `#[serde(default)]`
+    /// for the same reason as `cpu_history`.
+    #[serde(default)]
+    pub mem_history: Vec<f32>,
     /// Git branch/status snapshot for `pane_current_path`, read once at build
     /// time (only when the `git` widget is in the active layout — see
     /// `build_context.rs`); `None` when `git` is missing, the pane isn't
@@ -122,7 +138,9 @@ impl Default for Context {
             interfaces: Vec::new(),
             battery: None,
             cpu: None,
+            cpu_history: Vec::new(),
             memory: None,
+            mem_history: Vec::new(),
             git: None,
             disk: None,
             throughput: None,
@@ -182,6 +200,8 @@ mod tests {
         assert!(ctx.battery.is_none());
         assert!(ctx.interfaces.is_empty());
         assert!(ctx.throughput.is_none());
+        assert!(ctx.cpu_history.is_empty());
+        assert!(ctx.mem_history.is_empty());
     }
 
     #[test]
@@ -249,6 +269,31 @@ mod tests {
         );
         let back2: Context = serde_json::from_str(&without).unwrap();
         assert!(back2.toggled.is_empty());
+    }
+
+    #[test]
+    fn context_cpu_mem_history_survive_serde_and_default_when_absent() {
+        let mut ctx = sample();
+        ctx.cpu_history = vec![10.0, 20.0, 30.0];
+        ctx.mem_history = vec![40.0, 50.0];
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: Context = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.cpu_history, ctx.cpu_history);
+        assert_eq!(back.mem_history, ctx.mem_history);
+
+        // A Context JSON lacking `cpu_history`/`mem_history` must deserialize
+        // to empty vecs (guards host/guest version skew; keeps
+        // deserialization total — invariant #2).
+        let without = json
+            .replace(r#","cpu_history":[10.0,20.0,30.0]"#, "")
+            .replace(r#","mem_history":[40.0,50.0]"#, "");
+        assert_ne!(
+            without, json,
+            "sanity: the cpu_history/mem_history keys were present to strip"
+        );
+        let back2: Context = serde_json::from_str(&without).unwrap();
+        assert!(back2.cpu_history.is_empty());
+        assert!(back2.mem_history.is_empty());
     }
 
     #[test]

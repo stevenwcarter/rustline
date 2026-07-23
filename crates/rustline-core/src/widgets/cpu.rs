@@ -1,4 +1,5 @@
 use crate::widgets::bar;
+use crate::widgets::spark::sparkline;
 use crate::{Context, Segment, Widget};
 
 /// Nerd-Font CPU/chip glyph (nf-md-chip 󰘚).
@@ -35,6 +36,7 @@ impl Widget for CpuWidget {
                         "{bar}",
                         &bar::gauge_bar(c.percent as f64 / 100.0, self.bar_width),
                     )
+                    .replace("{spark}", &sparkline(&ctx.cpu_history, 100.0))
                     .replace("{icon}", self.icon.as_deref().unwrap_or(CPU_ICON));
                 let kind = crate::widgets::alert_over(
                     c.percent as f64,
@@ -54,6 +56,7 @@ impl Widget for CpuWidget {
                     .down_format
                     .replace("{percent}", "")
                     .replace("{bar}", "")
+                    .replace("{spark}", "")
                     .replace("{icon}", "");
                 vec![Segment::new(text)]
             }
@@ -97,6 +100,8 @@ mod tests {
             uptime: None,
             media: None,
             toggled: Default::default(),
+            cpu_history: Vec::new(),
+            mem_history: Vec::new(),
             colors: Default::default(),
         }
     }
@@ -220,5 +225,35 @@ mod tests {
         widget.crit_percent = 0.0;
         let out = widget.render(&c);
         assert_eq!(out[0].style, crate::Style::default());
+    }
+
+    #[test]
+    fn spark_placeholder_renders_history_sparkline() {
+        let mut c = ctx(Some(CpuUsage { percent: 50.0 }));
+        c.cpu_history = vec![0.0, 50.0, 100.0];
+        let out = w("{spark}", "").render(&c);
+        assert_eq!(out[0].text, "▁▅█");
+    }
+
+    #[test]
+    fn spark_placeholder_empty_history_is_empty_string() {
+        // No history populated (e.g. the bin never did the {spark}-gated
+        // read) -> {spark} collapses to empty, not a panic or placeholder.
+        let out = w("{spark}", "").render(&ctx(Some(CpuUsage { percent: 50.0 })));
+        assert_eq!(out[0].text, "");
+    }
+
+    #[test]
+    fn spark_absent_from_format_is_byte_identical_regardless_of_history() {
+        // Characterization (W45): a format that never references {spark}
+        // renders identically whether or not Context.cpu_history happens to
+        // be populated -- the bin only populates it when {spark} is used, but
+        // the widget itself must not depend on that invariant either.
+        let mut c = ctx(Some(CpuUsage { percent: 37.4 }));
+        let without_history = w("{icon} {percent}%", "").render(&c);
+        c.cpu_history = vec![10.0, 20.0, 30.0];
+        let with_history = w("{icon} {percent}%", "").render(&c);
+        assert_eq!(without_history[0].text, with_history[0].text);
+        assert_eq!(with_history[0].text, "\u{f061a} 37%");
     }
 }

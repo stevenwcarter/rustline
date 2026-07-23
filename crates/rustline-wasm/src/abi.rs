@@ -101,6 +101,11 @@ mod tests {
                 title: "Karma Police".into(),
                 status: "Playing".into(),
             }),
+            // Not (yet) mirrored on `WireContext` -- same pre-existing gap as
+            // `throughput`/`uptime`/`media` not being asserted below; this
+            // test only pins the fields `WireContext` actually declares.
+            cpu_history: Vec::new(),
+            mem_history: Vec::new(),
             toggled: BTreeSet::from(["weather".to_string()]),
             colors: ThemeColors {
                 error: Color::Rgb(1, 2, 3),

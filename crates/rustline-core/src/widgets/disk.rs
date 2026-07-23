@@ -105,6 +105,8 @@ mod tests {
             uptime: None,
             media: None,
             toggled: Default::default(),
+            cpu_history: Vec::new(),
+            mem_history: Vec::new(),
             colors: Default::default(),
         }
     }

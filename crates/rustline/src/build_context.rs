@@ -4,7 +4,7 @@
 use std::env;
 
 use crate::cli::{RegionArgs, WindowArgs};
-use rustline_core::{Context, NetIface, Theme, WindowCtx};
+use rustline_core::{Config, Context, NetIface, Theme, WindowCtx};
 
 /// Read the 1/5/15-minute load average via `getloadavg(3)`.
 ///
@@ -57,6 +57,37 @@ fn layout_needs(layout: &[String], name: &str) -> bool {
     layout.iter().any(|w| w == name)
 }
 
+/// The cpu/memory `format` + `spark_width` config needed to decide whether to
+/// do the `{spark}`-gated history read ([`crate::cpu::read_cpu_history`]/
+/// [`crate::memory::read_memory_history`]) and how long a ring to keep.
+/// Bundled into one struct — like `disk_mount`/`throughput_interface` above,
+/// neither is otherwise available inside this module — to keep
+/// [`build_region_context`] under clippy's too-many-arguments threshold.
+/// `Default` (empty formats, `0` widths) never contains the literal
+/// `{spark}`, so it's the right zero-I/O value for callers/tests that don't
+/// care about sparklines.
+#[derive(Default)]
+pub struct SparkOpts<'a> {
+    pub cpu_format: &'a str,
+    pub cpu_spark_width: usize,
+    pub mem_format: &'a str,
+    pub mem_spark_width: usize,
+}
+
+/// Build [`SparkOpts`] from the resolved config's `[widgets.cpu]`/
+/// `[widgets.memory]` tables. The one place this projection happens, so
+/// `main.rs`'s `render left`/`render right` and the `bench` feature's
+/// real-region pass (both need it to call [`build_region_context`]) can't
+/// drift apart.
+pub fn spark_opts(cfg: &Config) -> SparkOpts<'_> {
+    SparkOpts {
+        cpu_format: &cfg.widgets.cpu.format,
+        cpu_spark_width: cfg.widgets.cpu.spark_width,
+        mem_format: &cfg.widgets.memory.format,
+        mem_spark_width: cfg.widgets.memory.spark_width,
+    }
+}
+
 /// Build the [`Context`] for rendering a left/right region from the tmux
 /// format-variable values passed on the command line, plus live host state.
 ///
@@ -74,13 +105,21 @@ fn layout_needs(layout: &[String], name: &str) -> bool {
 /// `throughput_interface` is the configured `[widgets.throughput].interface`
 /// (unused unless `layout` names `throughput`) — neither is otherwise
 /// available inside this module, unlike `git`, which reuses
-/// `pane_current_path` already on hand.
+/// `pane_current_path` already on hand. `spark` is the cpu/memory `{spark}`
+/// history config (see [`SparkOpts`]): the cpu%/mem% history is read+
+/// persisted (via `crate::cpu`/`crate::memory`'s `read_*_history`, backed by
+/// `sample_store`) only when the corresponding widget both is in `layout` AND
+/// its configured `format` contains the literal `{spark}` — with either
+/// condition false, `Context.cpu_history`/`mem_history` stay empty and no
+/// history I/O happens at all, keeping `{spark}`-absent output byte-identical
+/// (W45).
 pub fn build_region_context(
     args: &RegionArgs,
     layout: &[String],
     theme: &Theme,
     disk_mount: &str,
     throughput_interface: Option<&str>,
+    spark: &SparkOpts<'_>,
 ) -> Context {
     let pane_current_path = args.pane_path.clone().unwrap_or_default();
     let git = if layout_needs(layout, "git") {
@@ -119,6 +158,39 @@ pub fn build_region_context(
     } else {
         None
     };
+    let cpu = if layout_needs(layout, "cpu") {
+        crate::cpu::read_cpu()
+    } else {
+        None
+    };
+    let cpu_history = match cpu {
+        Some(c) if spark.cpu_format.contains("{spark}") => crate::cpu::read_cpu_history(
+            &rustline_wasm::state_root(),
+            c.percent,
+            spark.cpu_spark_width,
+        ),
+        _ => Vec::new(),
+    };
+    let memory = if layout_needs(layout, "memory") {
+        crate::memory::read_memory()
+    } else {
+        None
+    };
+    let mem_history = match memory {
+        Some(m) if spark.mem_format.contains("{spark}") => {
+            let percent = if m.total_bytes == 0 {
+                0.0
+            } else {
+                (m.used_bytes as f64 / m.total_bytes as f64 * 100.0) as f32
+            };
+            crate::memory::read_memory_history(
+                &rustline_wasm::state_root(),
+                percent,
+                spark.mem_spark_width,
+            )
+        }
+        _ => Vec::new(),
+    };
     Context {
         session_name: args.session.clone().unwrap_or_default(),
         window_index: args.window.clone().unwrap_or_default(),
@@ -131,16 +203,10 @@ pub fn build_region_context(
         window: None,
         interfaces,
         battery,
-        cpu: if layout_needs(layout, "cpu") {
-            crate::cpu::read_cpu()
-        } else {
-            None
-        },
-        memory: if layout_needs(layout, "memory") {
-            crate::memory::read_memory()
-        } else {
-            None
-        },
+        cpu,
+        cpu_history,
+        memory,
+        mem_history,
         git,
         disk,
         throughput,
@@ -195,7 +261,14 @@ mod tests {
     #[test]
     fn home_from_env_used_when_present() {
         // build_context reads $HOME; assert the field is populated non-empty
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &[],
+            &Theme::default(),
+            "",
+            None,
+            &SparkOpts::default(),
+        );
         assert!(!ctx.home.is_empty() || std::env::var("HOME").is_err());
     }
 
@@ -217,6 +290,7 @@ mod tests {
             &Theme::default(),
             "",
             None,
+            &SparkOpts::default(),
         );
         assert!(
             ctx.interfaces
@@ -238,7 +312,14 @@ mod tests {
     fn interfaces_sampled_only_when_region_names_an_ip_widget() {
         // Empty layout: getifaddrs never runs, so interfaces stays at its
         // not-found value (empty), never a stale/fabricated read.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &[],
+            &Theme::default(),
+            "",
+            None,
+            &SparkOpts::default(),
+        );
         assert!(ctx.interfaces.is_empty());
 
         // Named in the layout (either IP widget triggers the shared read):
@@ -250,6 +331,7 @@ mod tests {
                 &Theme::default(),
                 "",
                 None,
+                &SparkOpts::default(),
             );
             assert_eq!(ctx.interfaces, read_interfaces());
         }
@@ -258,7 +340,14 @@ mod tests {
     #[test]
     fn battery_sampled_only_when_region_names_it() {
         // Empty layout: the sysfs scan never runs, so it stays None.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &[],
+            &Theme::default(),
+            "",
+            None,
+            &SparkOpts::default(),
+        );
         assert!(ctx.battery.is_none());
 
         // Named in the layout: the real read runs, matching a direct
@@ -269,6 +358,7 @@ mod tests {
             &Theme::default(),
             "",
             None,
+            &SparkOpts::default(),
         );
         assert_eq!(ctx.battery, crate::battery::read_battery());
     }
@@ -277,7 +367,14 @@ mod tests {
     fn uptime_sampled_only_when_region_names_it() {
         // Empty layout: the read never runs, so it stays None — same
         // "pay only for what the region references" gating as battery.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &[],
+            &Theme::default(),
+            "",
+            None,
+            &SparkOpts::default(),
+        );
         assert!(ctx.uptime.is_none());
 
         // Named in the layout: the real read runs, matching a direct
@@ -288,6 +385,7 @@ mod tests {
             &Theme::default(),
             "",
             None,
+            &SparkOpts::default(),
         );
         assert_eq!(ctx.uptime, crate::uptime::read_uptime());
     }
@@ -297,7 +395,14 @@ mod tests {
         // Empty layout: the playerctl shell-out never runs, so it stays None —
         // same "pay only for what the region references" gating as
         // cpu/memory/git/disk/battery/uptime.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &[],
+            &Theme::default(),
+            "",
+            None,
+            &SparkOpts::default(),
+        );
         assert!(ctx.media.is_none());
 
         // Named in the layout: the real read runs, matching a direct
@@ -308,6 +413,7 @@ mod tests {
             &Theme::default(),
             "",
             None,
+            &SparkOpts::default(),
         );
         assert_eq!(ctx.media, crate::media::read_media());
     }
@@ -337,7 +443,14 @@ mod tests {
         unsafe {
             std::env::set_var("XDG_DATA_HOME", tmp.path());
         }
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &[],
+            &Theme::default(),
+            "",
+            None,
+            &SparkOpts::default(),
+        );
         // SAFETY: matches the set above; restores the process env for other tests.
         unsafe {
             std::env::remove_var("XDG_DATA_HOME");
@@ -350,7 +463,14 @@ mod tests {
     fn cpu_memory_sampled_only_when_region_names_them() {
         // Empty layout: neither expensive read runs, so both stay None — this is
         // what spares `render left` / `render window` the read_cpu sleep.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &[],
+            &Theme::default(),
+            "",
+            None,
+            &SparkOpts::default(),
+        );
         assert!(ctx.cpu.is_none() && ctx.memory.is_none());
         // The window path never samples cpu/memory at all.
         let wctx = build_window_context(&WindowArgs {
@@ -364,10 +484,77 @@ mod tests {
     }
 
     #[test]
+    fn cpu_mem_history_empty_when_spark_absent_from_format() {
+        // cpu/memory are in the layout (so they're read at all), but neither
+        // configured format references {spark} -> no history I/O, both
+        // histories stay empty. This is the byte-identical-by-default case
+        // (W45): a plain `{percent}%` format never touches the history ring.
+        let layout = ["cpu".to_string(), "memory".to_string()];
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &layout,
+            &Theme::default(),
+            "",
+            None,
+            &SparkOpts {
+                cpu_format: "{percent}%",
+                cpu_spark_width: 8,
+                mem_format: "{percent}%",
+                mem_spark_width: 8,
+            },
+        );
+        assert!(ctx.cpu_history.is_empty());
+        assert!(ctx.mem_history.is_empty());
+    }
+
+    #[test]
+    fn cpu_mem_history_populated_only_when_format_references_spark() {
+        // Named in the layout AND the format references {spark}: the history
+        // read/persist actually runs, so the just-read percent lands in the
+        // returned history.
+        let tmp = tempfile::tempdir().unwrap();
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by `ENV_LOCK` against the other tests in this
+        // module that also mutate this var (history I/O routes through
+        // `rustline_wasm::state_root()`, which reads it).
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", tmp.path());
+        }
+        let layout = ["cpu".to_string(), "memory".to_string()];
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &layout,
+            &Theme::default(),
+            "",
+            None,
+            &SparkOpts {
+                cpu_format: "{icon} {spark} {percent}%",
+                cpu_spark_width: 8,
+                mem_format: "{icon} {spark} {percent}%",
+                mem_spark_width: 8,
+            },
+        );
+        // SAFETY: matches the set above; restores the process env for other tests.
+        unsafe {
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        drop(guard);
+        assert_eq!(ctx.cpu_history.len(), 1);
+        assert_eq!(ctx.mem_history.len(), 1);
+    }
+
+    #[test]
     fn git_read_only_when_region_names_it() {
         // Empty layout: the git shell-out never runs, so it stays None — same
         // "pay only for what the region references" gating as cpu/memory.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &[],
+            &Theme::default(),
+            "",
+            None,
+            &SparkOpts::default(),
+        );
         assert!(ctx.git.is_none());
     }
 
@@ -375,7 +562,14 @@ mod tests {
     fn disk_read_only_when_region_names_it() {
         // Empty layout: the statvfs read never runs, so it stays None — same
         // "pay only for what the region references" gating as cpu/memory/git.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "/", None);
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &[],
+            &Theme::default(),
+            "/",
+            None,
+            &SparkOpts::default(),
+        );
         assert!(ctx.disk.is_none());
     }
 
@@ -388,6 +582,7 @@ mod tests {
             &Theme::default(),
             "/",
             None,
+            &SparkOpts::default(),
         );
         assert!(ctx.disk.is_some());
     }
@@ -462,7 +657,14 @@ mod tests {
         // cpu/memory/git/disk. `layout_needs` short-circuits this before
         // `crate::throughput::read_throughput` (and thus `state_root()`) is
         // ever touched, so this half needs no env isolation.
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "", None);
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &[],
+            &Theme::default(),
+            "",
+            None,
+            &SparkOpts::default(),
+        );
         assert!(ctx.throughput.is_none());
 
         // Named in the layout: the real read fires. `read_throughput` is
@@ -482,10 +684,22 @@ mod tests {
             std::env::set_var("XDG_DATA_HOME", tmp.path());
         }
         let layout = ["throughput".to_string()];
-        let first =
-            build_region_context(&RegionArgs::default(), &layout, &Theme::default(), "", None);
-        let second =
-            build_region_context(&RegionArgs::default(), &layout, &Theme::default(), "", None);
+        let first = build_region_context(
+            &RegionArgs::default(),
+            &layout,
+            &Theme::default(),
+            "",
+            None,
+            &SparkOpts::default(),
+        );
+        let second = build_region_context(
+            &RegionArgs::default(),
+            &layout,
+            &Theme::default(),
+            "",
+            None,
+            &SparkOpts::default(),
+        );
         // SAFETY: matches the set above; restores the process env for other tests.
         unsafe {
             std::env::remove_var("XDG_DATA_HOME");

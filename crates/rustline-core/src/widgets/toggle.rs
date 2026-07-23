@@ -64,6 +64,8 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect::<BTreeSet<_>>(),
+            cpu_history: Vec::new(),
+            mem_history: Vec::new(),
             colors: Default::default(),
         }
     }

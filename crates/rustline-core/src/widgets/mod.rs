@@ -13,6 +13,7 @@ pub mod media;
 pub mod memory;
 mod net;
 pub mod pane_id;
+mod spark;
 pub mod tailscale_ip;
 pub mod throughput;
 mod toggle;
@@ -331,6 +332,8 @@ mod tests {
             uptime: None,
             media: None,
             toggled: Default::default(),
+            cpu_history: Vec::new(),
+            mem_history: Vec::new(),
             colors: Default::default(),
         }
     }
