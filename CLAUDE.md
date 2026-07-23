@@ -324,7 +324,11 @@ these shared types, not a design shortcut. Keep them serializable.
   chosen name or `None` to keep the current theme. Its previews default to a
   **healthy** synthetic bar (palette only, no alert badges — what a normal
   status line looks like); `t` toggles the warning/error alert colors on to
-  sample a theme's semantic colors. The healthy-vs-pegged synthetic readings
+  sample a theme's semantic colors, and immediately **re-renders the last
+  previewed item** (tracked as `LastPreview::{One(idx),All}`) via the shared
+  `render_one`/`render_all`/`replay_preview` helpers, so the toggle's effect is
+  visible without re-typing a number (a toggle before any preview just prints
+  the status line). The healthy-vs-pegged synthetic readings
   are chosen by a `show_alerts` bool threaded through
   `sample_context`/`preview_theme_ansi`/`preview_named` (`theme show` and the
   `init` wizard's one-shot preview pass `true`, keeping their alert-badge

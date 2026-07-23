@@ -508,6 +508,56 @@ fn read_line<R: BufRead>(reader: &mut R) -> String {
     s
 }
 
+/// The last preview the user asked for, so a `t` toggle can re-render it with
+/// the new alert setting instead of leaving them to re-type the number.
+#[derive(Clone, Copy)]
+enum LastPreview {
+    One(usize),
+    All,
+}
+
+/// Render one theme's labelled preview to `writer`.
+fn render_one<W: Write>(
+    writer: &mut W,
+    entries: &[PickEntry],
+    idx: usize,
+    themes_dir: &Path,
+    show_alerts: bool,
+) {
+    let name = &entries[idx].name;
+    let _ = writeln!(writer, "\n== {name} ==");
+    if let Some(p) = preview_named(name, themes_dir, show_alerts) {
+        let _ = writeln!(writer, "{p}");
+    }
+}
+
+/// Render every theme's labelled preview to `writer`.
+fn render_all<W: Write>(
+    writer: &mut W,
+    entries: &[PickEntry],
+    themes_dir: &Path,
+    show_alerts: bool,
+) {
+    for (i, _) in entries.iter().enumerate() {
+        render_one(writer, entries, i, themes_dir, show_alerts);
+    }
+}
+
+/// Re-render `last` (if any) with the current alert setting.
+fn replay_preview<W: Write>(
+    writer: &mut W,
+    entries: &[PickEntry],
+    themes_dir: &Path,
+    show_alerts: bool,
+    last: Option<LastPreview>,
+) {
+    match last {
+        Some(LastPreview::One(idx)) => render_one(writer, entries, idx, themes_dir, show_alerts),
+        Some(LastPreview::All) => render_all(writer, entries, themes_dir, show_alerts),
+        None => {}
+    }
+}
+
 /// Drive the interactive preview+set loop over a generic reader/writer,
 /// returning the chosen theme name to set, or `None` to keep the current one.
 /// Performs NO config write and never exits the process, so it is fully
@@ -529,6 +579,7 @@ fn run_picker<R: BufRead, W: Write>(
     // match what a normal status line looks like; `t` toggles the warning/error
     // alert colors on to sample the theme's semantic colors.
     let mut show_alerts = false;
+    let mut last_preview: Option<LastPreview> = None;
     loop {
         let _ = write!(
             writer,
@@ -538,19 +589,12 @@ fn run_picker<R: BufRead, W: Write>(
         match parse_preview_input(&read_line(reader), entries.len()) {
             PreviewCmd::Done => break,
             PreviewCmd::All => {
-                for e in entries {
-                    let _ = writeln!(writer, "\n== {} ==", e.name);
-                    if let Some(p) = preview_named(&e.name, themes_dir, show_alerts) {
-                        let _ = writeln!(writer, "{p}");
-                    }
-                }
+                render_all(writer, entries, themes_dir, show_alerts);
+                last_preview = Some(LastPreview::All);
             }
             PreviewCmd::Preview(idx) => {
-                let name = &entries[idx].name;
-                let _ = writeln!(writer, "\n== {name} ==");
-                if let Some(p) = preview_named(name, themes_dir, show_alerts) {
-                    let _ = writeln!(writer, "{p}");
-                }
+                render_one(writer, entries, idx, themes_dir, show_alerts);
+                last_preview = Some(LastPreview::One(idx));
             }
             PreviewCmd::ToggleAlerts => {
                 show_alerts = !show_alerts;
@@ -564,6 +608,8 @@ fn run_picker<R: BufRead, W: Write>(
                         "the palette only"
                     }
                 );
+                // Re-show the last preview so the toggle's effect is immediate.
+                replay_preview(writer, entries, themes_dir, show_alerts, last_preview);
             }
             PreviewCmd::Invalid => {
                 let _ = writeln!(
@@ -752,6 +798,64 @@ mod tests {
         assert!(
             after.contains("48;5;196"),
             "error badge appears after toggle: {after:?}"
+        );
+    }
+
+    #[test]
+    fn run_picker_toggle_re_previews_last_item() {
+        // Preview #1 (alerts off → no badge), then toggle — WITHOUT re-typing a
+        // number. The toggle must immediately re-render the last previewed item
+        // with alerts on, so its badge color shows right away.
+        let entries = vec![PickEntry {
+            name: "default".to_string(),
+            active: true,
+            from_file: false,
+        }];
+        let dir = std::path::Path::new("/nonexistent-themes-dir");
+        // preview 1, toggle, done-preview, keep.
+        let input = b"1\nt\n\n\n";
+        let mut reader = &input[..];
+        let mut out: Vec<u8> = Vec::new();
+        let choice = run_picker(&entries, dir, &mut reader, &mut out, "default");
+        assert_eq!(choice, None);
+        let text = String::from_utf8(out).unwrap();
+        let (_before, after) = text
+            .split_once("alert badges: on")
+            .expect("toggle status line present");
+        // A fresh preview block is rendered right after the toggle status line,
+        // and it carries the error-badge color the healthy default lacked.
+        assert!(
+            after.contains("== default =="),
+            "toggle re-previews the last item: {after:?}"
+        );
+        assert!(
+            after.contains("48;5;196"),
+            "re-preview shows the badge color: {after:?}"
+        );
+    }
+
+    #[test]
+    fn run_picker_toggle_without_prior_preview_shows_only_status() {
+        // Toggling before previewing anything shows just the status line — there
+        // is no "last item" to re-render, so no preview block appears.
+        let entries = vec![PickEntry {
+            name: "default".to_string(),
+            active: true,
+            from_file: false,
+        }];
+        let dir = std::path::Path::new("/nonexistent-themes-dir");
+        let input = b"t\n\n\n"; // toggle, done-preview, keep.
+        let mut reader = &input[..];
+        let mut out: Vec<u8> = Vec::new();
+        let choice = run_picker(&entries, dir, &mut reader, &mut out, "default");
+        assert_eq!(choice, None);
+        let text = String::from_utf8(out).unwrap();
+        let (_before, after) = text
+            .split_once("alert badges: on")
+            .expect("toggle status line present");
+        assert!(
+            !after.contains("== default =="),
+            "no auto-preview without a prior preview: {after:?}"
         );
     }
 

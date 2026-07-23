@@ -286,9 +286,10 @@ prompts you to set one by name or number (blank keeps the current theme).
 Previews default to a **healthy** status line — just the theme's palette, the
 way you'll actually see it day to day. Press `t` to toggle the warning/error
 alert-badge colors on, so you can sample a theme's semantic colors, and `t`
-again to turn them back off. It needs a terminal — a non-interactive invocation
-prints a hint to use `theme show`/`theme use` instead and exits non-zero
-without writing anything.
+again to turn them back off; toggling immediately re-shows the theme you last
+previewed, so you see the change right away. It needs a terminal — a
+non-interactive invocation prints a hint to use `theme show`/`theme use`
+instead and exits non-zero without writing anything.
 
 `theme new` writes a complete, commented theme file to
 `$XDG_CONFIG_HOME/rustline/themes/<name>.toml` (fallback
