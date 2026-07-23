@@ -279,12 +279,19 @@ mod tests {
     fn media_read_only_when_region_names_it() {
         // Empty layout: the playerctl shell-out never runs, so it stays None —
         // same "pay only for what the region references" gating as
-        // cpu/memory/git/disk/battery/uptime. `MediaInfo` (unlike `Battery`)
-        // has no `PartialEq`, so (mirroring `git_read_only_when_region_names_it`
-        // above) this only asserts the negative/gated case; the positive
-        // read -> Context -> widget path is covered by the smoke test.
+        // cpu/memory/git/disk/battery/uptime.
         let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
         assert!(ctx.media.is_none());
+
+        // Named in the layout: the real read runs, matching a direct
+        // read_media() call.
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &["media".to_string()],
+            &Theme::default(),
+            "",
+        );
+        assert_eq!(ctx.media, crate::media::read_media());
     }
 
     #[test]
