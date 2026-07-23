@@ -122,11 +122,31 @@ impl Default for PaneIdOpts {
     }
 }
 
+/// Default `format` for the `cwd` widget: the bare (home-abbreviated) path,
+/// reproducing the pre-config output byte-for-byte.
+fn default_cwd_format() -> String {
+    "{path}".into()
+}
+
 /// Options for the `cwd` widget.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CwdOpts {
     #[serde(default = "default_true")]
     pub abbreviate_home: bool,
+    #[serde(default = "default_cwd_format")]
+    pub format: String,
+    /// Keep only the last N `/`-separated path components (`0` = unlimited),
+    /// prefixing a leading `…/` when components are dropped.
+    #[serde(default)]
+    pub max_depth: usize,
+    /// Left-truncate the rendered path to at most N characters (`0` =
+    /// unlimited), prefixing a leading `…`.
+    #[serde(default)]
+    pub max_len: usize,
+    /// Fish-shell-style shortening: every path component but the last is
+    /// reduced to its first character.
+    #[serde(default)]
+    pub abbreviate: bool,
 }
 
 fn default_true() -> bool {
@@ -137,6 +157,10 @@ impl Default for CwdOpts {
     fn default() -> Self {
         Self {
             abbreviate_home: true,
+            format: default_cwd_format(),
+            max_depth: 0,
+            max_len: 0,
+            abbreviate: false,
         }
     }
 }
@@ -838,6 +862,45 @@ format = "{session}/{window}/{pane}"
         std::fs::write(&p, "[widgets.hostname]\nformat = 5\n").unwrap();
         let c = Config::load(&p);
         assert_eq!(c.widgets.hostname.format, "{host}");
+        assert_eq!(c.layout.left, Config::default().layout.left);
+    }
+
+    #[test]
+    fn cwd_opts_parse_with_defaults() {
+        let toml = r#"
+[widgets.cwd]
+format = "cwd: {path}"
+max_depth = 3
+max_len = 40
+abbreviate = true
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.widgets.cwd.format, "cwd: {path}");
+        assert_eq!(c.widgets.cwd.max_depth, 3);
+        assert_eq!(c.widgets.cwd.max_len, 40);
+        assert!(c.widgets.cwd.abbreviate);
+        assert!(c.widgets.cwd.abbreviate_home); // omitted -> default
+    }
+
+    #[test]
+    fn cwd_opts_default_when_absent() {
+        let c = Config::default();
+        assert!(c.widgets.cwd.abbreviate_home);
+        assert_eq!(c.widgets.cwd.format, "{path}");
+        assert_eq!(c.widgets.cwd.max_depth, 0);
+        assert_eq!(c.widgets.cwd.max_len, 0);
+        assert!(!c.widgets.cwd.abbreviate);
+    }
+
+    #[test]
+    fn malformed_cwd_table_falls_back_to_default() {
+        let dir = std::env::temp_dir().join("rustline_test_badcwd");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        // max_depth must be an integer; a string makes the table invalid.
+        std::fs::write(&p, "[widgets.cwd]\nmax_depth = \"deep\"\n").unwrap();
+        let c = Config::load(&p);
+        assert_eq!(c.widgets.cwd.max_depth, 0);
         assert_eq!(c.layout.left, Config::default().layout.left);
     }
 

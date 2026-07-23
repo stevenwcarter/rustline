@@ -116,10 +116,18 @@ impl Registry {
             }),
         );
 
-        let abbreviate_home = cfg.widgets.cwd.abbreviate_home;
+        let cwd = cfg.widgets.cwd.clone();
         registry.register_described(
             builtin_descriptor("cwd", "The pane's current working directory", true),
-            Box::new(move || Box::new(Cwd { abbreviate_home })),
+            Box::new(move || {
+                Box::new(Cwd {
+                    abbreviate_home: cwd.abbreviate_home,
+                    format: cwd.format.clone(),
+                    max_depth: cwd.max_depth,
+                    max_len: cwd.max_len,
+                    abbreviate: cwd.abbreviate,
+                })
+            }),
         );
 
         let lan = cfg.widgets.lan_ip.clone();
@@ -262,6 +270,27 @@ mod tests {
         assert_eq!(configurable("datetime"), Some(true));
         assert_eq!(configurable("pane_id"), Some(true));
         assert_eq!(configurable("hostname"), Some(true));
+    }
+
+    #[test]
+    fn cwd_registered_and_renders_with_configured_options() {
+        let mut cfg = Config::default();
+        cfg.widgets.cwd.format = "cwd: {path}".into();
+        cfg.widgets.cwd.max_depth = 1;
+        let reg = Registry::with_builtins(&cfg);
+        assert!(reg.contains("cwd"));
+
+        let mut c = ctx(Vec::new());
+        c.home = "/home/steve".into();
+        c.pane_current_path = "/home/steve/src/rustline".into();
+        let widgets = reg.resolve(&["cwd".into()]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|w| w.render(&c))
+            .map(|s| s.text)
+            .collect();
+        // home-abbrev "~/src/rustline" -> max_depth 1 keeps "rustline" -> format wraps it.
+        assert_eq!(texts, vec!["cwd: …/rustline".to_string()]);
     }
 
     #[test]
