@@ -5,9 +5,12 @@
 //! this crate now also holds every other chrono-free type shared between the
 //! host and a guest: the snapshot types moved here from
 //! `rustline-core::context` (`NetIface`, `Battery`/`BatteryState`,
-//! `CpuUsage`, `MemInfo`), `GitInfo`/`DiskInfo`, and the typed guest-input
-//! wire types (`WireContext`, `WireWindowCtx`, `GuestRender`) a plugin
-//! deserializes instead of hand-walking a `serde_json::Value`.
+//! `CpuUsage`, `MemInfo`), `GitInfo`/`DiskInfo`, the typed guest-input wire
+//! types (`WireContext`, `WireWindowCtx`, `GuestRender`) a plugin
+//! deserializes instead of hand-walking a `serde_json::Value`, and the four
+//! host-effect wire-result types (`HttpResult`, `CachedHttpResult`,
+//! `ReadResult`, `WriteResult`) a host function's response decodes into —
+//! previously duplicated between `rustline-wasm` and `rustline-plugin-sdk`.
 use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
@@ -259,6 +262,61 @@ pub struct GuestRender {
     pub config: serde_json::Value,
 }
 
+/// Result of a plain (uncached) HTTP GET. `ok` means the transport completed
+/// for *any* status, including non-2xx (not that the response was 2xx); the
+/// HTTP status is in `status` and `error` carries a transport failure.
+///
+/// Shared by both sides of the WASM boundary: the host
+/// (`rustline_wasm::perform::perform_http_get`) constructs this directly, and
+/// a guest (via `rustline-plugin-sdk`) decodes it from the host's JSON
+/// response — `#[serde(default)]` keeps that decode forward-compatible with a
+/// host that adds or omits a field.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HttpResult {
+    pub ok: bool,
+    pub status: u16,
+    pub body: String,
+    pub error: String,
+}
+
+/// Result of a TTL-cached HTTP GET. `ok` means "a usable body is present"
+/// (fresh OR stale), not "transport succeeded"; `stale` distinguishes them.
+/// Shared by both sides of the WASM boundary — see [`HttpResult`].
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CachedHttpResult {
+    pub ok: bool,
+    pub status: u16,
+    pub body: String,
+    pub error: String,
+    pub stale: bool,
+    pub age_secs: i64,
+}
+
+/// Result of a host state/file read. `ok=true` with `exists=false` is a
+/// successful read of a missing file (not an error); `error` carries the
+/// message only when `ok` is false. Shared by both sides of the WASM
+/// boundary — see [`HttpResult`].
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReadResult {
+    pub ok: bool,
+    pub exists: bool,
+    pub contents: String,
+    pub error: String,
+}
+
+/// Result of a host state/file write. `ok` is true on success; otherwise
+/// `error` carries the failure message. Shared by both sides of the WASM
+/// boundary — see [`HttpResult`].
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WriteResult {
+    pub ok: bool,
+    pub error: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,5 +429,25 @@ mod tests {
         assert!(input.context.toggled.contains("weather"));
         assert_eq!(input.config["zip"], "48183");
         assert_eq!(input.config["refresh_secs"], 1800);
+    }
+
+    /// The four host-effect wire-result types (previously duplicated between
+    /// `rustline-wasm` and `rustline-plugin-sdk`, W51) decode the exact JSON
+    /// the host emits.
+    #[test]
+    fn wire_result_types_round_trip_host_json() {
+        let h: HttpResult =
+            serde_json::from_str(r#"{"ok":true,"status":200,"body":"x","error":""}"#).unwrap();
+        assert!(h.ok && h.status == 200 && h.body == "x");
+        let c: CachedHttpResult = serde_json::from_str(
+            r#"{"ok":true,"status":200,"body":"x","error":"","stale":false,"age_secs":0}"#,
+        )
+        .unwrap();
+        assert!(c.ok && !c.stale);
+        let r: ReadResult =
+            serde_json::from_str(r#"{"ok":true,"exists":true,"contents":"y","error":""}"#).unwrap();
+        assert!(r.ok && r.exists);
+        let w: WriteResult = serde_json::from_str(r#"{"ok":true,"error":""}"#).unwrap();
+        assert!(w.ok);
     }
 }

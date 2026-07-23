@@ -2,49 +2,15 @@
 //! `render` receives `RenderInput` and returns `Vec<Segment>` as JSON.
 
 use rustline_core::{Context, Segment};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-/// Result of a plain (uncached) HTTP GET. `ok` means the transport completed
-/// for *any* status, including non-2xx (not that the response was 2xx); the
-/// HTTP status is in `status` and `error` carries a transport failure.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct HttpResult {
-    pub ok: bool,
-    pub status: u16,
-    pub body: String,
-    pub error: String,
-}
-
-/// Result of a host state/file read. `ok=true` with `exists=false` is a
-/// successful read of a missing file (not an error); `error` carries the
-/// message only when `ok` is false.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct ReadResult {
-    pub ok: bool,
-    pub exists: bool,
-    pub contents: String,
-    pub error: String,
-}
-
-/// Result of a host state/file write. `ok` is true on success; otherwise
-/// `error` carries the failure message.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct WriteResult {
-    pub ok: bool,
-    pub error: String,
-}
-
-/// Result of a TTL-cached HTTP GET. `ok` means "a usable body is present"
-/// (fresh OR stale), not "transport succeeded"; `stale` distinguishes them.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct CachedHttpResult {
-    pub ok: bool,
-    pub status: u16,
-    pub body: String,
-    pub error: String,
-    pub stale: bool,
-    pub age_secs: i64,
-}
+/// The four host-effect wire-result types (`HttpResult`, `CachedHttpResult`,
+/// `ReadResult`, `WriteResult`) now live in `rustline-abi` (W51) — shared
+/// verbatim with `rustline-plugin-sdk`'s guest-side decode instead of each
+/// side declaring its own copy. Re-exported here so existing
+/// `crate::abi::HttpResult`/`rustline_wasm::abi::…` paths keep resolving, the
+/// same precedent as `rustline_core::segment`'s re-export of `Segment`.
+pub use rustline_abi::{CachedHttpResult, HttpResult, ReadResult, WriteResult};
 
 /// What the host passes to a plugin's `render` export. `abi_version` carries
 /// the host's `rustline_abi::ABI_VERSION` on the wire; the primary version

@@ -9,7 +9,9 @@
 //!   result structs, returning a [`Result`] instead of an untyped
 //!   `serde_json::Value` the plugin must walk by hand.
 //! - **Re-exports of the shared wire types** ([`GuestRender`], [`WireContext`],
-//!   [`Segment`], [`Style`], [`Color`]) from `rustline-abi`.
+//!   [`Segment`], [`Style`], [`Color`], and the four host-effect result types
+//!   [`HttpResult`], [`CachedHttpResult`], [`ReadResult`], [`WriteResult`])
+//!   from `rustline-abi` (W51 hoisted these off a duplicate SDK-local copy).
 //! - The **[`active_format`]** toggle helper (which format string is live given
 //!   the click-toggle set).
 //! - The **[`export_plugin!`]** macro, which wires a plugin's `name()`,
@@ -19,10 +21,11 @@
 //! host target they degrade to [`HostError::Unavailable`] so a plugin's pure
 //! logic (and this crate's own tests) still compile and run under `cargo test`.
 
-use serde::{Deserialize, Serialize};
-
 pub use rustline_abi;
-pub use rustline_abi::{Color, GuestRender, Segment, Style, WireContext};
+pub use rustline_abi::{
+    CachedHttpResult, Color, GuestRender, HttpResult, ReadResult, Segment, Style, WireContext,
+    WriteResult,
+};
 
 // Re-exported so [`export_plugin!`]'s expansion can name the Extism PDK without
 // the plugin author importing it, while the host-target build (where the PDK is
@@ -74,57 +77,6 @@ impl LogLevel {
             LogLevel::Trace => "trace",
         }
     }
-}
-
-/// Result of a plain (uncached) [`http_get`]. `ok` means the transport
-/// completed for *any* status (including non-2xx), not that the response was
-/// 2xx — inspect `status` for that. Guest-side mirror of the host's
-/// `rustline_wasm::abi::HttpResult`; the weather e2e suite pins the two shapes
-/// together end-to-end.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HttpResult {
-    pub ok: bool,
-    pub status: u16,
-    pub body: String,
-    pub error: String,
-}
-
-/// Result of a TTL-cached [`http_get_cached`]. `ok` means "a usable body is
-/// present" (fresh OR stale), not "transport succeeded"; `stale` distinguishes
-/// them. Guest-side mirror of the host's `CachedHttpResult`.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CachedHttpResult {
-    pub ok: bool,
-    pub status: u16,
-    pub body: String,
-    pub error: String,
-    pub stale: bool,
-    pub age_secs: i64,
-}
-
-/// Result of a [`state_read`]/[`file_read`]. `ok=true` with `exists=false` is a
-/// successful read of a missing path (not an error); `error` carries the
-/// message only when `ok` is false. Guest-side mirror of the host's
-/// `ReadResult`.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ReadResult {
-    pub ok: bool,
-    pub exists: bool,
-    pub contents: String,
-    pub error: String,
-}
-
-/// Result of a [`state_write`]/[`file_write`]. `ok` is true on success;
-/// otherwise `error` carries the failure message. Guest-side mirror of the
-/// host's `WriteResult`.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WriteResult {
-    pub ok: bool,
-    pub error: String,
 }
 
 /// The host's [`ABI_VERSION`](rustline_abi::ABI_VERSION), stringified. The
