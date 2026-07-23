@@ -4,6 +4,7 @@ pub mod battery;
 pub mod cpu;
 pub mod cwd;
 pub mod datetime;
+pub mod disk;
 pub mod git;
 pub mod hostname;
 pub mod lan_ip;
@@ -19,6 +20,7 @@ pub use battery::BatteryWidget;
 pub use cpu::CpuWidget;
 pub use cwd::Cwd;
 pub use datetime::DateTime;
+pub use disk::DiskWidget;
 pub use git::GitWidget;
 pub use hostname::Hostname;
 pub use lan_ip::LanIp;
@@ -49,10 +51,10 @@ fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDe
 }
 
 impl Registry {
-    /// Build a [`Registry`] pre-populated with all twelve built-in widgets,
+    /// Build a [`Registry`] pre-populated with all thirteen built-in widgets,
     /// configuring the ones that carry options (`pane_id`, `hostname`,
     /// `datetime`, `cwd`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`,
-    /// `memory`, `loadavg`, `git`) from `cfg`.
+    /// `memory`, `loadavg`, `git`, `disk`) from `cfg`.
     pub fn with_builtins(cfg: &Config) -> Registry {
         let mut registry = Registry::new();
         let pane_id = cfg.widgets.pane_id.clone();
@@ -225,6 +227,22 @@ impl Registry {
             }),
         );
 
+        let disk = cfg.widgets.disk.clone();
+        registry.register_described(
+            builtin_descriptor("disk", "Filesystem usage for a configured mount", true),
+            Box::new(move || {
+                Box::new(DiskWidget {
+                    format: disk.format.clone(),
+                    alt_format: disk.alt_format.clone(),
+                    down_format: disk.down_format.clone(),
+                    mount: disk.mount.clone(),
+                    bar_width: disk.bar_width,
+                    warn_percent: disk.warn_percent,
+                    crit_percent: disk.crit_percent,
+                })
+            }),
+        );
+
         registry
     }
 }
@@ -254,6 +272,7 @@ mod tests {
             cpu: None,
             memory: None,
             git: None,
+            disk: None,
             os: String::new(),
             arch: String::new(),
             toggled: Default::default(),
@@ -262,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn with_builtins_descriptors_cover_all_twelve_with_correct_configurable_flags() {
+    fn with_builtins_descriptors_cover_all_thirteen_with_correct_configurable_flags() {
         let cfg = Config::default();
         let reg = Registry::with_builtins(&cfg);
         let names: Vec<&str> = reg.available_names().collect();
@@ -279,10 +298,11 @@ mod tests {
             "cpu",
             "memory",
             "git",
+            "disk",
         ] {
             assert!(names.contains(&expected), "missing descriptor: {expected}");
         }
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), 13);
 
         let configurable = |name: &str| {
             reg.descriptors()
@@ -448,6 +468,41 @@ mod tests {
         let mut c0 = ctx(Vec::new());
         c0.git = None;
         let widgets = reg.resolve(&["git".into()]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|w| w.render(&c0))
+            .map(|s| s.text)
+            .collect();
+        assert!(texts.is_empty());
+    }
+
+    #[test]
+    fn disk_registered_and_renders_from_context() {
+        use crate::DiskInfo;
+        let cfg = Config::default();
+        let reg = Registry::with_builtins(&cfg);
+        assert!(reg.contains("disk"));
+
+        let mut c = ctx(Vec::new());
+        let g = 1024u64.pow(3);
+        c.disk = Some(DiskInfo {
+            total_bytes: 16 * g,
+            used_bytes: 6 * g,
+            available_bytes: 10 * g,
+        });
+        let widgets = reg.resolve(&["disk".into()]);
+        let texts: Vec<String> = widgets
+            .iter()
+            .flat_map(|w| w.render(&c))
+            .map(|s| s.text)
+            .collect();
+        // default format " {used}/{total}".
+        assert_eq!(texts, vec![" 6.0G/16G".to_string()]);
+
+        // No disk info + default (empty) down_format -> widget skipped.
+        let mut c0 = ctx(Vec::new());
+        c0.disk = None;
+        let widgets = reg.resolve(&["disk".into()]);
         let texts: Vec<String> = widgets
             .iter()
             .flat_map(|w| w.render(&c0))

@@ -492,6 +492,67 @@ fn render_right_with_git_inside_repo_renders_branch() {
 }
 
 #[test]
+fn render_right_with_disk_on_bogus_mount_renders_gracefully() {
+    // `disk` in a layout, configured against a mount that doesn't exist, must
+    // degrade to its empty down_format rather than crash — proves the
+    // build_context -> read_disk -> Context -> widget wiring does not break
+    // the bar when `statvfs` fails (invariant #6). The other default-layout
+    // built-ins (e.g. `datetime`) must still render.
+    let tmp = tempfile::tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    std::fs::write(
+        cfgdir.join("config.toml"),
+        "[layout]\nright = [\"disk\", \"datetime\"]\n\n\
+         [widgets.disk]\nmount = \"/nonexistent/bogus/mount/path\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["render", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("#["), "built-ins still render: {s}");
+}
+
+#[test]
+fn render_right_with_disk_on_real_mount_renders_usage() {
+    // Pointing `[widgets.disk].mount` at the real root filesystem must render
+    // non-empty usage text — the positive-path counterpart to the bogus-mount
+    // test above, exercising the full read_disk -> derive -> widget chain
+    // against a real mount rather than a fixture struct. Tolerant of the
+    // actual disk size on the test box: just asserts the segment renders.
+    let tmp = tempfile::tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    std::fs::write(
+        cfgdir.join("config.toml"),
+        "[layout]\nright = [\"disk\"]\n\n[widgets.disk]\nmount = \"/\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["render", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("#["), "disk usage text should render: {s}");
+}
+
+#[test]
 fn plugin_add_on_unparseable_config_preserves_file() {
     // A pre-existing config with a TOML *syntax* error must abort with exit 1
     // and leave the file byte-for-byte intact — never truncate the user's whole

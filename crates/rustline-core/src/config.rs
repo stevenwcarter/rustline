@@ -443,6 +443,58 @@ impl Default for GitOpts {
     }
 }
 
+/// Default mount for the `disk` widget: the root filesystem.
+fn default_disk_mount() -> String {
+    "/".into()
+}
+
+/// Default `format` for the `disk` widget: used/total, no icon placeholder.
+fn default_disk_format() -> String {
+    " {used}/{total}".into()
+}
+
+/// Default disk `warn_percent`/`crit_percent`.
+fn default_disk_warn() -> f64 {
+    85.0
+}
+
+fn default_disk_crit() -> f64 {
+    95.0
+}
+
+/// Options for the `disk` widget.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiskOpts {
+    #[serde(default = "default_disk_mount")]
+    pub mount: String,
+    #[serde(default = "default_disk_format")]
+    pub format: String,
+    #[serde(default = "default_bar_width")]
+    pub bar_width: usize,
+    #[serde(default)]
+    pub down_format: String,
+    #[serde(default = "default_disk_warn")]
+    pub warn_percent: f64,
+    #[serde(default = "default_disk_crit")]
+    pub crit_percent: f64,
+    #[serde(default)]
+    pub alt_format: String,
+}
+
+impl Default for DiskOpts {
+    fn default() -> Self {
+        Self {
+            mount: default_disk_mount(),
+            format: default_disk_format(),
+            bar_width: default_bar_width(),
+            down_format: String::new(),
+            warn_percent: default_disk_warn(),
+            crit_percent: default_disk_crit(),
+            alt_format: String::new(),
+        }
+    }
+}
+
 /// Per-widget option overrides, keyed by widget name.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WidgetOpts {
@@ -468,6 +520,8 @@ pub struct WidgetOpts {
     pub loadavg: LoadAvgOpts,
     #[serde(default)]
     pub git: GitOpts,
+    #[serde(default)]
+    pub disk: DiskOpts,
 }
 
 /// Optional theme overrides layered onto a base [`Theme`] by
@@ -1179,6 +1233,47 @@ dirty_glyph = "!"
         std::fs::write(&p, "[widgets.git]\nformat = 5\n").unwrap();
         let c = Config::load(&p);
         assert_eq!(c.widgets.git.format, "\u{e0a0} {branch}{dirty}");
+        assert_eq!(c.layout.left, Config::default().layout.left);
+    }
+
+    #[test]
+    fn disk_opts_parse_with_defaults() {
+        let toml = r#"
+[widgets.disk]
+mount = "/home"
+format = "{bar} {percent}%"
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.widgets.disk.mount, "/home");
+        assert_eq!(c.widgets.disk.format, "{bar} {percent}%");
+        assert_eq!(c.widgets.disk.bar_width, 8); // omitted -> default
+        assert_eq!(c.widgets.disk.down_format, ""); // omitted -> default
+        assert_eq!(c.widgets.disk.alt_format, ""); // omitted -> default
+        assert_eq!(c.widgets.disk.warn_percent, 85.0); // omitted -> default
+        assert_eq!(c.widgets.disk.crit_percent, 95.0); // omitted -> default
+    }
+
+    #[test]
+    fn disk_opts_default_when_absent() {
+        let c = Config::default();
+        assert_eq!(c.widgets.disk.mount, "/");
+        assert_eq!(c.widgets.disk.format, " {used}/{total}");
+        assert_eq!(c.widgets.disk.bar_width, 8);
+        assert_eq!(c.widgets.disk.down_format, "");
+        assert_eq!(c.widgets.disk.alt_format, "");
+        assert_eq!(c.widgets.disk.warn_percent, 85.0);
+        assert_eq!(c.widgets.disk.crit_percent, 95.0);
+    }
+
+    #[test]
+    fn malformed_disk_table_falls_back_to_default() {
+        let dir = std::env::temp_dir().join("rustline_test_baddisk");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        // mount must be a string; an integer makes the table invalid.
+        std::fs::write(&p, "[widgets.disk]\nmount = 5\n").unwrap();
+        let c = Config::load(&p);
+        assert_eq!(c.widgets.disk.mount, "/");
         assert_eq!(c.layout.left, Config::default().layout.left);
     }
 

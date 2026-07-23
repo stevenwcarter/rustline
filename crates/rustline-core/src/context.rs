@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 // here so existing `rustline_core::context::…` / `rustline_core::…` paths
 // keep resolving, mirroring the `Segment`/`Style`/`Color` precedent in
 // `segment.rs`.
-pub use rustline_abi::{Battery, BatteryState, CpuUsage, GitInfo, MemInfo, NetIface};
+pub use rustline_abi::{Battery, BatteryState, CpuUsage, DiskInfo, GitInfo, MemInfo, NetIface};
 
 /// Metadata about a single tmux window, used to render per-window segments
 /// (e.g. the window list).
@@ -52,6 +52,10 @@ pub struct Context {
     /// `build_context.rs`); `None` when `git` is missing, the pane isn't
     /// inside a repository, or the read failed.
     pub git: Option<GitInfo>,
+    /// Filesystem-usage snapshot for the configured mount, read once at build
+    /// time (only when the `disk` widget is in the active layout — see
+    /// `build_context.rs`); `None` when the mount can't be `statvfs`'d.
+    pub disk: Option<DiskInfo>,
     /// Host OS (`std::env::consts::OS`, e.g. `"linux"`, `"macos"`). Additive
     /// platform metadata for WASM guests.
     pub os: String,
@@ -71,11 +75,11 @@ pub struct Context {
     pub colors: crate::ThemeColors,
 }
 
-/// An empty, epoch-timestamped `Context`. Exists so future fields (e.g. disk
-/// status) can be added without editing every test/synthetic construction
-/// site — sites that only care about a few fields can use
-/// struct-update syntax (`Context { session_name: "0".into(), ..Default::default() }`)
-/// instead of spelling out every field.
+/// An empty, epoch-timestamped `Context`. Exists so future fields can be
+/// added without editing every test/synthetic construction site — sites that
+/// only care about a few fields can use struct-update syntax
+/// (`Context { session_name: "0".into(), ..Default::default() }`) instead of
+/// spelling out every field.
 impl Default for Context {
     fn default() -> Self {
         Context {
@@ -95,6 +99,7 @@ impl Default for Context {
             cpu: None,
             memory: None,
             git: None,
+            disk: None,
             os: String::new(),
             arch: String::new(),
             toggled: BTreeSet::default(),

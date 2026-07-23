@@ -25,7 +25,8 @@ impl MemoryWidget {
 /// Human-readable binary size (1024-based): the largest of `B/K/M/G/T` where the
 /// scaled value is `>= 1`, one decimal below 10 and none at/above 10 (bytes are
 /// always integer). E.g. `6.2 GiB -> "6.2G"`, `512 MiB -> "512M"`, `0 -> "0B"`.
-fn format_bytes(bytes: u64) -> String {
+/// `pub(crate)` so `disk.rs` reuses it rather than duplicating the logic.
+pub(crate) fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
     let mut value = bytes as f64;
     let mut unit = 0;
@@ -118,6 +119,7 @@ mod tests {
             cpu: None,
             memory,
             git: None,
+            disk: None,
             os: String::new(),
             arch: String::new(),
             toggled: Default::default(),

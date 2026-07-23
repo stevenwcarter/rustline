@@ -79,7 +79,8 @@ these shared types, not a design shortcut. Keep them serializable.
   `home`, `hostname`, `loadavg: Option<[f64;3]>`, `now: DateTime<Local>`,
   `window: Option<WindowCtx>`, `interfaces: Vec<NetIface>`,
   `battery: Option<Battery>`, `cpu: Option<CpuUsage>`,
-  `memory: Option<MemInfo>`, `git: Option<GitInfo>`, `os: String`, `arch:
+  `memory: Option<MemInfo>`, `git: Option<GitInfo>`, `disk: Option<DiskInfo>`,
+  `os: String`, `arch:
   String`, `toggled: BTreeSet<String>`, `colors: ThemeColors`), `WindowCtx`,
   and `NetIface { name, ipv4: Ipv4Addr }` (one non-loopback IPv4 interface,
   read once at `Context`-build time; the IP widgets select from this list
@@ -91,7 +92,10 @@ these shared types, not a design shortcut. Keep them serializable.
   likewise read once at `Context`-build time; `GitInfo { branch, ahead: u32,
   behind: u32, staged: u32, unstaged: u32 }` is a git branch/status snapshot,
   read once at `Context`-build time ONLY when `git` is in the active layout
-  (mirroring the `cpu`/`memory` read-gating below); `os`/`arch` come from
+  (mirroring the `cpu`/`memory` read-gating below); `DiskInfo { total_bytes,
+  used_bytes, available_bytes }` (all bytes as `u64`) is a filesystem-usage
+  snapshot for a configured mount, likewise read once at `Context`-build time
+  ONLY when `disk` is in the active layout; `os`/`arch` come from
   `std::env::consts::OS`/`ARCH`; `toggled` (`#[serde(default)]`) is the set of
   widget/plugin names the user has click-toggled to their `alt_format` view,
   read once at `Context`-build time from the toggles state file (invariant #1)
@@ -124,9 +128,9 @@ these shared types, not a design shortcut. Keep them serializable.
 - `widget.rs` — `Widget` trait and `Registry` (name → factory; `resolve` skips
   unknown widget names with a `warn!`, never errors). `Widget::range_name(&self)
   -> Option<&str>` defaults to `None`; a clickable widget returns `Some(name)`.
-- `widgets/` — the twelve built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
+- `widgets/` — the thirteen built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
   `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`,
-  `git`, plus `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
+  `git`, `disk`, plus `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
   LAN/Tailscale interface-selection and `{ip}` formatting logic shared by
   `lan_ip`/`tailscale_ip` (no I/O — operates on `Context.interfaces`).
   `alert.rs` is the shared threshold-alert helper used by `cpu`/`memory`/
@@ -159,7 +163,7 @@ these shared types, not a design shortcut. Keep them serializable.
   `alt_format`/`down_format` like the rest of the family, and
   `warn_load`/`crit_load` threshold config on `load1` (both default `0.0` =
   off, since an absolute load threshold needs the core count); a private
-  `substitute` scanner does the replacement. All four threshold-aware widgets
+  `substitute` scanner does the replacement. All five threshold-aware widgets
   render byte-identically to before this feature whenever no tier is
   crossed (a reading below every threshold, or a tier disabled via `0`).
   `git.rs` is the `git` widget: pure over `Context.git`, with `{branch}`
@@ -168,13 +172,21 @@ these shared types, not a design shortcut. Keep them serializable.
   (substitutes a configurable `dirty_glyph`, default `*`, iff `staged > 0 ||
   unstaged > 0`, else empty) placeholders; NOT threshold-aware (no
   `alert.rs` use) and NOT in the default layout.
+  `disk.rs` is the `disk` widget: pure over `Context.disk`, with
+  `{used}`/`{total}`/`{avail}` (human-readable binary sizes via `memory.rs`'s
+  `format_bytes`, now `pub(crate)` and reused rather than duplicated),
+  `{percent}`, `{bar}` (via the same shared `bar::gauge_bar` as `cpu`/
+  `memory`), and a static `{mount}` (the configured mount string, substituted
+  directly from widget config — not read from `Context`) placeholders, plus
+  `warn_percent`(85)/`crit_percent`(95) threshold config (via `alert_over`);
+  NOT in the default layout.
   `toggle.rs` holds the shared click-toggle helpers
   `active_format(ctx, name, format, alt) -> &str`
   (picks `alt` iff it's non-empty AND `name` is in `ctx.toggled`, else
   `format`) and `clickable_range(name, alt) -> Option<&str>` (`Some(name)` iff
   `alt` is non-empty AND `name.len() <= 15`, tmux's `range=user|X` byte limit);
-  the eight format-bearing widgets (`datetime`, `lan_ip`, `tailscale_ip`,
-  `battery`, `cpu`, `memory`, `loadavg`, `git`) each carry an `alt_format`
+  the nine format-bearing widgets (`datetime`, `lan_ip`, `tailscale_ip`,
+  `battery`, `cpu`, `memory`, `loadavg`, `git`, `disk`) each carry an `alt_format`
   field and call both helpers from their `render`/`range_name`.
 - `assemble.rs` — `assign_palette`, `render_named_region` (panic-guarded per
   widget via `catch_unwind`; now range-wraps via `render_region_ranged`,
@@ -213,8 +225,10 @@ these shared types, not a design shortcut. Keep them serializable.
   on `Context.colors` so widgets and WASM guests can style alert badges
   without seeing `Theme` — and `GitInfo { branch, ahead, behind, staged,
   unstaged }` (chrono-free, so no separate wire mirror is needed; the same
-  type rides `Context.git` and `WireContext.git`). The WASM wire types,
-  re-exported by `rustline-core`.
+  type rides `Context.git` and `WireContext.git`), plus `DiskInfo {
+  total_bytes, used_bytes, available_bytes }` (same chrono-free, no-separate-
+  wire-mirror shape, riding `Context.disk`/`WireContext.disk`). The WASM wire
+  types, re-exported by `rustline-core`.
 
 `rustline-wasm`:
 - `allow.rs` — `AllowSet`/`Pattern`: each `allowed_urls`/`allowed_paths` entry
@@ -300,18 +314,33 @@ these shared types, not a design shortcut. Keep them serializable.
   branching) — same pure-parser-behind-the-read-surface shape as
   `battery.rs`/`cpu.rs`/`memory.rs`, just keyed on tool availability rather
   than platform.
+- `disk.rs` — `read_disk(mount) -> Option<DiskInfo>`, a `statvfs(2)` read.
+  Unlike `battery`/`cpu`/`memory`, the syscall itself is POSIX and needs no
+  `#[cfg(target_os)]` split at all (it's available unconditionally on Linux
+  and macOS); only the pure derivation, `disk_info_from_statvfs(f_blocks,
+  f_bfree, f_bavail, f_frsize) -> DiskInfo` (all `u64`, saturating
+  arithmetic), is `#[cfg(any(target_os = …, test))]`-gated, matching the
+  platforms it's exercised on. `None` on any failure: a nul byte in `mount`,
+  or the `statvfs` call itself failing (e.g. a nonexistent mount).
 - `build_context.rs` — builds `Context` from args + `gethostname`,
-  `libc::getloadavg` (the only `unsafe`, guarded on `n == 3`), `chrono::Local`,
+  `libc::getloadavg` (the only `unsafe` in this file — `disk.rs`'s `statvfs`
+  call is its own `unsafe`, isolated there — guarded on `n == 3`),
+  `chrono::Local`,
   `$HOME`, non-loopback IPv4 interfaces via `if-addrs` into
   `Context.interfaces` (a failed read yields an empty `Vec`, never a
   fabricated address — same spirit as `read_loadavg` returning `None`), and
   now also `battery` (via `battery::read_battery()`), `cpu` (via
   `cpu::read_cpu()`), `memory` (via `memory::read_memory()`), `git` (via
   `git::read_git(&pane_current_path)`, gated: only read when `git` is in the
-  region's layout, mirroring the `cpu`/`memory` gate), `os`, `arch`
+  region's layout, mirroring the `cpu`/`memory` gate), `disk` (via
+  `disk::read_disk(&disk_mount)`, gated the same way on `disk` being in the
+  region's layout; `disk_mount` is `build_region_context`'s fourth parameter,
+  threaded in by its caller from `cfg.widgets.disk.mount` since — unlike
+  `git`, which reuses `pane_current_path` already on hand — the mount isn't
+  otherwise available inside `build_context.rs`), `os`, `arch`
   (from `std::env::consts::OS`/`ARCH`), and `toggled` (via
   `toggles::read_toggles()`, unconditionally — cheap relative to the gated
-  cpu/memory/git reads).
+  cpu/memory/git/disk reads).
 - `toggles.rs` — the global click-toggle state file:
   `toggles_path()` (`$XDG_DATA_HOME/rustline/toggles`, reusing
   `rustline_wasm::data_root()`), `parse_toggles`/`serialize_toggles`
@@ -624,9 +653,34 @@ dirty_glyph = "*"
 down_format = ""
 ```
 
-**Click-to-toggle widget views:** the eight format-bearing widgets —
+**Disk widget:** `disk` is opt-in — not in the default layout. It reads
+filesystem usage for a configured `mount` (default `"/"`) via `statvfs(2)`
+(`crates/rustline/src/disk.rs`); `Context.disk` is `None` (and the widget
+renders nothing/`down_format`) when the mount can't be `statvfs`'d — never a
+fabricated `0` reading (invariant #6). Takes a `format` (default
+`" {used}/{total}"`, no icon placeholder — out of scope for this widget) with
+`{used}`/`{total}`/`{avail}` (human-readable binary sizes, reusing `memory`'s
+`format_bytes`), `{percent}`, `{bar}` (a `bar_width`-cell gauge, default 8,
+reusing the same shared bar as `cpu`/`memory`), and a static `{mount}` (the
+configured mount string itself, not a live reading) placeholders, and a
+`down_format` (default `""`, i.e. render nothing) — same
+collapse-placeholders-to-empty behavior as the other widgets' `down_format`.
+It's also threshold-aware (see Themes below): `warn_percent`/`crit_percent`
+(default 85/95) alert at or above those levels.
+
+```toml
+[widgets.disk]
+mount = "/"                 # default; any statvfs-able path
+format = " {used}/{total}"  # default
+bar_width = 8
+down_format = ""
+warn_percent = 85   # default; 0 disables a tier
+crit_percent = 95   # default
+```
+
+**Click-to-toggle widget views:** the nine format-bearing widgets —
 `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg`,
-`git` — each take an additional `alt_format` (default `""`, `#[serde(default)]`, so
+`git`, `disk` — each take an additional `alt_format` (default `""`, `#[serde(default)]`, so
 covered by invariant #3 like every other opt). A non-empty `alt_format` makes
 that widget clickable: left-clicking it in the tmux status line toggles it
 between `format` and `alt_format`.
@@ -695,7 +749,7 @@ unparseable theme file, `warn!`s and falls back to `default` (invariant #3).
 Every theme also sets four **semantic colors** — `success`/`info`/`warning`/
 `error` — which reach both built-in widgets and WASM plugins via
 `Context.colors: ThemeColors` (see `context.rs` above), not `Theme` directly.
-The four threshold-aware widgets (`cpu`, `memory`, `battery`, `loadavg` — see
+The five threshold-aware widgets (`cpu`, `memory`, `battery`, `loadavg`, `disk` — see
 their config blocks above for each widget's `warn_*`/`crit_*` field and
 default) use them for an inverse alert badge (`bg`=semantic, `fg`=`bar_bg`,
 bold) when a reading crosses a threshold; `0` (or `0.0`) disables a tier, and
@@ -900,6 +954,14 @@ branch on platform.
   `cpu`/`memory`); branch/short-SHA, ahead/behind/staged/unstaged counts, and
   a `{dirty}` marker, opt-in and click-toggleable like the other
   format-bearing widgets, but NOT threshold-aware.
+- Done: `disk` widget — `Context.disk`/`DiskInfo` (`rustline-abi`), the
+  thirteenth built-in, and `crates/rustline/src/disk.rs`'s `statvfs(2)` read
+  (POSIX, no `#[cfg(target_os)]` split needed on the syscall itself — only
+  the pure `disk_info_from_statvfs` derivation is platform/test-gated),
+  gated by layout like `cpu`/`memory`/`git`; used/total/avail/percent/bar for
+  a configured `mount`, reusing `memory`'s `format_bytes`/`bar::gauge_bar`
+  rather than duplicating them, opt-in, click-toggleable, and
+  threshold-aware (`warn_percent`(85)/`crit_percent`(95)) like `cpu`/`memory`.
 - Historical sparkline (last-X-seconds graph) for `cpu`/`memory` — today's
   reads are single-shot, stateless snapshots; a sparkline needs
   cross-invocation sample persistence, deferred to its own spec.

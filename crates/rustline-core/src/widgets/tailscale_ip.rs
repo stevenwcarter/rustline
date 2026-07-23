@@ -50,6 +50,7 @@ mod tests {
             cpu: None,
             memory: None,
             git: None,
+            disk: None,
             os: String::new(),
             arch: String::new(),
             toggled: Default::default(),

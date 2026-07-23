@@ -19,6 +19,8 @@ pane, window, host, and system info, with zero required configuration.
 - Opt-in `git` widget showing the current branch (or short SHA when
   detached), a dirty marker, and ahead/behind/staged/unstaged counts, read via
   a `git status` shell-out.
+- Opt-in `disk` widget showing filesystem usage (used/total/available, a
+  percentage, and a gauge bar) for a configured mount, read via `statvfs(2)`.
 - Click-to-toggle widget alt views: give a widget an `alt_format` and
   left-clicking it in the status line swaps it to that view (e.g. a compact
   `cpu` reading toggling to one with a gauge bar).
@@ -27,8 +29,8 @@ pane, window, host, and system info, with zero required configuration.
   `rustline theme pick`, plus a `theme new` scaffolder for tweaking your own
   — see [Themes](#themes) below.
 - Semantic colors (`success`/`info`/`warning`/`error`) reach both built-in
-  widgets and WASM plugins; `cpu`, `memory`, `battery`, and `loadavg` turn
-  into an alert badge when a configurable threshold is crossed.
+  widgets and WASM plugins; `cpu`, `memory`, `battery`, `loadavg`, and `disk`
+  turn into an alert badge when a configurable threshold is crossed.
 - Instant refresh on pane/window switch via tmux hooks (no waiting for the
   next `status-interval` tick).
 
@@ -106,8 +108,9 @@ Widget names available for the `layout` arrays are: `pane_id`, `hostname`,
 `windows`, `cwd`, `cpu`, `memory` (see [CPU and memory
 widgets](#cpu-and-memory-widgets) below), `loadavg`, `datetime`, and the
 opt-in `lan_ip` / `tailscale_ip` (see [IP address widgets](#ip-address-widgets)
-below), `battery` (see [Battery widget](#battery-widget) below), and `git`
-(see [Git widget](#git-widget) below).
+below), `battery` (see [Battery widget](#battery-widget) below), `git`
+(see [Git widget](#git-widget) below), and `disk` (see [Disk
+widget](#disk-widget) below).
 
 Example — reorder the right region and change the clock format:
 
@@ -257,10 +260,41 @@ dirty_glyph = "*"                        # default
 down_format = ""                         # shown outside a repo; default: nothing
 ```
 
+### Disk widget
+
+An opt-in `disk` built-in shows filesystem usage for a configured mount
+(default `/`), read via `statvfs(2)`. Not in the default layout — add it to a
+`layout` region to use it. When the mount can't be `statvfs`'d, it renders
+nothing by default.
+
+Takes a `mount` (default `/`), a `format` (default `" {used}/{total}"`, no
+icon) with `{used}`/`{total}`/`{avail}` (human-readable binary sizes, e.g.
+`6.2G`), `{percent}`, `{bar}` (a `bar_width`-cell, default 8, Unicode
+gauge — the same one `cpu`/`memory` use), and `{mount}` (the configured mount
+string itself) placeholders, a `down_format` shown when there's no disk
+reading (default empty — same collapse-to-nothing behavior as the other
+widgets' `down_format`), and an `alt_format` for
+[click-to-toggle](#click-to-toggle-widget-views). It's also
+[threshold-aware](#themes): `warn_percent`/`crit_percent` (default 85/95)
+alert at or above those levels.
+
+```toml
+[layout]
+right = ["disk", "cwd", "loadavg", "datetime"]
+
+[widgets.disk]
+mount       = "/"                 # default
+format      = " {used}/{total}"   # default
+bar_width   = 8
+down_format = ""                  # shown when the mount can't be read; default: nothing
+warn_percent = 85   # default; alert badge at/above this %
+crit_percent = 95   # default; 0 disables a tier
+```
+
 ### Click-to-toggle widget views
 
 `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg`,
-and `git` each take an `alt_format` (default empty). Give a widget a non-empty
+`git`, and `disk` each take an `alt_format` (default empty). Give a widget a non-empty
 `alt_format` and it becomes clickable: left-clicking it in the tmux status
 line toggles it between `format` and `alt_format`, e.g. a compact CPU reading
 swapping to one with a gauge bar:
@@ -342,7 +376,7 @@ warning = { Named = "yellow" } # per-field overrides still apply on top of base
 
 Every theme defines four **semantic colors** — `success`, `info`, `warning`,
 `error` — available to widgets and WASM plugins alike. The `cpu`, `memory`,
-`battery`, and `loadavg` widgets use them for **threshold alerts**: cross a
+`battery`, `loadavg`, and `disk` widgets use them for **threshold alerts**: cross a
 configured `warn_*`/`crit_*` level (see each widget's section above) and the
 whole segment flips to an inverse badge (bold text in the theme's `bar_bg`,
 background in the semantic color) — critical always wins over warning. Set a

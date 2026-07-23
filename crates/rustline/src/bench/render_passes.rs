@@ -10,7 +10,7 @@ use crate::cli::{RegionArgs, WindowArgs};
 
 /// The built-in widget names, benched individually. Kept explicit so a missing
 /// registration is caught by the completeness test.
-pub const BUILTIN_WIDGETS: [&str; 12] = [
+pub const BUILTIN_WIDGETS: [&str; 13] = [
     "pane_id",
     "hostname",
     "windows",
@@ -23,6 +23,7 @@ pub const BUILTIN_WIDGETS: [&str; 12] = [
     "cpu",
     "memory",
     "git",
+    "disk",
 ];
 
 /// Time each built-in widget's `render` in isolation on the fabricated Context.
@@ -101,14 +102,14 @@ pub fn bench_regions_real(cfg: &Config, real_iters: usize, warmup: usize) -> Gro
     rows.push(Row {
         label: "left".into(),
         stats: summarize(&measure(warmup, real_iters, || {
-            let ctx = build_region_context(&region_args, &left, &theme);
+            let ctx = build_region_context(&region_args, &left, &theme, &cfg.widgets.disk.mount);
             let _ = render_named_region(Direction::Left, &left, &ctx, &registry, &theme);
         })),
     });
     rows.push(Row {
         label: "right".into(),
         stats: summarize(&measure(warmup, real_iters, || {
-            let ctx = build_region_context(&region_args, &right, &theme);
+            let ctx = build_region_context(&region_args, &right, &theme, &cfg.widgets.disk.mount);
             let _ = render_named_region(Direction::Right, &right, &ctx, &registry, &theme);
         })),
     });

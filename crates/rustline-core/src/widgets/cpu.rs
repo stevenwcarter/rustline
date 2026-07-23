@@ -90,6 +90,7 @@ mod tests {
             cpu,
             memory: None,
             git: None,
+            disk: None,
             os: String::new(),
             arch: String::new(),
             toggled: Default::default(),

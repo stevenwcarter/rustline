@@ -156,6 +156,19 @@ pub struct GitInfo {
     pub unstaged: u32,
 }
 
+/// A filesystem-usage snapshot for a configured mount, captured at
+/// Context-build time via `statvfs(2)`. All values are bytes;
+/// `used_bytes = total_bytes - free_bytes` (saturating, so it accounts for
+/// the filesystem's reserved-for-root blocks that `available_bytes` excludes).
+/// `Context::disk` is `None` when the mount can't be `statvfs`'d — never a
+/// fabricated `0` (invariant #6), mirroring `MemInfo`/`GitInfo`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskInfo {
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub available_bytes: u64,
+}
+
 /// The guest-side wire mirror of `rustline_core::WindowCtx`. A WASM guest
 /// deserializes this typed struct rather than hand-walking the JSON.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +208,7 @@ pub struct WireContext {
     pub cpu: Option<CpuUsage>,
     pub memory: Option<MemInfo>,
     pub git: Option<GitInfo>,
+    pub disk: Option<DiskInfo>,
     pub os: String,
     pub arch: String,
     #[serde(default)]
