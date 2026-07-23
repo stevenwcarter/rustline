@@ -112,8 +112,9 @@ these shared types, not a design shortcut. Keep them serializable.
   `Theme::colors() -> ThemeColors` (projects the fg/bar_bg/semantic fields for
   `Context.colors`).
 - `themes.rs` — `builtin_theme(name) -> Option<Theme>` and
-  `builtin_theme_names() -> &[&str]`, the six built-in themes (`default`,
-  `pastel-rainbow`, `nord`, `gruvbox`, `catppuccin-mocha`, `tokyo-night`); each
+  `builtin_theme_names() -> &[&str]`, the seven built-in themes (`default`,
+  `pastel-rainbow`, `nord`, `gruvbox`, `catppuccin-mocha`, `tokyo-night`,
+  `dracula`); each
   is a complete `Theme` (all fields, incl. semantics), and every non-`default`
   theme is multi-accent (`palette.len() >= 4`) using truecolor (`Color::Rgb`).
   See Themes under Config for the full list and layering rules.
@@ -623,9 +624,9 @@ base  = "nord"                # a built-in name, or a *.toml stem in the themes 
 error = { Named = "red" }     # per-field overrides still apply on top of base
 ```
 
-Six built-ins ship in `rustline-core::themes` (`builtin_theme_names()`):
+Seven built-ins ship in `rustline-core::themes` (`builtin_theme_names()`):
 `default`, `pastel-rainbow` (the flagship multi-accent), `nord`, `gruvbox`,
-`catppuccin-mocha`, `tokyo-night`. Every theme but `default` is multi-accent
+`catppuccin-mocha`, `tokyo-night`, `dracula`. Every theme but `default` is multi-accent
 (`palette.len() >= 4`) and uses **truecolor** (`Color::Rgb`) — a
 truecolor-capable terminal and tmux `RGB`/`Tc` are required to see the exact
 colors (see README). `base` is resolved **themes-dir file first**
@@ -811,7 +812,7 @@ branch on platform.
   `Widget::range_name`/`render_region_ranged`'s `#[range=user|NAME]` markup,
   the `rustline click` subcommand, `init`'s `MouseDown1Status` binding, and
   plugin participation via `Context.toggled` (the `weather` example).
-- Done: themes, semantic colors, and the theme-picker CLI — six built-in
+- Done: themes, semantic colors, and the theme-picker CLI — seven built-in
   themes (`themes.rs`), `[theme].base` layering with themes-dir precedence,
   `ThemeConfig` as a full optional mirror of `Theme`, `Context.colors:
   ThemeColors` (`rustline-abi`) carrying the four semantic colors to widgets
