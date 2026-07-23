@@ -127,28 +127,43 @@ pub fn build_region_context(
     }
 }
 
-/// Build the [`Context`] for rendering a single window segment. Reuses
-/// [`build_region_context`] for the host/pane-agnostic fields (there is no
-/// pane in play for a window segment) and layers on the window-specific
-/// fields from `args`.
-pub fn build_window_context(args: &WindowArgs, theme: &Theme) -> Context {
-    // Windows render only the window pill (builtins, never cpu/memory/disk/
-    // battery/an IP widget), so pass an empty layout and an unused mount: no
-    // cpu/memory sampling, no per-window `read_cpu` sleep, no sysfs/getifaddrs
-    // reads either.
-    let mut ctx = build_region_context(&RegionArgs::default(), &[], theme, "");
-    ctx.window = Some(WindowCtx {
-        index: args.index.clone(),
-        name: args.name.clone(),
-        flags: args.flags.clone(),
-        is_current: args.current,
-    });
-    ctx
+/// Build the minimal [`Context`] needed to render a single window segment.
+///
+/// tmux spawns `rustline render window` once PER WINDOW on every refresh, so
+/// unlike [`build_region_context`] this does not route through it at all:
+/// the window-pill render path (`render_window`/`render_window_pill` in
+/// `rustline-core`, verified by reading `Windows::render` and both) reads
+/// only `Context.window` — the pill's colors come from the `Theme` passed
+/// directly to `render_window`, not from `Context.colors`. So this builder
+/// skips every other read `build_region_context` performs even with an empty
+/// layout: `getloadavg`, the toggles-file read, `gethostname`, `$HOME`, and
+/// `now`. For a session with N windows those reads would otherwise repeat N
+/// times per refresh for no benefit.
+pub fn build_window_context(args: &WindowArgs) -> Context {
+    Context {
+        window: Some(WindowCtx {
+            index: args.index.clone(),
+            name: args.name.clone(),
+            flags: args.flags.clone(),
+            is_current: args.current,
+        }),
+        ..Context::default()
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    /// Guards the two tests below that mutate the process-global
+    /// `XDG_DATA_HOME` env var: cargo's test harness runs tests in the same
+    /// process concurrently, and both tests' assertions depend on the value
+    /// `read_toggles()` sees during their own critical section, so an
+    /// unguarded interleaving of one test's `set_var`/`remove_var` with the
+    /// other's read would be a real race, not just a theoretical one.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn home_from_env_used_when_present() {
@@ -237,19 +252,19 @@ mod tests {
         // override into other tests.
         std::fs::create_dir_all(tmp.path().join("rustline")).unwrap();
         std::fs::write(tmp.path().join("rustline/toggles"), "cpu\nmemory\n").unwrap();
-        // SAFETY: `build_region_context` now unconditionally calls
-        // `read_toggles()` -> `rustline_wasm::data_root()`, which *reads*
-        // `XDG_DATA_HOME` -- so the sibling tests in this module that also call
-        // `build_region_context` (`home_from_env_used_when_present`,
-        // `read_interfaces_excludes_loopback_and_never_panics`,
-        // `cpu_memory_sampled_only_when_region_names_them`) transitively read
-        // this var too, and cargo's test harness may run them concurrently
-        // with the `set_var`/`remove_var` below. That's sound here because
-        // none of those siblings assert on `ctx.toggled` or anything else
-        // derived from `data_root()`, so a torn read during their call can't
-        // change their outcome; this test is the only one whose assertion
-        // depends on the value, and the mutation window is kept minimal
-        // (just around the single `build_region_context` call below).
+        // `build_region_context` unconditionally calls `read_toggles()` ->
+        // `rustline_wasm::data_root()`, which *reads* `XDG_DATA_HOME`; sibling
+        // tests in this module that also call `build_region_context`
+        // transitively read this var too, but none of them assert on
+        // `ctx.toggled`/anything derived from `data_root()`, so a torn read
+        // during their call can't change their outcome. This test and
+        // `window_context_sets_only_window_and_skips_every_other_read` are the
+        // only two whose assertions DO depend on the value, so both take
+        // `ENV_LOCK` to serialize against each other; the mutation window is
+        // kept minimal (just around the single call below).
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by `ENV_LOCK` above against the only other test
+        // that also mutates this var.
         unsafe {
             std::env::set_var("XDG_DATA_HOME", tmp.path());
         }
@@ -258,6 +273,7 @@ mod tests {
         unsafe {
             std::env::remove_var("XDG_DATA_HOME");
         }
+        drop(guard);
         assert!(ctx.toggled.contains("cpu") && ctx.toggled.contains("memory"));
     }
 
@@ -267,17 +283,14 @@ mod tests {
         // what spares `render left` / `render window` the read_cpu sleep.
         let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
         assert!(ctx.cpu.is_none() && ctx.memory.is_none());
-        // The window path uses an empty layout too.
-        let wctx = build_window_context(
-            &WindowArgs {
-                current: false,
-                index: String::new(),
-                name: String::new(),
-                flags: String::new(),
-                preview: false,
-            },
-            &Theme::default(),
-        );
+        // The window path never samples cpu/memory at all.
+        let wctx = build_window_context(&WindowArgs {
+            current: false,
+            index: String::new(),
+            name: String::new(),
+            flags: String::new(),
+            preview: false,
+        });
         assert!(wctx.cpu.is_none() && wctx.memory.is_none());
     }
 
@@ -307,5 +320,65 @@ mod tests {
             "/",
         );
         assert!(ctx.disk.is_some());
+    }
+
+    #[test]
+    fn window_context_sets_only_window_and_skips_every_other_read() {
+        // The window pill render path (verified by reading
+        // `assemble::render_window`, `Windows::render`, and
+        // `render::render_window_pill`) consumes only `Context.window`; the
+        // pill's colors come from the `Theme` passed directly to
+        // `render_window`, never `Context.colors`. So even with a populated
+        // toggles file on disk, the lean builder must NOT read it (or
+        // hostname/loadavg/interfaces/battery) -- proving it no longer routes
+        // through `build_region_context`.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("rustline")).unwrap();
+        std::fs::write(tmp.path().join("rustline/toggles"), "cpu\n").unwrap();
+        // Same pattern/rationale as `build_region_context_reads_toggles_from_
+        // state_file` above: this test's assertion also depends on the value
+        // `read_toggles()` would see, so it takes the same `ENV_LOCK` to
+        // serialize against that test rather than racing on the shared
+        // process-global `XDG_DATA_HOME`.
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by `ENV_LOCK` above against the only other test
+        // that also mutates this var.
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", tmp.path());
+        }
+        let ctx = build_window_context(&WindowArgs {
+            current: true,
+            index: "1".into(),
+            name: "shell".into(),
+            flags: "*".into(),
+            preview: false,
+        });
+        // SAFETY: matches the set above; restores the process env for other tests.
+        unsafe {
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        drop(guard);
+
+        assert_eq!(
+            ctx.window,
+            Some(WindowCtx {
+                index: "1".into(),
+                name: "shell".into(),
+                flags: "*".into(),
+                is_current: true,
+            })
+        );
+        assert!(
+            ctx.toggled.is_empty(),
+            "toggles file on disk must not be read: {:?}",
+            ctx.toggled
+        );
+        assert!(ctx.hostname.is_empty(), "hostname must not be read");
+        assert!(ctx.home.is_empty(), "$HOME must not be read");
+        assert!(ctx.loadavg.is_none(), "getloadavg must not be called");
+        assert!(ctx.interfaces.is_empty(), "getifaddrs must not be called");
+        assert!(ctx.battery.is_none());
+        assert!(ctx.cpu.is_none() && ctx.memory.is_none());
+        assert!(ctx.git.is_none() && ctx.disk.is_none());
     }
 }

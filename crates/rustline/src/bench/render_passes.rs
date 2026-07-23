@@ -116,7 +116,7 @@ pub fn bench_regions_real(cfg: &Config, real_iters: usize, warmup: usize) -> Gro
     rows.push(Row {
         label: "window".into(),
         stats: summarize(&measure(warmup, real_iters, || {
-            let ctx = build_window_context(&win_args, &theme);
+            let ctx = build_window_context(&win_args);
             let _ = render_window(&ctx, &registry, &theme);
         })),
     });

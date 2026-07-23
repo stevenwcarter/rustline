@@ -157,7 +157,7 @@ fn main() {
         Command::Render(Render::Window(args)) => {
             // Windows don't run plugins in v1: builtins only.
             let registry = Registry::with_builtins(&cfg);
-            let ctx = build_window_context(&args, &theme);
+            let ctx = build_window_context(&args);
             emit(&render_window(&ctx, &registry, &theme), args.preview);
         }
         Command::Init(args) => {

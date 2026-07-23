@@ -62,6 +62,47 @@ fn render_left_preview_emits_ansi_not_tmux_markup() {
 }
 
 #[test]
+fn render_window_pill_matches_expected_markup() {
+    // Characterization: `build_window_context` was leaned out to skip
+    // reads the window pill never uses (loadavg/toggles/hostname/etc.) --
+    // the rendered pill markup must stay byte-identical regardless.
+    let tmp = tempdir().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args([
+        "render",
+        "window",
+        "--current",
+        "--index",
+        "1",
+        "--name",
+        "shell",
+        "--flags",
+        "*",
+    ]);
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg")); // no config file -> default theme
+    let out = cmd.output().unwrap();
+    assert_eq!(
+        out.stdout,
+        b"#[fg=colour31,bg=colour234]\xee\x82\xb6\
+#[fg=colour255,bg=colour31,bold] 1* shell \
+#[fg=colour31,bg=colour234]\xee\x82\xb4#[default]"
+    );
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["render", "window", "--index", "2", "--name", "editor"]);
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    let out = cmd.output().unwrap();
+    assert_eq!(
+        out.stdout,
+        b"#[fg=colour236,bg=colour234]\xee\x82\xb6\
+#[fg=colour250,bg=colour236] 2 editor \
+#[fg=colour236,bg=colour234]\xee\x82\xb4#[default]"
+    );
+}
+
+#[test]
 fn init_print_emits_block_and_writes_nothing() {
     let tmp = tempdir().unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
