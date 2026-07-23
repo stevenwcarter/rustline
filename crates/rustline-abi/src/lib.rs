@@ -1,5 +1,13 @@
 //! rustline-abi: the serde-serializable types that cross the WASM plugin
-//! boundary (Segment/Style/Color). No I/O, no chrono — the wire-format ABI.
+//! boundary. No I/O, no chrono — the wire-format ABI.
+//!
+//! Beyond the original output types (`Segment`/`Style`/`Color`/`ThemeColors`),
+//! this crate now also holds every other chrono-free type shared between the
+//! host and a guest: the snapshot types moved here from
+//! `rustline-core::context` (`NetIface`, `Battery`/`BatteryState`,
+//! `CpuUsage`, `MemInfo`), `GitInfo`/`DiskInfo`, and the typed guest-input
+//! wire types (`WireContext`, `WireWindowCtx`, `GuestRender`) a plugin
+//! deserializes instead of hand-walking a `serde_json::Value`.
 use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 

@@ -33,6 +33,10 @@ pane, window, host, and system info, with zero required configuration.
   turn into an alert badge when a configurable threshold is crossed.
 - Instant refresh on pane/window switch via tmux hooks (no waiting for the
   next `status-interval` tick).
+- `rustline doctor` checks your setup (tmux version, mouse mode, a truecolor
+  terminal, `rustline` on `$PATH`, the managed tmux-conf block) and reports
+  pass/warn/fail; `rustline completions <bash|zsh|fish>` prints a
+  shell-completion script.
 
 ## Install
 
@@ -71,13 +75,25 @@ turns on `set -g mouse on` for you.
 - `rustline init --print` — just print the raw one-line tmux block to stdout
   and write nothing (the pre-wizard behavior, handy for scripting:
   `rustline init --print >> ~/.tmux.conf`).
+- `rustline init --dry-run` — preview the config.toml and tmux block a real
+  run would write (with a line diff against any existing file), without
+  touching disk.
+- `rustline init --uninstall` — remove the managed tmux block from
+  `~/.tmux.conf` (backing it up first) and print the reload command; never
+  touches `config.toml`. Combine with `--dry-run` to preview the removal
+  instead of performing it.
+- `rustline init --binary <path>` — override the binary path baked into the
+  tmux block (default: the running binary's own resolved absolute path).
 
 The tmux block is wrapped in `# >>> rustline >>>` / `# <<< rustline <<<`
 markers, so re-running `rustline init` replaces that region instead of
 appending a duplicate; your edits outside the markers are preserved. The
 generated `config.toml` is merged non-destructively too: `[theme].base` is
 always set to your pick, but existing `[layout]`/`[widgets.*]` sections you've
-already customized are left alone.
+already customized are left alone. Note the tmux block calls `rustline` by its
+resolved absolute path rather than a bare name, since the tmux server's own
+shell may not share your interactive shell's `$PATH` — run `rustline doctor`
+if the bar ever comes up empty.
 
 > **Font requirement:** the powerline separators are drawn with Powerline
 > glyphs (U+E0B0–U+E0B3). Use a Nerd Font or another powerline-patched font
@@ -104,13 +120,14 @@ Config is optional TOML at `~/.config/rustline/config.toml` (or
 just falls back to the defaults above — `rustline` never fails to render
 because of a bad config.
 
-Widget names available for the `layout` arrays are: `pane_id`, `hostname`,
-`windows`, `cwd`, `cpu`, `memory` (see [CPU and memory
-widgets](#cpu-and-memory-widgets) below), `loadavg`, `datetime`, and the
-opt-in `lan_ip` / `tailscale_ip` (see [IP address widgets](#ip-address-widgets)
-below), `battery` (see [Battery widget](#battery-widget) below), `git`
-(see [Git widget](#git-widget) below), and `disk` (see [Disk
-widget](#disk-widget) below).
+Widget names available for the `layout` arrays are: `pane_id` / `hostname`
+(see [Hostname and pane ID widgets](#hostname-and-pane-id-widgets) below),
+`windows`, `cwd` (see [Cwd widget](#cwd-widget) below), `cpu`, `memory` (see
+[CPU and memory widgets](#cpu-and-memory-widgets) below), `loadavg`,
+`datetime`, and the opt-in `lan_ip` / `tailscale_ip` (see [IP address
+widgets](#ip-address-widgets) below), `battery` (see [Battery
+widget](#battery-widget) below), `git` (see [Git widget](#git-widget)
+below), and `disk` (see [Disk widget](#disk-widget) below).
 
 Example — reorder the right region and change the clock format:
 
@@ -124,6 +141,52 @@ format = "%H:%M"
 
 Run `rustline print-config` to print the fully-resolved effective
 configuration (your overrides layered onto the defaults) as TOML.
+`rustline config path` prints the resolved config file's path; `rustline
+config edit` opens it in `$EDITOR` (creating it from the starter template
+first if it doesn't exist); `rustline config validate` strictly parses it
+and reports any error with its location, unlike `Config::load`'s silent
+fallback to defaults.
+
+### Hostname and pane ID widgets
+
+`hostname` and `pane_id` are both in the default left layout. Each takes a
+`format` (previously a fixed string): `hostname`'s (default `"{host}"`)
+substitutes `{host}`, the hostname truncated at the first `.`; `pane_id`'s
+(default `"{session}:{window}.{pane}"`) substitutes `{session}`/`{window}`/
+`{pane}`. Any other text — e.g. a Nerd-Font icon or label — is printed
+verbatim, and both defaults reproduce the pre-config output byte-for-byte.
+
+```toml
+[widgets.hostname]
+format = " {host}"   # default "{host}"
+
+[widgets.pane_id]
+format = " {session}/{window}/{pane}"   # default "{session}:{window}.{pane}"
+```
+
+### Cwd widget
+
+`cwd` is in the default right layout. Beyond the existing `abbreviate_home`
+(default `true`, a leading `$HOME` becomes `~`), it now takes a `format`
+(default `"{path}"`, substituting the — possibly shortened — path) plus two
+more shortening options, applied in order (home-abbreviation, `abbreviate`,
+`max_depth`, `max_len`, then the `format` substitution): `abbreviate`
+(default `false`, fish-shell style — every path component but the last
+shrinks to its first character, e.g. `~/src/rustline` → `~/s/rustline`),
+`max_depth` (default `0` = unlimited; keeps only the last N `/`-separated
+components, prefixing a leading `…/` when components are dropped), and
+`max_len` (default `0` = unlimited; left-truncates the result to at most N
+characters, prefixing a leading `…`). Every option at its default reproduces
+the pre-feature output byte-for-byte.
+
+```toml
+[widgets.cwd]
+format          = "{path}"   # default
+abbreviate_home = true       # default
+abbreviate      = true       # fish-style shortening of all but the last component
+max_depth       = 3          # keep only the last 3 path components
+max_len         = 30         # left-truncate to 30 characters
+```
 
 ### IP address widgets
 
@@ -164,7 +227,9 @@ a `down_format` shown when there's no battery reading (default empty — same
 collapse-to-nothing behavior as the IP widgets' `down_format`), plus an
 `alt_format` for [click-to-toggle](#click-to-toggle-widget-views). It's also
 [threshold-aware](#themes): `warn_percent`/`crit_percent` (default 20/10)
-alert while discharging at or below those levels.
+alert while discharging at or below those levels. An optional `icon`
+overrides `{icon}` with a fixed glyph instead of the computed one (default:
+`None`, keep the computed glyph) — handy without a Nerd Font.
 
 ```toml
 [layout]
@@ -175,6 +240,7 @@ format = "{icon} {percent}%"   # {icon}, {percent}, {state}
 down_format = ""               # shown when no battery (desktops); default: nothing
 warn_percent = 20              # default; alert badge at/below this % while discharging
 crit_percent = 10              # default; 0 disables a tier
+# icon = "BAT"                 # optional; overrides the computed level/charging glyph
 ```
 
 ### CPU and memory widgets
@@ -194,7 +260,9 @@ read — same collapse-to-nothing behavior as the `battery` widget's
 `down_format` — and an `alt_format` for
 [click-to-toggle](#click-to-toggle-widget-views). Both are also
 [threshold-aware](#themes): `warn_percent`/`crit_percent` (cpu default 80/95,
-memory default 80/92) alert at or above those levels.
+memory default 80/92) alert at or above those levels. Each also takes its
+own optional `icon` that overrides `{icon}` with a fixed glyph instead of
+the built-in Nerd-Font one (default: `None`, keep the built-in glyph).
 
 ```toml
 [widgets.cpu]
@@ -202,12 +270,14 @@ format = "{icon} {bar} {percent}%"   # default "{icon} {percent}%"
 bar_width = 8
 warn_percent = 80   # default; 0 disables a tier
 crit_percent = 95   # default
+# icon = "CPU"       # optional; overrides the built-in Nerd-Font glyph
 
 [widgets.memory]
 format = "{icon} {used}/{total}"     # default; or "{icon} {bar} {percent}%"
 bar_width = 8
 warn_percent = 80   # default; 0 disables a tier
 crit_percent = 92   # default
+# icon = "MEM"       # optional; overrides the built-in Nerd-Font glyph
 ```
 
 ### Load average widget
@@ -358,7 +428,9 @@ instead and exits non-zero without writing anything.
 `theme new` writes a complete, commented theme file to
 `$XDG_CONFIG_HOME/rustline/themes/<name>.toml` (fallback
 `~/.config/rustline/themes`) with every field set to the seed theme's values —
-edit any of them, then `rustline theme use <name>`. A themes-dir file always
+edit any of them, then `rustline theme use <name>`. Add `--edit` to open the
+new file in `$EDITOR` right away (needs a TTY); either way it prints the
+`theme use <name>` follow-up. A themes-dir file always
 **shadows** a built-in of the same name, so `rustline theme new nord` followed
 by `rustline theme use nord` uses your tweaked copy.
 
@@ -542,6 +614,20 @@ rustline plugin list
 rustline plugin url add weather "https://wttr.in/*"
 ```
 
+A plugin can also declare a capability *manifest* — a sidecar
+`<plugin_dir>/<name>.toml` (or an embedded `rustline-manifest` wasm custom
+section) listing the `allowed_urls`/`allowed_paths` it wants — so you don't
+have to hand-write them yourself:
+
+```bash
+rustline plugin approve weather        # shows what it requests, asks to confirm
+rustline plugin approve weather --yes  # non-interactive; for scripts
+```
+
+`approve` writes exactly the requested patterns into
+`[plugins.<name>]`'s allowlists (never more than what's declared), and does
+nothing if the plugin has no manifest.
+
 Scaffold a new plugin crate instead of copying `weather` by hand:
 
 ```bash
@@ -573,7 +659,8 @@ See the full design specs:
 [IP widgets](docs/superpowers/specs/2026-07-20-rustline-ip-widgets-design.md),
 [CPU/memory widgets](docs/superpowers/specs/2026-07-21-rustline-cpu-memory-widgets-design.md),
 [click-to-toggle widgets](docs/superpowers/specs/2026-07-21-rustline-click-toggle-widgets-design.md),
-[themes/theme picker](docs/superpowers/specs/2026-07-21-rustline-themes-theme-picker-design.md).
+[themes/theme picker](docs/superpowers/specs/2026-07-21-rustline-themes-theme-picker-design.md),
+[whats-next bundle](docs/superpowers/specs/2026-07-22-rustline-whatsnext-bundle-design.md).
 
 ## License
 

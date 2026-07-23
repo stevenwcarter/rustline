@@ -84,7 +84,9 @@ pub fn bench_regions_pure(cfg: &Config, iters: usize, warmup: usize) -> Group {
 }
 
 /// Real-world render of each region: real `build_region_context` (all OS reads,
-/// incl. read_cpu's ~120 ms when the layout names `cpu`) + render.
+/// incl. read_cpu's cold/stale-cache ~120 ms two-sample fallback when the
+/// layout names `cpu` and no fresh persisted sample exists — a warm cache
+/// instead takes a zero-sleep fast path) + render.
 pub fn bench_regions_real(cfg: &Config, real_iters: usize, warmup: usize) -> Group {
     let registry = Registry::with_builtins(cfg);
     let theme = cfg.to_theme();
@@ -122,7 +124,11 @@ pub fn bench_regions_real(cfg: &Config, real_iters: usize, warmup: usize) -> Gro
     });
     Group {
         title: "Region end-to-end — real-world (build_context + render)".into(),
-        note: Some("`right` includes read_cpu's ~120ms sample window".into()),
+        note: Some(
+            "`right` includes read_cpu's ~120ms fallback sample window on a \
+             cold/stale cache; a warm cache takes a zero-sleep fast path"
+                .into(),
+        ),
         rows,
     }
 }

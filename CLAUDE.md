@@ -25,12 +25,14 @@ Cargo **workspace**, edition 2024, `resolver = "2"`:
   `Context` from CLI args + local system reads, discovers/registers WASM
   plugins, calls the core, and prints.
 - `crates/rustline-wasm` — the **WASM plugin host**: an Extism (wasmtime)
-  runtime with six capability-gated host functions (TTL-cached + raw network +
-  state + arbitrary-file read/write), per-plugin allowlists and a
-  sandboxed/quota-bounded state dir, and discovery of `*.wasm` files into
-  `Widget` registrations. Zero ambient authority — guests run with wasi off
-  and no built-in Extism HTTP/FS; every effect is host-checked. Reusable
-  verbatim by a future daemon front-end.
+  runtime with seven host functions — six capability-gated (TTL-cached + raw
+  network + state + arbitrary-file read/write) plus one capability-free guest
+  logger, `rl_log` — per-plugin allowlists and a sandboxed/quota-bounded state
+  dir, and discovery of `*.wasm` files into `Widget` registrations. Zero
+  ambient authority — guests run with wasi off and no built-in Extism
+  HTTP/FS; every effect is host-checked (`rl_log` is the sole intentional
+  exception — see invariant N1). Reusable verbatim by a future daemon
+  front-end.
 
 `plugins/` holds example/third-party plugin sources, each an **excluded**
 workspace member (own `Cargo.lock`, built for `wasm32-unknown-unknown`):
@@ -93,8 +95,15 @@ these shared types, not a design shortcut. Keep them serializable.
   `battery: Option<Battery>`, `cpu: Option<CpuUsage>`,
   `memory: Option<MemInfo>`, `git: Option<GitInfo>`, `disk: Option<DiskInfo>`,
   `os: String`, `arch:
-  String`, `toggled: BTreeSet<String>`, `colors: ThemeColors`), `WindowCtx`,
-  and `NetIface { name, ipv4: Ipv4Addr }` (one non-loopback IPv4 interface,
+  String`, `toggled: BTreeSet<String>`, `colors: ThemeColors`), plus
+  `Context::default()` (an empty, epoch-timestamped instance, so test/synthetic
+  construction sites can use struct-update syntax instead of spelling out
+  every field as the type grows), and `WindowCtx`. `NetIface`, `Battery`/
+  `BatteryState`, `CpuUsage`, and `MemInfo` all now live in `rustline-abi`
+  (chrono-free, so a WASM guest can share them directly) and are re-exported
+  here — the same `Segment`/`Style`/`Color` precedent as `segment.rs` — so
+  existing `rustline_core::context::…`/`rustline_core::…` paths keep
+  resolving. `NetIface { name, ipv4: Ipv4Addr }` (one non-loopback IPv4 interface,
   read once at `Context`-build time; the IP widgets select from this list
   rather than touching the OS mid-render). `Battery { percent: u8, state:
   BatteryState }` and `BatteryState { Charging, Discharging, Full, Unknown }`
@@ -140,6 +149,14 @@ these shared types, not a design shortcut. Keep them serializable.
 - `widget.rs` — `Widget` trait and `Registry` (name → factory; `resolve` skips
   unknown widget names with a `warn!`, never errors). `Widget::range_name(&self)
   -> Option<&str>` defaults to `None`; a clickable widget returns `Some(name)`.
+  `WidgetDescriptor { name, summary, configurable, source: WidgetSource }`
+  (`WidgetSource::{Builtin, Plugin}`) describes a registered widget
+  independent of building an instance; `Registry::register_described`
+  registers a factory alongside its descriptor (`register` still works,
+  recording a minimal built-in/non-configurable one), and
+  `descriptors()`/`available_names()` enumerate them in registration order
+  (W22) — the enabling abstraction for a future widget-listing command, not
+  itself exposed as a CLI subcommand yet.
 - `widgets/` — the thirteen built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
   `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`,
   `git`, `disk`, plus `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
@@ -235,12 +252,25 @@ these shared types, not a design shortcut. Keep them serializable.
   `ThemeColors { fg, bar_bg, success, info, warning, error }` with `Default`
   (matches `Theme::default()`'s values) — the semantic-color snapshot carried
   on `Context.colors` so widgets and WASM guests can style alert badges
-  without seeing `Theme` — and `GitInfo { branch, ahead, behind, staged,
-  unstaged }` (chrono-free, so no separate wire mirror is needed; the same
-  type rides `Context.git` and `WireContext.git`), plus `DiskInfo {
-  total_bytes, used_bytes, available_bytes }` (same chrono-free, no-separate-
-  wire-mirror shape, riding `Context.disk`/`WireContext.disk`). The WASM wire
-  types, re-exported by `rustline-core`.
+  without seeing `Theme`; `NetIface { name, ipv4: Ipv4Addr }`; `Battery
+  { percent, state: BatteryState }`/`BatteryState { Charging, Discharging,
+  Full, Unknown }`; `CpuUsage { percent: f32 }`; and `MemInfo { total_bytes,
+  used_bytes, available_bytes }` — all moved here from
+  `rustline-core::context` (chrono-free, so a WASM guest can share them
+  directly) and re-exported by `rustline-core` — and `GitInfo { branch,
+  ahead, behind, staged, unstaged }` (chrono-free, so no separate wire mirror
+  is needed; the same type rides `Context.git` and `WireContext.git`), plus
+  `DiskInfo { total_bytes, used_bytes, available_bytes }` (same chrono-free,
+  no-separate-wire-mirror shape, riding `Context.disk`/`WireContext.disk`).
+  Also `WireWindowCtx` (a chrono-free mirror of `WindowCtx`) and `WireContext`
+  (the guest-side, typed mirror of `Context` itself — field-for-field
+  identical except `now` is a plain RFC3339 `String` rather than
+  `DateTime<Local>`), plus `GuestRender { context: WireContext, config:
+  serde_json::Value }` — the whole shape a guest's `render` export
+  deserializes (W26), so a plugin no longer hand-walks an untyped
+  `serde_json::Value` for its `Context` input; `plugin new`'s scaffold and the
+  `counter`/`filewatch`/`httpget` examples all use these typed wire structs.
+  The WASM wire types, re-exported by `rustline-core`.
 
 `rustline-wasm`:
 - `allow.rs` — `AllowSet`/`Pattern`: each `allowed_urls`/`allowed_paths` entry
@@ -266,14 +296,30 @@ these shared types, not a design shortcut. Keep them serializable.
   (`perform_http_get`, `perform_http_get_cached` — the TTL-cached GET:
   gate-first, 2xx-only caching, serve-stale — `perform_state_read/write`,
   `perform_file_read/write`); pure enough to unit-test directly, incl. the
-  denied-case tests.
+  denied-case tests. Plus `perform_log(plugin, level, msg)` (W7): the one
+  intentional **capability-free** host function — it only ever writes to the
+  host's `tracing` subscriber, so unlike the six above it has no
+  `CapabilityCtx` allowlist to check and no denied-case test; an unrecognized
+  `level` string degrades to `info` (keeping the original as a field) rather
+  than dropping the message or panicking.
 - `host.rs` — the `host_fn!` wrappers binding `perform_*` (incl.
-  `rl_http_get_cached`) to each plugin's `CapabilityCtx`, `build_plugin`
-  (Extism instantiation: wasi off, fuel + timeout + memory caps), and
-  `WasmWidget` (wraps an `extism::Plugin`; `Widget::render` degrades to empty
-  segments on any error/timeout/malformed output; carries its own `name` and
-  implements `range_name` as `Some(name)` iff `name.len() <= 15` — the guest
-  itself decides whether to honor `context.toggled`).
+  `rl_http_get_cached` and, W7, `rl_log`) to each plugin's `CapabilityCtx`,
+  `build_plugin` (Extism instantiation: wasi off, fuel + timeout + memory
+  caps, all **seven** host functions bound), and `WasmWidget` (wraps an
+  `extism::Plugin`; `Widget::render` degrades to empty segments on any
+  error/timeout/malformed output; carries its own `name` and implements
+  `range_name` as `Some(name)` iff `name.len() <= 15` — the guest itself
+  decides whether to honor `context.toggled`).
+- `manifest.rs` — plugin capability *manifests* (W24): `PluginManifest
+  { name, version, requested_urls, requested_paths }` and
+  `resolve_manifest(plugin_dir, name) -> Option<PluginManifest>`, which
+  resolves a sidecar `<plugin_dir>/<name>.toml` first (primary; supersedes
+  unconditionally, even if malformed) or else an embedded `rustline-manifest`
+  wasm custom section (fallback, via a hand-rolled `find_custom_section`
+  reader — no wasm-parsing dependency), else `None`. A manifest never grants
+  anything itself — it's just a declaration `rustline plugin approve` turns
+  into an allowlist write; a malformed manifest from either source is logged
+  and treated as absent, never breaking discovery (N2).
 - `lib.rs::register_plugins` — discovers `*.wasm` in the plugin dir, and for
   each name in the caller's `needed` list (i.e. actually referenced by a
   layout region — avoids paying wasm cold-start for unused plugins):
@@ -330,13 +376,26 @@ mod guest`): three more worked examples, each covering a host capability
   `parse_pmset`) that is `#[cfg(any(target_os = …, test))]`-compiled so both
   are unit-tested on the Linux dev box even though only one reader arm
   compiles per platform. Any other platform, or a failed read, yields `None`.
-- `cpu.rs` — `read_cpu()`, a `#[cfg(target_os)]` read surface: Linux takes two
-  `/proc/stat` samples ~120 ms apart (`CPU_SAMPLE_WINDOW`) and diffs the
-  aggregate `cpu ` line (`parse_proc_stat` + `busy_percent`, a stateless
-  two-sample delta — no cross-invocation state); macOS shells out to
-  `top -l 2 -n 0` and parses the last `CPU usage:` line (`parse_top_cpu`).
-  Both parsers are `#[cfg(any(target_os = …, test))]`-compiled and unit-tested
-  on the Linux dev box. Unsupported platform or failed read → `None`.
+- `cpu.rs` — `read_cpu()`, a `#[cfg(target_os)]` read surface. Linux now
+  persists a `<state_root>/cpu-sample` snapshot (`CpuSnapshot { idle, total,
+  ts }`) across invocations (W11): the fast path reads the current
+  `/proc/stat` line and diffs it against that persisted snapshot if one
+  exists and is fresh (`busy_from_snapshots`, within
+  `CPU_SNAPSHOT_STALENESS_SECS` = 60s), returning with **no sleep**; only
+  when there's no fresh persisted snapshot (first run, a stale one, or a
+  backward clock) does it fall back to the classic two-sample read
+  (`parse_proc_stat` + `busy_percent`, sampling `CPU_SAMPLE_WINDOW` ~120 ms
+  apart). Either way the current reading is persisted afterward
+  (`store_snapshot`, a best-effort atomic temp-file + rename) so the *next*
+  call can take the fast path — this is no longer a stateless delta. macOS
+  shells out to `top -l 2 -n 0` and parses the last `CPU usage:` line
+  (`parse_top_cpu`), unchanged. All the pure helpers (`parse_proc_stat`/
+  `busy_percent`/`busy_from_snapshots`/`parse_snapshot`/`serialize_snapshot`/
+  `parse_top_cpu`) are `#[cfg(any(target_os = …, test))]`-compiled and
+  unit-tested on the Linux dev box, with the snapshot-cache tests injecting a
+  tempdir rather than touching the real state dir. Unsupported platform or
+  failed read → `None`. The persisted snapshot also doubles as the sample
+  history a future sparkline could consume (see Roadmap).
 - `memory.rs` — `read_memory()`, a `#[cfg(target_os)]` read surface: Linux
   reads `/proc/meminfo` (`MemTotal`/`MemAvailable` in kB, `parse_meminfo`);
   macOS shells out to `sysctl -n hw.memsize` + `vm_stat` and derives available
@@ -377,7 +436,16 @@ mod guest`): three more worked examples, each covering a host capability
   otherwise available inside `build_context.rs`), `os`, `arch`
   (from `std::env::consts::OS`/`ARCH`), and `toggled` (via
   `toggles::read_toggles()`, unconditionally — cheap relative to the gated
-  cpu/memory/git/disk reads).
+  cpu/memory/git/disk reads). A private `layout_needs(layout, name) -> bool`
+  is the one predicate behind every one of these gates, now also covering
+  `battery` and the IP-widgets' interface scan (W5; both used to be read
+  unconditionally). `build_window_context` builds the minimal `Context`
+  `render window` needs — just `Context.window`, via `..Context::default()`
+  — skipping every other read entirely (`getloadavg`, the toggles-file read,
+  `gethostname`, `$HOME`, cpu/memory/git/disk/battery/interfaces), since tmux
+  calls it once per window per refresh and the window-pill render path never
+  touches anything else (W8): it no longer routes through
+  `build_region_context` at all.
 - `toggles.rs` — the global click-toggle state file:
   `toggles_path()` (`$XDG_DATA_HOME/rustline/toggles`, reusing
   `rustline_wasm::data_root()`), `parse_toggles`/`serialize_toggles`
@@ -397,7 +465,13 @@ mod guest`): three more worked examples, each covering a host capability
   `WireContext` (not a hand-walked `serde_json::Value`). Refuses to
   overwrite an existing `<name>/` dir without `--force`; prints the
   `cargo build --target wasm32-unknown-unknown` + install step and a
-  starter `[plugins.<name>]` config snippet afterward.
+  starter `[plugins.<name>]` config snippet afterward. `approve <name>
+  [--yes]` (W24) resolves the plugin's manifest via `resolve_manifest`,
+  prints what it requests, and — after an interactive y/N confirmation (or
+  unconditionally with `--yes`) — writes **exactly** those requested URL/path
+  patterns into `[plugins.<name>]`'s allowlists (idempotent append, never a
+  wider grant); `list` also now shows a `run \`plugin approve <name>\`` hint
+  when a manifest resolves for that plugin.
 - `theme_cmd.rs` — `rustline theme …`, mirroring `plugin_cmd.rs`'s `toml_edit`
   approach: `list` prints every built-in and themes-dir `*.toml` stem,
   marking the active one (`cfg.theme.base`, default `"default"`) with `*` and
@@ -518,8 +592,34 @@ A global `-v`/`--verbose` (repeatable) raises the **file** log level:
   silently. `rustline init --defaults` runs the same two writes
   non-interactively with recommended answers. `rustline init --print` is the
   legacy behavior: prints just the raw one-line tmux block to stdout (using
-  `theme.bar_bg`/`fg` for `status-style`) and writes nothing.
+  `theme.bar_bg`/`fg` for `status-style`) and writes nothing. `rustline init
+  --dry-run` previews, without touching disk, what a real run would write —
+  the config.toml and tmux block, each with a line diff against any existing
+  file — using answers gathered the same way (`--defaults` or the
+  interactive wizard); `--print` still wins over it. `rustline init
+  --uninstall` strips the managed tmux block from `~/.tmux.conf` (backing it
+  up first) and prints the reload command, never touching `config.toml` and
+  needing no TTY; combined with `--dry-run` it only *previews* the removal
+  and writes nothing at all (no file, no backup). `rustline init --binary
+  <path>` overrides the binary path baked into the tmux block's `#(...)`
+  calls (default: the running binary's own resolved absolute path via
+  `current_exe()`) — see the tmux integration model below for why the block
+  calls an absolute path rather than bare `rustline`.
 - `rustline print-config` — effective config as TOML.
+- `rustline config path` — print the resolved config file path.
+- `rustline config edit` — open the config file in `$EDITOR` (needs a TTY);
+  creates it from the starter template first if it doesn't exist yet.
+- `rustline config validate` — strictly parse the config file and report any
+  error with its location (unlike the total `Config::load`, which silently
+  falls back to defaults); a missing file is not an error.
+- `rustline doctor` — diagnose the documented prerequisites (tmux ≥ 3.1,
+  `set -g mouse on` when checkable from inside a running session, a
+  truecolor terminal, `rustline` on `$PATH`, and the managed tmux-conf block)
+  as pass/warn/fail, plus the resolved config/themes/plugin/log paths; only
+  reads and prints, never writes; exits non-zero only if any check outright
+  fails (a `warn` is advisory).
+- `rustline completions <bash|zsh|fish>` — print a shell-completion script
+  (via `clap_complete`) to stdout.
 - `rustline plugin list` — discovered/configured plugins with their source,
   allowlists, and state quota.
 - `rustline plugin url|path list|add|remove <plugin> [pattern]` — read or
@@ -533,6 +633,13 @@ A global `-v`/`--verbose` (repeatable) raises the **file** log level:
   snippet. `<name>` must be `[A-Za-z0-9_-]`, ≤15 bytes, and not `window`
   (same rule as a widget's click-toggle range name); refuses to overwrite an
   existing `<name>/` directory without `--force`.
+- `rustline plugin approve <name> [--yes]` — resolve `<name>`'s declared
+  capability manifest (a sidecar `<name>.toml` in the plugin dir, or an
+  embedded `rustline-manifest` wasm custom section), print what it requests,
+  and — after an interactive y/N confirmation (or unconditionally with
+  `--yes`) — write exactly those requested URL/path patterns into
+  `[plugins.<name>]`'s allowlists; declines (writing nothing) without
+  confirmation, and does nothing if the plugin has no manifest.
 - `rustline theme list` — every built-in + themes-dir theme, marking the
   active one and any built-in shadowed by a same-named file.
 - `rustline theme show <name>` — ANSI preview of `<name>` (default layout,
@@ -540,9 +647,11 @@ A global `-v`/`--verbose` (repeatable) raises the **file** log level:
 - `rustline theme use <name>` — set `[theme].base = "<name>"` in the config
   file (`toml_edit`, comment-preserving); errors without writing if `<name>`
   doesn't resolve.
-- `rustline theme new <name> [--from <seed>] [--force]` — scaffold
+- `rustline theme new <name> [--from <seed>] [--force] [--edit]` — scaffold
   `<themes_dir>/<name>.toml` as a complete, tweakable copy of `<seed>`
   (default `default`); refuses to overwrite an existing file without `--force`.
+  `--edit` opens the new file in `$EDITOR` afterward (needs a TTY) and prints
+  the `theme use <name>` follow-up either way.
 - `rustline theme pick` — interactively list the themes (active marked,
   themes-dir files tagged `(custom)`), preview any by number (or `a`/`all` for
   every one), then prompt to set one by name or number (blank keeps the
@@ -574,9 +683,15 @@ tmux consumes (stdout is the status line — logs always go to stderr).
 
 Shell-out per region on `status-interval` (no daemon in v1). The block
 `rustline init` writes (via `init_block`) wires `status-left`/`status-right`/
-`window-status-format` to `#(rustline render …)` and adds
-`after-select-pane`/`after-select-window` → `refresh-client -S` hooks for
-instant updates. It also emits a `bind -T root MouseDown1Status` block: a
+`window-status-format` to `#(<binary> render …)` — `<binary>` is the
+resolved, shell-quoted absolute path to the running binary
+(`std::env::current_exe()`, overridable with `init --binary <path>`), not a
+bare `rustline`, since tmux's `#(...)` shells out via the *tmux server's*
+`/bin/sh`, whose `$PATH` may not include wherever the user installed it
+(e.g. `~/.local/bin`) — a bare name there can silently resolve to nothing and
+leave the bar empty — and adds `after-select-pane`/`after-select-window` →
+`refresh-client -S` hooks for instant updates. It also emits a
+`bind -T root MouseDown1Status` block: a
 window-name click still runs the default `select-window`, and any other
 non-empty `#{mouse_status_range}` runs `rustline click --range=… --button=left`
 then `refresh-client -S`. This requires **tmux ≥ 3.1** (that's when
@@ -603,6 +718,45 @@ right = `[cwd, cpu, memory, loadavg, datetime]`. Default datetime format
 `"%a < %Y-%m-%d < %H:%M"` (the `<` are literal). Unknown widget names in a layout
 are skipped, not fatal.
 
+**Hostname and pane_id widgets:** both are in the default layout (`left =
+[pane_id, hostname]`) and each now take a `format` option (previously a fixed
+string). `hostname`'s `format` (default `"{host}"`) substitutes `{host}` (the
+hostname truncated at the first `.`); `pane_id`'s `format` (default
+`"{session}:{window}.{pane}"`) substitutes `{session}`/`{window}`/`{pane}`.
+Any other text (e.g. a Nerd-Font icon or label) is emitted verbatim; unknown
+placeholders pass through untouched. Every default reproduces the pre-config
+output byte-for-byte.
+
+```toml
+[widgets.hostname]
+format = "{host}"   # default
+
+[widgets.pane_id]
+format = "{session}:{window}.{pane}"   # default
+```
+
+**Cwd widget:** `cwd` is in the default right layout. It takes a `format`
+(default `"{path}"`) whose `{path}` placeholder is replaced by the (possibly
+shortened) working directory, plus the existing `abbreviate_home` (default
+`true`, a leading `$HOME` component becomes `~`) and three new shortening
+options applied in a fixed order — home-abbreviation, then `abbreviate`, then
+`max_depth`, then `max_len`, then the `format` substitution: `abbreviate`
+(default `false`, fish-shell style — every path component but the last
+shrinks to its first `char`), `max_depth` (default `0` = unlimited; keeps
+only the last N `/`-separated components, prefixing a leading `…/` when
+components are dropped), and `max_len` (default `0` = unlimited; left-
+truncates the result to at most N characters, prefixing a leading `…`).
+Every option at its default reproduces the pre-feature output byte-for-byte.
+
+```toml
+[widgets.cwd]
+format          = "{path}"   # default
+abbreviate_home = true       # default; leading $HOME -> ~
+abbreviate      = false      # default; fish-style: ~/src/rustline -> ~/s/rustline
+max_depth       = 0          # default (0 = unlimited); keep last N components, prefix "…/"
+max_len         = 0          # default (0 = unlimited); left-truncate to N chars, prefix "…"
+```
+
 **IP widgets:** `lan_ip` and `tailscale_ip` are opt-in — neither is in the
 default layout. Both take a `format` (default `"{ip}"`) whose `{ip}`
 placeholder is replaced by the selected address (any surrounding label/glyph
@@ -625,13 +779,15 @@ down_format = "TS off"
 
 **Battery widget:** `battery` is opt-in — not in the default layout. It takes
 a `format` (default `"{icon} {percent}%"`) with `{icon}` (level-bucketed,
-charging-aware Nerd-Font glyph), `{percent}`, and `{state}` placeholders, and
-a `down_format` (default `""`, i.e. render nothing) shown when
-`Context.battery` is `None` (no battery, unsupported platform, or a failed
-read) — same collapse-placeholders-to-empty behavior as the IP widgets'
-`down_format`. It's also **threshold-aware** (see Themes below):
-`warn_percent`/`crit_percent` (default 20/10) alert while discharging at or
-below those levels.
+charging-aware Nerd-Font glyph, or the `icon` override below), `{percent}`,
+and `{state}` placeholders, and a `down_format` (default `""`, i.e. render
+nothing) shown when `Context.battery` is `None` (no battery, unsupported
+platform, or a failed read) — same collapse-placeholders-to-empty behavior as
+the IP widgets' `down_format`. It's also **threshold-aware** (see Themes
+below): `warn_percent`/`crit_percent` (default 20/10) alert while discharging
+at or below those levels. An optional `icon` overrides `{icon}` with a fixed
+glyph, replacing the computed one entirely (`None`, the default, keeps the
+computed glyph) — handy for non-Nerd-Font terminals.
 
 ```toml
 [widgets.battery]
@@ -639,20 +795,24 @@ format = "{icon} {percent}%"
 down_format = ""
 warn_percent = 20   # default; badge at/below this % while discharging
 crit_percent = 10   # default; 0 disables a tier
+# icon = "BAT"      # optional; overrides the computed level/charging glyph
 ```
 
 **CPU and memory widgets:** `cpu` and `memory` are in the **default** right
 layout (unlike the opt-in IP/battery widgets above). `cpu` takes a `format`
-(default `"{icon} {percent}%"`) with `{icon}` (nf-md-chip), `{percent}`, and
-`{bar}` (a `bar_width`-cell Unicode block-eighths gauge, default 8)
-placeholders. `memory` takes a `format` (default `"{icon} {used}/{total}"`)
-with `{icon}` (nf-md-memory), `{used}`/`{total}`/`{avail}` (human-readable
-binary sizes, e.g. `6.2G`), `{percent}`, and `{bar}` (`bar_width`, default 8)
-placeholders. Both take a `down_format` (default `""`, i.e. render nothing)
-shown when the platform read failed or is unsupported — same
-collapse-placeholders-to-empty behavior as `battery`'s `down_format`. Both are
-also **threshold-aware** (see Themes below): `warn_percent`/`crit_percent`
-(cpu default 80/95, memory default 80/92) alert at or above those levels.
+(default `"{icon} {percent}%"`) with `{icon}` (nf-md-chip, or the `icon`
+override below), `{percent}`, and `{bar}` (a `bar_width`-cell Unicode
+block-eighths gauge, default 8) placeholders. `memory` takes a `format`
+(default `"{icon} {used}/{total}"`) with `{icon}` (nf-md-memory, or its own
+`icon` override), `{used}`/`{total}`/`{avail}` (human-readable binary sizes,
+e.g. `6.2G`), `{percent}`, and `{bar}` (`bar_width`, default 8) placeholders.
+Both take a `down_format` (default `""`, i.e. render nothing) shown when the
+platform read failed or is unsupported — same collapse-placeholders-to-empty
+behavior as `battery`'s `down_format`. Both are also **threshold-aware** (see
+Themes below): `warn_percent`/`crit_percent` (cpu default 80/95, memory
+default 80/92) alert at or above those levels. Each also takes an optional
+`icon` that overrides `{icon}` with a fixed glyph instead of the built-in
+Nerd-Font one (`None`, the default, keeps the built-in glyph).
 
 ```toml
 [widgets.cpu]
@@ -661,6 +821,7 @@ bar_width = 8
 down_format = ""
 warn_percent = 80   # default; 0 disables a tier
 crit_percent = 95   # default
+# icon = "CPU"      # optional; overrides the built-in Nerd-Font glyph
 
 [widgets.memory]
 format = "{icon} {used}/{total}"     # default; or "{icon} {bar} {percent}%"
@@ -668,6 +829,7 @@ bar_width = 8
 down_format = ""
 warn_percent = 80   # default; 0 disables a tier
 crit_percent = 92   # default
+# icon = "MEM"      # optional; overrides the built-in Nerd-Font glyph
 ```
 
 **Load average widget:** `loadavg` is in the **default** right layout. It takes
@@ -759,7 +921,12 @@ widget or plugin name longer than 15 bytes is simply not clickable (tmux's
 
 A plugin author should pick a name (the `.wasm` stem) that is ≤ 15 bytes,
 avoids the reserved name `window`, and sticks to `[A-Za-z0-9_-]`, since it
-becomes a tmux `range=user|<name>` argument verbatim.
+becomes a tmux `range=user|<name>` argument verbatim. One more name worth
+avoiding: `cpu-sample` — the `cpu` widget's persisted sample cache (see
+`cpu.rs` above) writes a flat file at `<state_root>/cpu-sample`, which
+collides with a plugin's own state directory of the same name; the collision
+degrades gracefully (a failed create/rename is `warn!`-logged, never
+panics), but is still best avoided.
 
 **Window pill (`[theme]`):** the window list renders as a rounded pill (see
 Render pipeline). Six optional `[theme]` fields override the defaults — active
@@ -844,6 +1011,13 @@ default (matched against the full URL/path string), or a **regex** when
 prefixed `re:` — regex entries are **anchored to a full-string match** (uniform
 with globs); to match a prefix/substring, include `.*` in the pattern (e.g.
 `re:https://wttr\.in/.*`).
+
+A plugin may also declare a capability **manifest** — a sidecar
+`<plugin_dir>/<name>.toml` (or an embedded `rustline-manifest` wasm custom
+section) listing `requested_urls`/`requested_paths` — which `rustline plugin
+approve <name>` turns into exactly those allowlist entries above, after
+confirmation (see CLI above). A manifest alone grants nothing; only
+`approve` (or hand-editing the config) ever widens an allowlist.
 
 **Logging:** a `[log]` table controls the two sinks. `rustline` logs to a
 rotated file (`$XDG_DATA_HOME/rustline/rustline.log`, default level `info`) and
@@ -1031,17 +1205,72 @@ branch on platform.
   alone didn't exercise, each also demonstrating `rl_log` on its one failure
   path, plus a generic `just build-plugin NAME` recipe (`build-weather` is
   now an alias for it).
-- Historical sparkline (last-X-seconds graph) for `cpu`/`memory` — today's
-  reads are single-shot, stateless snapshots; a sparkline needs
-  cross-invocation sample persistence, deferred to its own spec.
+- Done: widget-config polish — `cwd` path shortening (`max_depth`/`max_len`/
+  `abbreviate`, layered onto the existing `abbreviate_home`), a `format`
+  option on `hostname`/`pane_id` (previously fixed strings), and an `icon`
+  override on `battery`/`cpu`/`memory` that replaces the computed glyph
+  (`None` default keeps it) — every new option defaults to reproduce the
+  pre-feature output byte-for-byte.
+- Done: `Context::default()` (an empty, epoch-timestamped instance for
+  struct-update-syntax test/synthetic construction) and `Registry`
+  `WidgetDescriptor`/`WidgetSource` + `descriptors()`/`available_names()`/
+  `register_described` — enumerable widget metadata without building an
+  instance, not yet exposed as its own CLI subcommand.
+- Done: typed WASM guest input — `rustline-abi::{WireContext, WireWindowCtx,
+  GuestRender}` (chrono-free mirrors of `Context`/`WindowCtx` plus the whole
+  `render` input shape), so a guest deserializes a typed struct instead of
+  hand-walking `serde_json::Value`; `plugin new`'s scaffold and the
+  `counter`/`filewatch`/`httpget` examples all use them.
+- Done: read-gating by layout — `battery` and the IP-widgets' interface scan
+  now go through the same `layout_needs` gate as `cpu`/`memory`/`git`/`disk`
+  (previously always read), and `build_window_context` is a lean,
+  minimal-`Context` builder (`Context.window` only, via `..Context::default()`)
+  that skips every other read `render window` never needs — it no longer
+  routes through `build_region_context` at all.
+- Done: cpu sample cache — Linux's `read_cpu` now persists a
+  `<state_root>/cpu-sample` snapshot across invocations and takes a
+  zero-sleep fast path when it's fresh (within 60s), falling back to the
+  classic two-sample ~120 ms read only on a cold/stale cache; see `cpu.rs`
+  above (this replaces the prior "stateless two-sample delta" description).
+- Done: `rustline doctor` — pass/warn/fail diagnostics for tmux ≥ 3.1, mouse
+  mode, a truecolor terminal, `rustline` on `$PATH`, and the managed
+  tmux-conf block, plus the resolved config/themes/plugin/log paths;
+  read-only, never writes.
+- Done: `rustline completions <shell>` — shell-completion scripts via
+  `clap_complete`.
+- Done: `rustline config path|edit|validate` — resolved-path printing,
+  `$EDITOR` integration (scaffolding the file from the starter template if
+  absent), and strict validation that surfaces `toml`'s own parse error
+  instead of `Config::load`'s silent fallback.
+- Done: `init --dry-run` (preview config.toml + the tmux block, each with a
+  line diff against any existing file, writing nothing), `init --uninstall`
+  (strip the managed tmux block, backing it up first), and `init --binary
+  <path>` (override the binary path baked into the tmux block, default the
+  running binary's own resolved absolute path) — the tmux block now calls
+  that absolute path rather than a bare `rustline` (see tmux integration
+  model above).
+- Done: `theme new --edit` — open the freshly scaffolded theme file in
+  `$EDITOR` and print the `theme use <name>` follow-up.
+- Done: `rl_log` — a capability-free guest-logging host function (the one
+  intentional exception to invariant N1) so a plugin can log its own
+  failures through the host's `tracing` subscriber; `counter`/`filewatch`/
+  `httpget` all use it on their one failure path.
+- Done: plugin capability manifests + `rustline plugin approve` —
+  `PluginManifest`/`resolve_manifest` (a sidecar `<name>.toml`, or an
+  embedded `rustline-manifest` wasm custom section) declares a plugin's
+  wanted `allowed_urls`/`allowed_paths`; `approve` turns that declaration
+  into an allowlist write after confirmation (or `--yes`), never widening
+  beyond what's declared. See the [design
+  spec](docs/superpowers/specs/2026-07-22-rustline-whatsnext-bundle-design.md)
+  / [plan](docs/superpowers/plans/2026-07-22-rustline-whatsnext-bundle.md) for
+  the full 22-item, 5-phase bundle these entries summarize.
+- Historical sparkline (last-X-seconds graph) for `cpu`/`memory` — `cpu`'s
+  `read_cpu` now persists one sample across invocations (the `cpu-sample`
+  cache, above), but only the single latest reading; a sparkline needs a
+  short rolling history of samples (and the same treatment for `memory`,
+  which still reads a single-shot snapshot), deferred to its own spec.
 - Plugin auto-download by `owner/repo` (today, `source` is just a config note;
   installing a plugin means putting the `.wasm` in the plugin dir yourself).
-- An interactive capability-approval flow (config/CLI allowlist edits are
-  manual for now).
-- Guest-side logging of state-write failures (currently silent in the guest;
-  the host already logs its side).
-- Optionally moving `Context`/`WindowCtx` into `rustline-abi` for a fully
-  typed guest input (today the guest parses the JSON `Context` by hand).
 - Optional daemon front-end for sub-second / push-driven widgets (the pure core
   and the wasm host are already daemon-ready).
 - Per-widget richer customization; naming the widget in the panic-guard `warn!`.
@@ -1066,3 +1295,5 @@ branch on platform.
 - Plan (click-toggle widgets): `docs/superpowers/plans/2026-07-21-rustline-click-toggle-widgets.md`
 - Spec (themes/theme picker): `docs/superpowers/specs/2026-07-21-rustline-themes-theme-picker-design.md`
 - Plan (themes/theme picker): `docs/superpowers/plans/2026-07-21-rustline-themes-theme-picker.md`
+- Spec (whats-next bundle): `docs/superpowers/specs/2026-07-22-rustline-whatsnext-bundle-design.md`
+- Plan (whats-next bundle): `docs/superpowers/plans/2026-07-22-rustline-whatsnext-bundle.md`
