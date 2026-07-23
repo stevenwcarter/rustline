@@ -47,16 +47,27 @@ pub(crate) fn read_interfaces() -> Vec<NetIface> {
         .collect()
 }
 
+/// Whether `layout` (a region's widget-name list) references `name`.
+///
+/// The one predicate behind every "only pay for a read the region actually
+/// renders" gate below (cpu/memory/git/disk/battery/interfaces) — factored
+/// out so each gate is the same one-line check instead of its own
+/// `.iter().any(...)`.
+fn layout_needs(layout: &[String], name: &str) -> bool {
+    layout.iter().any(|w| w == name)
+}
+
 /// Build the [`Context`] for rendering a left/right region from the tmux
 /// format-variable values passed on the command line, plus live host state.
 ///
-/// `layout` is the region's widget-name list; the expensive cpu/memory/git/disk
-/// reads (`read_cpu` sleeps ~120ms on Linux; `read_memory` on macOS spawns
-/// `vm_stat`; `read_git` shells out to `git`; `read_disk` calls `statvfs(2)`)
-/// are taken ONLY when that region actually renders them — the same "pay only
-/// for what the region references" gating `register_plugins` uses.
-/// `disk_mount` is the configured `[widgets.disk].mount` (unused unless
-/// `layout` names `disk`).
+/// `layout` is the region's widget-name list; the expensive cpu/memory/git/
+/// disk/battery/interfaces reads (`read_cpu` sleeps ~120ms on Linux;
+/// `read_memory` on macOS spawns `vm_stat`; `read_git` shells out to `git`;
+/// `read_disk` calls `statvfs(2)`; `read_battery` scans sysfs; `read_interfaces`
+/// calls `getifaddrs(3)`) are taken ONLY when that region actually renders
+/// them — the same "pay only for what the region references" gating
+/// `register_plugins` uses. `disk_mount` is the configured
+/// `[widgets.disk].mount` (unused unless `layout` names `disk`).
 pub fn build_region_context(
     args: &RegionArgs,
     layout: &[String],
@@ -64,13 +75,24 @@ pub fn build_region_context(
     disk_mount: &str,
 ) -> Context {
     let pane_current_path = args.pane_path.clone().unwrap_or_default();
-    let git = if layout.iter().any(|w| w == "git") {
+    let git = if layout_needs(layout, "git") {
         crate::git::read_git(&pane_current_path)
     } else {
         None
     };
-    let disk = if layout.iter().any(|w| w == "disk") {
+    let disk = if layout_needs(layout, "disk") {
         crate::disk::read_disk(disk_mount)
+    } else {
+        None
+    };
+    // Interfaces feed both IP widgets, so either one names the read.
+    let interfaces = if layout_needs(layout, "lan_ip") || layout_needs(layout, "tailscale_ip") {
+        read_interfaces()
+    } else {
+        Vec::new()
+    };
+    let battery = if layout_needs(layout, "battery") {
+        crate::battery::read_battery()
     } else {
         None
     };
@@ -84,14 +106,14 @@ pub fn build_region_context(
         loadavg: read_loadavg(),
         now: chrono::Local::now(),
         window: None,
-        interfaces: read_interfaces(),
-        battery: crate::battery::read_battery(),
-        cpu: if layout.iter().any(|w| w == "cpu") {
+        interfaces,
+        battery,
+        cpu: if layout_needs(layout, "cpu") {
             crate::cpu::read_cpu()
         } else {
             None
         },
-        memory: if layout.iter().any(|w| w == "memory") {
+        memory: if layout_needs(layout, "memory") {
             crate::memory::read_memory()
         } else {
             None
@@ -110,9 +132,10 @@ pub fn build_region_context(
 /// pane in play for a window segment) and layers on the window-specific
 /// fields from `args`.
 pub fn build_window_context(args: &WindowArgs, theme: &Theme) -> Context {
-    // Windows render only the window pill (builtins, never cpu/memory/disk),
-    // so pass an empty layout and an unused mount: no cpu/memory sampling, no
-    // per-window `read_cpu` sleep.
+    // Windows render only the window pill (builtins, never cpu/memory/disk/
+    // battery/an IP widget), so pass an empty layout and an unused mount: no
+    // cpu/memory sampling, no per-window `read_cpu` sleep, no sysfs/getifaddrs
+    // reads either.
     let mut ctx = build_region_context(&RegionArgs::default(), &[], theme, "");
     ctx.window = Some(WindowCtx {
         index: args.index.clone(),
@@ -144,13 +167,65 @@ mod tests {
                 .all(|i| i.ipv4 != std::net::Ipv4Addr::LOCALHOST),
             "loopback IPv4 must be filtered: {ifaces:?}"
         );
-        // And build_region_context wires it in (field is populated by the same read).
-        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
+        // And build_region_context wires it in when an IP widget is in the
+        // layout (field is populated by the same read).
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &["lan_ip".to_string()],
+            &Theme::default(),
+            "",
+        );
         assert!(
             ctx.interfaces
                 .iter()
                 .all(|i| i.ipv4 != std::net::Ipv4Addr::LOCALHOST)
         );
+    }
+
+    #[test]
+    fn layout_needs_true_when_present_false_when_absent() {
+        let layout = ["cpu".to_string(), "battery".to_string()];
+        assert!(layout_needs(&layout, "cpu"));
+        assert!(layout_needs(&layout, "battery"));
+        assert!(!layout_needs(&layout, "memory"));
+        assert!(!layout_needs(&[], "cpu"));
+    }
+
+    #[test]
+    fn interfaces_sampled_only_when_region_names_an_ip_widget() {
+        // Empty layout: getifaddrs never runs, so interfaces stays at its
+        // not-found value (empty), never a stale/fabricated read.
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
+        assert!(ctx.interfaces.is_empty());
+
+        // Named in the layout (either IP widget triggers the shared read):
+        // the real read runs, matching a direct read_interfaces() call.
+        for name in ["lan_ip", "tailscale_ip"] {
+            let ctx = build_region_context(
+                &RegionArgs::default(),
+                &[name.to_string()],
+                &Theme::default(),
+                "",
+            );
+            assert_eq!(ctx.interfaces, read_interfaces());
+        }
+    }
+
+    #[test]
+    fn battery_sampled_only_when_region_names_it() {
+        // Empty layout: the sysfs scan never runs, so it stays None.
+        let ctx = build_region_context(&RegionArgs::default(), &[], &Theme::default(), "");
+        assert!(ctx.battery.is_none());
+
+        // Named in the layout: the real read runs, matching a direct
+        // read_battery() call.
+        let ctx = build_region_context(
+            &RegionArgs::default(),
+            &["battery".to_string()],
+            &Theme::default(),
+            "",
+        );
+        assert_eq!(ctx.battery, crate::battery::read_battery());
     }
 
     #[test]
