@@ -794,4 +794,37 @@ format = "USER {percent}%"
         assert_eq!(d.clock, ClockStyle::TwentyFour);
         assert_eq!(d.interval, 1);
     }
+
+    #[test]
+    fn line_diff_identical_input_is_empty() {
+        let text = "base = \"default\"\nfg = \"white\"";
+        assert_eq!(line_diff(text, text), "");
+    }
+
+    #[test]
+    fn line_diff_all_old_deleted_when_new_is_empty() {
+        let old = "base = \"default\"\nfg = \"white\"";
+        assert_eq!(line_diff(old, ""), "-base = \"default\"\n-fg = \"white\"\n");
+    }
+
+    #[test]
+    fn line_diff_all_new_added_when_old_is_empty() {
+        let new = "base = \"default\"\nfg = \"white\"";
+        assert_eq!(line_diff("", new), "+base = \"default\"\n+fg = \"white\"\n");
+    }
+
+    #[test]
+    fn line_diff_mixed_change_marks_only_the_changed_line() {
+        // The realistic case: one line changes, one is untouched. The
+        // changed line must show up as both a deletion (old) and an
+        // addition (new); the unchanged `fg` line must not appear at all.
+        let old = "base = \"default\"\nfg = \"white\"";
+        let new = "base = \"nord\"\nfg = \"white\"";
+        let diff = line_diff(old, new);
+        assert_eq!(diff, "-base = \"default\"\n+base = \"nord\"\n");
+        assert!(
+            !diff.contains("fg"),
+            "unchanged line must be omitted: {diff}"
+        );
+    }
 }

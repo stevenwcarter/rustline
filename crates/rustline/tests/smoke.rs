@@ -359,6 +359,82 @@ fn init_dry_run_with_existing_files_shows_diff_and_writes_nothing() {
 }
 
 #[test]
+fn init_dry_run_print_wins_and_writes_nothing() {
+    // `--print` wins over `--dry-run`: stdout is the legacy one-line tmux
+    // block only (no dry-run `# --- ... ---` headers), exit 0, no files or
+    // backups written.
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.arg("init").arg("--dry-run").arg("--print");
+    cmd.env("HOME", &home)
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+        .env_remove("RUST_LOG");
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "--print wins, exits 0; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("#('"), "shell-quotes the binary path: {s}");
+    assert!(s.contains("' render left"), "prints the raw block: {s}");
+    assert!(
+        !s.contains("# --- "),
+        "no dry-run artifact headers when --print wins: {s}"
+    );
+    assert!(!s.contains("set -g status 2"), "one-line by default");
+
+    let cfg_path = tmp.path().join("cfg").join("rustline").join("config.toml");
+    assert!(!cfg_path.exists(), "--print must not write config.toml");
+    let tmux_path = home.join(".tmux.conf");
+    assert!(!tmux_path.exists(), "--print must not write tmux.conf");
+    assert!(
+        !Path::new(&format!("{}.rustline.bak", cfg_path.display())).exists(),
+        "--print must not write a config backup"
+    );
+    assert!(
+        !Path::new(&format!("{}.rustline.bak", tmux_path.display())).exists(),
+        "--print must not write a tmux backup"
+    );
+}
+
+#[test]
+fn init_dry_run_non_tty_without_defaults_hits_terminal_guard() {
+    // `--dry-run` must not bypass the terminal-required guard: without a
+    // TTY and without `--defaults`, `run` never gets far enough to compute
+    // answers, so it exits the same way plain `init` does (exit 2), and
+    // writes nothing.
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.arg("init").arg("--dry-run"); // stdin is not a TTY under Command
+    cmd.env("HOME", &home)
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+        .env_remove("RUST_LOG");
+    let out = cmd.output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "errors without a TTY and no --defaults/--print; stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("--defaults") || stderr.contains("--print"),
+        "hints flags: {stderr}"
+    );
+
+    let cfg_path = tmp.path().join("cfg").join("rustline").join("config.toml");
+    assert!(!cfg_path.exists(), "must not write config.toml");
+    let tmux_path = home.join(".tmux.conf");
+    assert!(!tmux_path.exists(), "must not write tmux.conf");
+}
+
+#[test]
 fn init_non_tty_without_flags_errors() {
     let tmp = tempdir().unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
