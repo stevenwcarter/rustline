@@ -12,6 +12,7 @@ use rustline_core::{Context, RANGE_NAME_MAX_BYTES, Segment, Widget};
 use crate::abi::{RenderInput, parse_render_output};
 use crate::capability::CapabilityCtx;
 use crate::fetch::UreqFetcher;
+use crate::paths::wasmtime_cache_config_path;
 use crate::perform::{
     perform_file_read, perform_file_write, perform_http_get, perform_http_get_cached, perform_log,
     perform_state_read, perform_state_write,
@@ -70,16 +71,52 @@ host_fn!(rl_log(user_data: CapabilityCtx; level: String, msg: String) -> String 
     Ok(String::new())
 });
 
+/// Whether [`build_plugin_with_cache`] points wasmtime at its on-disk
+/// compilation cache. Production always uses [`CompileCache::Enabled`]; the
+/// bench's build-timing A/B pass uses [`CompileCache::Disabled`] to isolate the
+/// Cranelift compile cost from the warm-cache deserialize path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompileCache {
+    /// Point wasmtime at the on-disk compile cache (the production default).
+    Enabled,
+    /// Force a full Cranelift compile every build (cache turned off).
+    Disabled,
+}
+
 /// Build an Extism plugin from wasm bytes with wasi off, fuel + timeout +
 /// memory caps, and the seven host functions (six capability-gated, plus the
-/// capability-free `rl_log`) bound to this instance's `CapabilityCtx`.
+/// capability-free `rl_log`) bound to this instance's `CapabilityCtx`. Uses the
+/// on-disk compile cache (see [`build_plugin_with_cache`]).
 pub fn build_plugin(wasm: &[u8], ctx: CapabilityCtx) -> Result<extism::Plugin, extism::Error> {
+    build_plugin_with_cache(wasm, ctx, CompileCache::Enabled)
+}
+
+/// [`build_plugin`] with explicit control over the wasmtime compile cache.
+///
+/// With [`CompileCache::Enabled`], wasmtime is pointed at an on-disk cache under
+/// the state root so a later cold spawn deserializes an unchanged plugin's
+/// precompiled artifact instead of re-running Cranelift. Cache setup is
+/// best-effort: if `wasmtime_cache_config_path()` can't produce a config, the
+/// build simply proceeds without a cache — never fatal (invariant N2: a plugin
+/// never breaks the bar). Guest authority is untouched either way (N1–N4).
+pub fn build_plugin_with_cache(
+    wasm: &[u8],
+    ctx: CapabilityCtx,
+    cache: CompileCache,
+) -> Result<extism::Plugin, extism::Error> {
     let ud = UserData::new(ctx);
     let manifest = Manifest::new([Wasm::data(wasm.to_vec())])
         .with_timeout(Duration::from_secs(10))
         .with_memory_max(256); // 256 pages ≈ 16 MB
-    PluginBuilder::new(manifest)
-        .with_wasi(false)
+    let mut builder = PluginBuilder::new(manifest).with_wasi(false);
+    builder = match cache {
+        CompileCache::Enabled => match wasmtime_cache_config_path() {
+            Some(cfg) => builder.with_cache_config(cfg),
+            None => builder,
+        },
+        CompileCache::Disabled => builder.with_cache_disabled(),
+    };
+    builder
         .with_fuel_limit(500_000_000)
         .with_function("rl_http_get", [PTR], [PTR], ud.clone(), rl_http_get)
         .with_function(

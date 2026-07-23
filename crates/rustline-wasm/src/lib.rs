@@ -26,9 +26,12 @@ use rustline_core::{
 
 pub use capability::{CapabilityCtx, DenialKind, DenialObserver};
 pub use denials::{Denial, FileDenialObserver, denials_path, read_denials};
-pub use host::{WasmWidget, build_plugin};
+pub use host::{CompileCache, WasmWidget, build_plugin, build_plugin_with_cache};
 pub use manifest::{PluginManifest, resolve_manifest};
-pub use paths::{data_root, default_plugin_dir, expand_tilde, state_root};
+pub use paths::{
+    data_root, default_plugin_dir, ensure_wasmtime_cache_config, expand_tilde, state_root,
+    wasmtime_cache_config_path,
+};
 
 /// The outcome of comparing the host's [`ABI_VERSION`] against a guest's
 /// declared version (its optional `abi_version` export).

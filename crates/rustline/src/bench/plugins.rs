@@ -12,6 +12,7 @@
 use std::path::Path;
 
 use rustline_core::{Config, Registry};
+use rustline_wasm::{CapabilityCtx, CompileCache, build_plugin_with_cache, state_root};
 
 use super::fixture::fabricated_context;
 use super::harness::{Group, Row, measure, summarize};
@@ -119,6 +120,62 @@ pub fn bench_plugins(
 
     Group {
         title: "Plugins — real preserved state".into(),
+        note: None,
+        rows,
+    }
+}
+
+/// Time a full fresh `build_plugin` per plugin, wasmtime compile cache OFF vs
+/// ON — the Cranelift-compile cost W43 targets, which the preserved-state pass
+/// above does NOT isolate (it clones one already-compiled `Arc<Plugin>`). Each
+/// row instantiates from raw bytes every iteration:
+///
+/// - **cache OFF** (`with_cache_disabled`): every build is a full Cranelift
+///   compile — the cost each cold `rustline render` process pays today.
+/// - **cache ON**: warmed first (the warmup build compiles + writes the on-disk
+///   artifact), so the timed builds measure the warm-cache *deserialize* path —
+///   what a cold spawn pays once the cache is populated.
+///
+/// The delta between the two is the per-plugin cold-start compile saving.
+pub fn bench_plugin_builds(cfg: &Config, plugin_dir: &Path, real_iters: usize) -> Group {
+    let stems = discover_wasm_stems(plugin_dir);
+    if stems.is_empty() {
+        return Group {
+            title: "Plugins — build_plugin compile cache".into(),
+            note: Some(format!("no *.wasm in {} — skipped", plugin_dir.display())),
+            rows: Vec::new(),
+        };
+    }
+
+    let root = state_root();
+    let mut rows = Vec::new();
+    for stem in &stems {
+        let Ok(bytes) = std::fs::read(plugin_dir.join(format!("{stem}.wasm"))) else {
+            continue;
+        };
+        let pc = cfg.plugins.get(stem).cloned().unwrap_or_default();
+        let build = |cache: CompileCache| {
+            let ctx = CapabilityCtx::from_config(stem, &pc, root.clone());
+            let _ = build_plugin_with_cache(&bytes, ctx, cache);
+        };
+
+        // Cache OFF: no warmup needed — every build is a full compile anyway.
+        let off = measure(1, real_iters, || build(CompileCache::Disabled));
+        rows.push(Row {
+            label: format!("{stem} (build_plugin: cache OFF — full Cranelift compile)"),
+            stats: summarize(&off),
+        });
+        // Cache ON: the warmup build populates the on-disk cache so the timed
+        // builds measure the deserialize path.
+        let on = measure(1, real_iters, || build(CompileCache::Enabled));
+        rows.push(Row {
+            label: format!("{stem} (build_plugin: cache ON — warm deserialize)"),
+            stats: summarize(&on),
+        });
+    }
+
+    Group {
+        title: "Plugins — build_plugin compile cache (cache OFF vs ON)".into(),
         note: None,
         rows,
     }

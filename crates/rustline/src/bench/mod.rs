@@ -61,6 +61,14 @@ pub fn run(args: &BenchArgs, cfg: &Config) {
             args.iters,
             args.real_iters,
         ));
+        // Build-timing A/B: full fresh `build_plugin` with the compile cache
+        // OFF vs ON — the Cranelift-compile cost W43 targets, which the
+        // preserved-state pass above doesn't isolate.
+        groups.push(plugins::bench_plugin_builds(
+            cfg,
+            &plugin_dir,
+            args.real_iters,
+        ));
     }
 
     let markdown = args.format == "markdown";
