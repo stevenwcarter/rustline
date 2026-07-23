@@ -95,20 +95,11 @@ mod tests {
             pane_current_path: "/".into(),
             home: "/home/steve".into(),
             hostname: "h".into(),
-            loadavg: None,
             now: Local
                 .with_ymd_and_hms(2026, 7, 20, 17, 49, 0)
                 .single()
                 .unwrap(),
-            window: None,
-            interfaces: Vec::new(),
-            battery: None,
-            cpu: None,
-            memory: None,
-            os: String::new(),
-            arch: String::new(),
-            toggled: Default::default(),
-            colors: Default::default(),
+            ..Default::default()
         }
     }
 

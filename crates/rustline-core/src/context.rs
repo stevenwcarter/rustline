@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 
 /// Metadata about a single tmux window, used to render per-window segments
@@ -112,6 +112,37 @@ pub struct Context {
     pub colors: crate::ThemeColors,
 }
 
+/// An empty, epoch-timestamped `Context`. Exists so future fields (e.g. git
+/// or disk status) can be added without editing every test/synthetic
+/// construction site — sites that only care about a few fields can use
+/// struct-update syntax (`Context { session_name: "0".into(), ..Default::default() }`)
+/// instead of spelling out every field.
+impl Default for Context {
+    fn default() -> Self {
+        Context {
+            session_name: String::new(),
+            window_index: String::new(),
+            pane_index: String::new(),
+            pane_current_path: String::new(),
+            home: String::new(),
+            hostname: String::new(),
+            loadavg: None,
+            // A known-valid literal timestamp (the Unix epoch), not runtime
+            // input, so unwrapping `single()` here is fine.
+            now: Local.timestamp_opt(0, 0).single().unwrap(),
+            window: None,
+            interfaces: Vec::new(),
+            battery: None,
+            cpu: None,
+            memory: None,
+            os: String::new(),
+            arch: String::new(),
+            toggled: BTreeSet::default(),
+            colors: crate::ThemeColors::default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,7 +161,6 @@ mod tests {
                 .with_ymd_and_hms(2026, 7, 20, 17, 49, 0)
                 .single()
                 .unwrap(),
-            window: None,
             interfaces: vec![NetIface {
                 name: "eth0".into(),
                 ipv4: "192.168.1.20".parse().unwrap(),
@@ -147,9 +177,17 @@ mod tests {
             }),
             os: "linux".into(),
             arch: "x86_64".into(),
-            toggled: BTreeSet::new(),
-            colors: Default::default(),
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn default_context_is_empty_and_epoch() {
+        let ctx = Context::default();
+        assert_eq!(ctx.now.timestamp(), 0);
+        assert!(ctx.session_name.is_empty());
+        assert!(ctx.battery.is_none());
+        assert!(ctx.interfaces.is_empty());
     }
 
     #[test]

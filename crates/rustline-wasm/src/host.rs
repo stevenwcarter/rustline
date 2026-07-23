@@ -165,7 +165,7 @@ mod tests {
 
     /// A minimal `Context` with `toggled` set to `{name}`, for pinning the
     /// host→guest seam that carries click-toggle state across the wasm
-    /// boundary. Field list copied from `rustline-core`'s test `ctx()`.
+    /// boundary. Fields not listed here come from `Context::default()`.
     fn sample_ctx_with_toggle(name: &str) -> Context {
         Context {
             session_name: "0".into(),
@@ -174,17 +174,9 @@ mod tests {
             pane_current_path: "/".into(),
             home: "/home/steve".into(),
             hostname: "h".into(),
-            loadavg: None,
             now: chrono::Local::now(),
-            window: None,
-            interfaces: Vec::new(),
-            battery: None,
-            cpu: None,
-            memory: None,
-            os: String::new(),
-            arch: String::new(),
             toggled: std::collections::BTreeSet::from([name.to_string()]),
-            colors: Default::default(),
+            ..Default::default()
         }
     }
 

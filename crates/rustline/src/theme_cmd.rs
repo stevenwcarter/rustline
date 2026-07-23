@@ -165,8 +165,6 @@ fn sample_context(theme: &Theme, show_alerts: bool) -> Context {
         hostname: "scadrial".into(),
         loadavg: Some([0.42, 0.31, 0.30]),
         now: Local::now(),
-        window: None,
-        interfaces: Vec::new(),
         battery: Some(Battery {
             percent: batt_pct,
             state: BatteryState::Discharging,
@@ -179,8 +177,8 @@ fn sample_context(theme: &Theme, show_alerts: bool) -> Context {
         }),
         os: "linux".into(),
         arch: "x86_64".into(),
-        toggled: Default::default(),
         colors: theme.colors(),
+        ..Default::default()
     }
 }
 
