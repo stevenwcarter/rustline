@@ -145,6 +145,21 @@ pub enum PluginCmd {
     Path(PatternCmd),
     /// Approve a plugin's declared capability manifest into its allowlists.
     Approve(ApproveArgs),
+    /// Scaffold a new WASM guest plugin crate skeleton.
+    New(NewPluginArgs),
+}
+
+/// Arguments for `rustline plugin new`.
+#[derive(Args)]
+pub struct NewPluginArgs {
+    /// The plugin name (becomes the crate name, directory, and `.wasm` stem).
+    pub name: String,
+    /// Directory to scaffold `<name>/` into (default: current directory).
+    #[arg(long)]
+    pub path: Option<String>,
+    /// Overwrite an existing `<name>/` directory.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Arguments for `rustline plugin approve`.

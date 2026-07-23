@@ -3,13 +3,26 @@
 //! so the user's comments and formatting survive.
 
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rustline_core::Config;
 use rustline_wasm::{PluginManifest, resolve_manifest};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
-use crate::cli::{ApproveArgs, PatternCmd, PluginCmd};
+use crate::cli::{ApproveArgs, NewPluginArgs, PatternCmd, PluginCmd};
+
+/// The reserved widget name that a plugin must never claim (it names the
+/// built-in window-list renderer, which isn't a plugin-resolvable slot).
+const RESERVED_PLUGIN_NAME: &str = "window";
+
+/// `tmux`'s `range=user|X` status-range argument is byte-capped; a plugin
+/// name longer than this can never be click-toggleable (invariant #7).
+const MAX_PLUGIN_NAME_BYTES: usize = 15;
+
+/// The embedded `Cargo.toml`/`src/lib.rs` templates `plugin new` scaffolds,
+/// mirroring how `init.rs` embeds its starter config template.
+const PLUGIN_CARGO_TEMPLATE: &str = include_str!("../assets/plugin-cargo.toml.tmpl");
+const PLUGIN_LIB_TEMPLATE: &str = include_str!("../assets/plugin-lib.rs.tmpl");
 
 /// Which allowlist array a pattern command targets.
 enum Kind {
@@ -34,6 +47,7 @@ pub fn run(cmd: PluginCmd, config_path: &Path, plugin_dir: &Path) {
         PluginCmd::Url(pc) => pattern_cmd(pc, Kind::Url, config_path),
         PluginCmd::Path(pc) => pattern_cmd(pc, Kind::Path, config_path),
         PluginCmd::Approve(args) => approve(args, config_path, plugin_dir),
+        PluginCmd::New(args) => new_plugin(&args),
     }
 }
 
@@ -266,6 +280,126 @@ fn write_doc(config_path: &Path, doc: &DocumentMut) {
     }
 }
 
+/// Validate a plugin name: non-empty, only `[A-Za-z0-9_-]` (so `/`, `\`,
+/// `..`, spaces, and dots are all rejected without special-casing each), at
+/// most 15 bytes (tmux's `range=user|X` byte cap — invariant #7, so the
+/// scaffolded plugin stays click-toggleable), and not the reserved name
+/// `window`. Pure and unit-tested so the scaffold command can reject a bad
+/// name before touching disk.
+fn validate_plugin_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("plugin name must not be empty".to_string());
+    }
+    if name == RESERVED_PLUGIN_NAME {
+        return Err(format!("plugin name {RESERVED_PLUGIN_NAME:?} is reserved"));
+    }
+    if name.len() > MAX_PLUGIN_NAME_BYTES {
+        return Err(format!(
+            "plugin name {name:?} is {} bytes; must be at most {MAX_PLUGIN_NAME_BYTES} \
+             (tmux's range=user|X limit)",
+            name.len()
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "plugin name {name:?} may only contain letters, digits, `_`, and `-`"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `plugin new` must refuse to scaffold into a directory that
+/// `dir_exists` without `force`. Factored out so the refusal condition is
+/// unit-testable without exercising `new_plugin`'s `process::exit`.
+fn should_refuse_overwrite(dir_exists: bool, force: bool) -> bool {
+    dir_exists && !force
+}
+
+/// Substitute every `{{name}}` placeholder in an embedded template with
+/// `name`. `name` is already validated to `[A-Za-z0-9_-]`, so it never needs
+/// escaping in the TOML/Rust-string contexts it lands in.
+fn render_template(template: &str, name: &str) -> String {
+    template.replace("{{name}}", name)
+}
+
+/// `rustline plugin new <name> [--path] [--force]`: scaffold a ready-to-edit
+/// WASM guest plugin crate at `<path or cwd>/<name>/` from the embedded
+/// templates, then print the `.wasm` install step and a starter
+/// `[plugins.<name>]` config snippet.
+fn new_plugin(args: &NewPluginArgs) {
+    let name = args.name.as_str();
+    if let Err(e) = validate_plugin_name(name) {
+        eprintln!("invalid plugin name: {e}");
+        std::process::exit(1);
+    }
+    let base = args
+        .path
+        .as_deref()
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let dir = base.join(name);
+    if should_refuse_overwrite(dir.exists(), args.force) {
+        eprintln!(
+            "{} already exists (use --force to overwrite)",
+            dir.display()
+        );
+        std::process::exit(1);
+    }
+    let src_dir = dir.join("src");
+    if let Err(e) = std::fs::create_dir_all(&src_dir) {
+        eprintln!("failed to create {}: {e}", src_dir.display());
+        std::process::exit(1);
+    }
+    if let Err(e) = std::fs::write(
+        dir.join("Cargo.toml"),
+        render_template(PLUGIN_CARGO_TEMPLATE, name),
+    ) {
+        eprintln!("failed to write Cargo.toml: {e}");
+        std::process::exit(1);
+    }
+    if let Err(e) = std::fs::write(
+        src_dir.join("lib.rs"),
+        render_template(PLUGIN_LIB_TEMPLATE, name),
+    ) {
+        eprintln!("failed to write src/lib.rs: {e}");
+        std::process::exit(1);
+    }
+    println!("scaffolded plugin crate at {}", dir.display());
+    print_next_steps(name, &dir);
+}
+
+/// Print the build/install steps and a starter `[plugins.<name>]` config
+/// snippet for a freshly scaffolded plugin at `dir`.
+///
+/// Cargo normalizes a hyphenated package name to underscores for the built
+/// artifact's filename (e.g. `my-widget` builds `my_widget.wasm`), but
+/// plugin discovery matches a plugin's exported `name()` against the
+/// *installed* file's stem (see `rustline-wasm::register_plugins`), so the
+/// `cp` step renames back to the hyphenated form the plugin actually
+/// identifies as.
+fn print_next_steps(name: &str, dir: &Path) {
+    let build_stem = name.replace('-', "_");
+    println!();
+    println!("build it for wasm32 and install it into your plugin dir:");
+    println!();
+    println!("  cd {}", dir.display());
+    println!("  cargo build --release --target wasm32-unknown-unknown");
+    println!(
+        "  cp target/wasm32-unknown-unknown/release/{build_stem}.wasm <plugin_dir>/{name}.wasm"
+    );
+    println!();
+    println!("wire it into config.toml:");
+    println!();
+    println!("[plugins.{name}]");
+    println!("allowed_urls = []");
+    println!("allowed_paths = []");
+    println!();
+    println!("[plugins.{name}.options]");
+    println!("format = \"{name}: hello!\"");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +485,94 @@ mod tests {
         let text = std::fs::read_to_string(&cfg).unwrap();
         assert_eq!(list_of(&text, "w", "allowed_urls"), ["https://a/*"]);
         assert_eq!(list_of(&text, "w", "allowed_paths"), ["/tmp/x"]);
+    }
+
+    #[test]
+    fn validate_plugin_name_accepts_ordinary_names() {
+        assert!(validate_plugin_name("my-widget").is_ok());
+        assert!(validate_plugin_name("w1").is_ok());
+        assert!(validate_plugin_name("under_score").is_ok());
+        // exactly 15 bytes is still allowed
+        assert_eq!("exactly15bytesX".len(), 15);
+        assert!(validate_plugin_name("exactly15bytesX").is_ok());
+    }
+
+    #[test]
+    fn validate_plugin_name_rejects_bad_names() {
+        assert!(validate_plugin_name("has/slash").is_err());
+        assert!(validate_plugin_name("has\\backslash").is_err());
+        assert!(validate_plugin_name("..").is_err());
+        assert!(validate_plugin_name("dot.dot").is_err());
+        assert!(validate_plugin_name("way-too-long-name-16b").is_err()); // >15 bytes
+        assert!(validate_plugin_name("window").is_err()); // reserved
+        assert!(validate_plugin_name("").is_err());
+        assert!(validate_plugin_name("foo bar").is_err()); // space
+    }
+
+    #[test]
+    fn render_template_substitutes_every_occurrence() {
+        let out = render_template("name={{name}} again={{name}}", "my-widget");
+        assert_eq!(out, "name=my-widget again=my-widget");
+    }
+
+    #[test]
+    fn new_plugin_scaffolds_cargo_toml_and_lib_rs() {
+        let tmp = tempfile::tempdir().unwrap();
+        new_plugin(&NewPluginArgs {
+            name: "mywidget".to_string(),
+            path: Some(tmp.path().to_string_lossy().into_owned()),
+            force: false,
+        });
+
+        let dir = tmp.path().join("mywidget");
+        let cargo_toml = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+        assert!(
+            cargo_toml.contains("[workspace]"),
+            "empty workspace table: {cargo_toml}"
+        );
+        assert!(cargo_toml.contains("edition = \"2024\""));
+        assert!(cargo_toml.contains("crate-type = [\"cdylib\"]"));
+        assert!(cargo_toml.contains("name = \"mywidget\""));
+
+        let lib_rs = std::fs::read_to_string(dir.join("src/lib.rs")).unwrap();
+        assert!(lib_rs.contains("WireContext") || lib_rs.contains("GuestRender"));
+        assert!(lib_rs.contains("\"mywidget\""));
+    }
+
+    #[test]
+    fn should_refuse_overwrite_only_when_exists_and_not_forced() {
+        // This is exactly the guard `new_plugin` checks before writing, kept
+        // as a standalone pure predicate so it's testable without exercising
+        // `new_plugin`'s `process::exit` refusal path.
+        assert!(should_refuse_overwrite(true, false));
+        assert!(!should_refuse_overwrite(true, true));
+        assert!(!should_refuse_overwrite(false, false));
+        assert!(!should_refuse_overwrite(false, true));
+    }
+
+    #[test]
+    fn new_plugin_force_overwrites_existing_scaffold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = NewPluginArgs {
+            name: "mywidget".to_string(),
+            path: Some(tmp.path().to_string_lossy().into_owned()),
+            force: false,
+        };
+        new_plugin(&args); // first run: dir doesn't exist yet, succeeds
+
+        // Mutate the scaffolded file to prove a subsequent forced run
+        // actually rewrites it rather than leaving it alone.
+        let cargo_path = tmp.path().join("mywidget").join("Cargo.toml");
+        std::fs::write(&cargo_path, "mutated").unwrap();
+
+        let forced = NewPluginArgs {
+            name: "mywidget".to_string(),
+            path: Some(tmp.path().to_string_lossy().into_owned()),
+            force: true,
+        };
+        new_plugin(&forced);
+        let overwritten = std::fs::read_to_string(&cargo_path).unwrap();
+        assert_ne!(overwritten, "mutated");
+        assert!(overwritten.contains("[workspace]"));
     }
 }

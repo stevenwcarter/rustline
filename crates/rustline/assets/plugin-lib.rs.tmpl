@@ -1,0 +1,79 @@
+//! `{{name}}` rustline plugin.
+//!
+//! TODO: describe what this widget renders.
+//!
+//! Pure logic lives here and is unit-tested on the host target (`cargo
+//! test`); the Extism guest glue below only compiles for wasm32. See
+//! `plugins/weather` in the rustline repo for a complete worked example
+//! (an HTTP fetch through a host capability, TTL caching, click-toggle
+//! support).
+
+/// Substitute the `{name}` placeholder in `format` with this plugin's own
+/// name. TODO: replace with your widget's real formatting logic.
+pub fn render_format(format: &str) -> String {
+    format.replace("{name}", "{{name}}")
+}
+
+#[cfg(target_arch = "wasm32")]
+mod guest {
+    use super::*;
+    use extism_pdk::*;
+    use rustline_abi::{GuestRender, Segment};
+
+    // Host capability functions, imported via `#[host_fn]` and gated by this
+    // plugin's `allowed_urls`/`allowed_paths`/`max_state_bytes` in
+    // config.toml (see `crates/rustline-wasm/src/host.rs` in the rustline
+    // repo for the full set):
+    //
+    //   rl_http_get(url) -> String
+    //   rl_http_get_cached(url, ttl_secs, now) -> String   // TTL-cached GET
+    //   rl_state_read(path) -> String
+    //   rl_state_write(path, contents) -> String
+    //   rl_file_read(path) -> String
+    //   rl_file_write(path, contents) -> String
+    //
+    // Uncomment and adjust as needed, e.g.:
+    //
+    // #[host_fn]
+    // extern "ExtismHost" {
+    //     fn rl_http_get_cached(url: String, ttl_secs: String, now: String) -> String;
+    // }
+
+    #[plugin_fn]
+    pub fn name() -> FnResult<String> {
+        Ok("{{name}}".to_string())
+    }
+
+    #[plugin_fn]
+    pub fn render(input: String) -> FnResult<Json<Vec<Segment>>> {
+        // A malformed input degrades to an empty render (never break the
+        // bar) rather than erroring.
+        let Ok(input) = serde_json::from_str::<GuestRender>(&input) else {
+            return Ok(Json(Vec::new()));
+        };
+
+        // TODO: read your plugin's own options out of `input.config` (an
+        // opaque JSON object forwarded verbatim from
+        // `[plugins.{{name}}.options]` in config.toml), and/or fields off
+        // `input.context` (a `WireContext` — loadavg, battery, cpu, memory,
+        // toggled widgets, theme colors, and more; see
+        // `crates/rustline-abi/src/lib.rs` in the rustline repo).
+        let format = input
+            .config
+            .get("format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("{{name}}: hello!");
+
+        Ok(Json(vec![Segment::new(render_format(format))]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_format_substitutes_name() {
+        assert_eq!(render_format("hello {name}"), "hello {{name}}");
+    }
+}

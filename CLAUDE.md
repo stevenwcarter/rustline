@@ -350,7 +350,17 @@ these shared types, not a design shortcut. Keep them serializable.
   `warn!`s and never panics — a broken toggle must never break the bar).
 - `plugin_cmd.rs` — `rustline plugin …`: `list` reads the effective `Config`;
   `url|path add/remove` mutate the config file in place via `toml_edit`
-  (preserving comments/formatting), creating `[plugins.<name>]` if absent.
+  (preserving comments/formatting), creating `[plugins.<name>]` if absent;
+  `new <name> [--path] [--force]` scaffolds a ready-to-build WASM guest
+  plugin crate from embedded templates (`assets/plugin-cargo.toml.tmpl`/
+  `plugin-lib.rs.tmpl`, mirroring `init.rs`'s `include_str!` approach):
+  `validate_plugin_name` enforces the same `[A-Za-z0-9_-]`/≤15-byte/not-
+  `window` rules as a widget's click-toggle range name (invariant #7), and
+  the generated `src/lib.rs` deserializes the typed `GuestRender`/
+  `WireContext` (not a hand-walked `serde_json::Value`). Refuses to
+  overwrite an existing `<name>/` dir without `--force`; prints the
+  `cargo build --target wasm32-unknown-unknown` + install step and a
+  starter `[plugins.<name>]` config snippet afterward.
 - `theme_cmd.rs` — `rustline theme …`, mirroring `plugin_cmd.rs`'s `toml_edit`
   approach: `list` prints every built-in and themes-dir `*.toml` stem,
   marking the active one (`cfg.theme.base`, default `"default"`) with `*` and
@@ -478,6 +488,14 @@ A global `-v`/`--verbose` (repeatable) raises the **file** log level:
 - `rustline plugin url|path list|add|remove <plugin> [pattern]` — read or
   edit a plugin's `allowed_urls`/`allowed_paths` (`add`/`remove` rewrite the
   config file in place via `toml_edit`, preserving comments/formatting).
+- `rustline plugin new <name> [--path <dir>] [--force]` — scaffold a
+  ready-to-build WASM guest plugin crate at `<dir or cwd>/<name>/`
+  (`Cargo.toml` with an empty `[workspace]` table + edition 2024 + cdylib,
+  and a `src/lib.rs` skeleton using the typed `GuestRender`/`WireContext`),
+  and print the build/install step plus a starter `[plugins.<name>]` config
+  snippet. `<name>` must be `[A-Za-z0-9_-]`, ≤15 bytes, and not `window`
+  (same rule as a widget's click-toggle range name); refuses to overwrite an
+  existing `<name>/` directory without `--force`.
 - `rustline theme list` — every built-in + themes-dir theme, marking the
   active one and any built-in shadowed by a same-named file.
 - `rustline theme show <name>` — ANSI preview of `<name>` (default layout,

@@ -1,0 +1,29 @@
+# Empty [workspace] table: this plugin builds standalone for wasm32 and is
+# NOT a member of any parent Cargo workspace. Declaring its own workspace
+# root here stops cargo from climbing ancestor directories looking for one,
+# which otherwise breaks a build when this crate ends up nested inside
+# another workspace (e.g. a git worktree whose outer Cargo.toml doesn't list
+# this deeper path in `exclude`).
+[workspace]
+
+[package]
+name = "{{name}}"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Guest bindings only compile for the wasm target; `cargo test` on the host
+# builds just the pure logic in src/lib.rs.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+extism-pdk = "1"
+# Point this at your rustline checkout's rustline-abi crate (adjust the
+# relative path if you scaffolded this plugin somewhere other than
+# rustline's own `plugins/` directory), or pin a released version once
+# rustline-abi is published to crates.io.
+rustline-abi = { path = "../../crates/rustline-abi" }

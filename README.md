@@ -494,6 +494,24 @@ rustline plugin list
 rustline plugin url add weather "https://wttr.in/*"
 ```
 
+Scaffold a new plugin crate instead of copying `weather` by hand:
+
+```bash
+rustline plugin new my-widget --path plugins
+```
+
+This writes `plugins/my-widget/Cargo.toml` (edition 2024, `crate-type =
+["cdylib"]`, an empty `[workspace]` table so it builds standalone rather than
+joining rustline's own workspace) and `plugins/my-widget/src/lib.rs` (a
+`name`/`render` skeleton that deserializes the typed `GuestRender`/
+`WireContext` guest input), then prints the `cargo build --target
+wasm32-unknown-unknown` + install command and a starter
+`[plugins.my-widget]` config snippet. The plugin name must be
+`[A-Za-z0-9_-]`, at most 15 bytes, and not `window` — the same rule as a
+widget's [click-to-toggle](#click-to-toggle-widget-views) range name, since
+it becomes a tmux `range=user|<name>` argument verbatim. Pass `--force` to
+overwrite an existing scaffold.
+
 See the [design spec](docs/superpowers/specs/2026-07-20-rustline-wasm-plugins-design.md)
 for the full capability model, config schema, and plugin ABI.
 
