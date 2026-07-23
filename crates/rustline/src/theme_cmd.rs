@@ -4,6 +4,7 @@
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
+use std::process::Command;
 
 use chrono::Local;
 use rustline_core::{
@@ -22,7 +23,12 @@ pub fn run(cmd: ThemeCmd, config_path: &Path, themes_dir: &Path) {
         ThemeCmd::Show { name } => show(&name, themes_dir),
         ThemeCmd::Use { name } => use_theme(&name, config_path, themes_dir),
         ThemeCmd::Pick => pick(config_path, themes_dir),
-        ThemeCmd::New { name, from, force } => new_theme(&name, &from, force, themes_dir),
+        ThemeCmd::New {
+            name,
+            from,
+            force,
+            edit,
+        } => new_theme(&name, &from, force, edit, themes_dir),
     }
 }
 
@@ -357,10 +363,42 @@ fn scaffold_toml(name: &str, from: &str, theme: &Theme) -> String {
     )
 }
 
+/// The action `theme new --edit` takes after scaffolding a theme file. Kept
+/// separate from the actual spawn so the decision ("should we open an
+/// editor, and with what?") is a pure function unit-testable without a real
+/// TTY or `$EDITOR`.
+#[derive(Debug, PartialEq, Eq)]
+enum EditorAction {
+    /// Spawn this editor command (e.g. `$EDITOR`'s value) on the new file.
+    Spawn(String),
+    /// `--edit` was given but `$EDITOR` isn't set: print a hint instead.
+    HintNoEditor,
+    /// Don't open an editor: `--edit` wasn't given, or stdin isn't a TTY.
+    Skip,
+}
+
+/// Decide whether/how to open an editor after `theme new`, from `--edit`,
+/// `$EDITOR`, and whether stdin is a TTY. An unset `$EDITOR` always yields a
+/// hint (regardless of TTY, since printing one is harmless anywhere); a set
+/// `$EDITOR` only spawns on a TTY — handing an interactive editor a
+/// non-interactive stdin (e.g. piped output) would hang or misbehave.
+fn editor_command(edit_flag: bool, editor_env: Option<&str>, is_tty: bool) -> EditorAction {
+    if !edit_flag {
+        return EditorAction::Skip;
+    }
+    match editor_env {
+        None => EditorAction::HintNoEditor,
+        Some(editor) if is_tty => EditorAction::Spawn(editor.to_string()),
+        Some(_) => EditorAction::Skip,
+    }
+}
+
 /// Scaffold `<themes_dir>/<name>.toml` seeded from theme `from` (a themes-dir
 /// file first, then a built-in). Refuses an invalid `name`, an unknown seed,
-/// or overwriting an existing file unless `force`.
-fn new_theme(name: &str, from: &str, force: bool, themes_dir: &Path) {
+/// or overwriting an existing file unless `force`. With `edit`, opens the
+/// new file in `$EDITOR` (see [`editor_command`]) after the follow-up hint
+/// is printed.
+fn new_theme(name: &str, from: &str, force: bool, edit: bool, themes_dir: &Path) {
     if !valid_theme_name(name) {
         eprintln!("invalid theme name: {name:?} (no empty, `/`, `\\`, or `..`)");
         std::process::exit(1);
@@ -407,6 +445,23 @@ fn new_theme(name: &str, from: &str, force: bool, themes_dir: &Path) {
         std::process::exit(1);
     }
     println!("wrote {}", dest.display());
+    println!("run `rustline theme use {name}` to activate it");
+
+    let editor = std::env::var("EDITOR").ok();
+    let is_tty = std::io::stdin().is_terminal();
+    match editor_command(edit, editor.as_deref(), is_tty) {
+        EditorAction::Spawn(editor) => match Command::new(&editor).arg(&dest).status() {
+            Ok(status) if !status.success() => {
+                eprintln!("{editor} exited with {status}");
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("failed to launch editor {editor:?}: {e}"),
+        },
+        EditorAction::HintNoEditor => {
+            println!("set $EDITOR to auto-open the file next time with --edit");
+        }
+        EditorAction::Skip => {}
+    }
 }
 
 /// One selectable theme in the picker: its name, whether it's the active base,
@@ -1003,6 +1058,35 @@ mod tests {
                 .unwrap()
                 .contains("unknown theme: nope")
         );
+    }
+
+    #[test]
+    fn editor_command_spawns_only_with_editor_and_tty() {
+        assert_eq!(
+            editor_command(true, Some("vim"), true),
+            EditorAction::Spawn("vim".to_string())
+        );
+    }
+
+    #[test]
+    fn editor_command_hints_when_editor_unset() {
+        assert_eq!(editor_command(true, None, true), EditorAction::HintNoEditor);
+        // Still just a hint (never a spawn attempt) without a TTY either.
+        assert_eq!(
+            editor_command(true, None, false),
+            EditorAction::HintNoEditor
+        );
+    }
+
+    #[test]
+    fn editor_command_skips_without_tty_even_with_editor_set() {
+        assert_eq!(editor_command(true, Some("vim"), false), EditorAction::Skip);
+    }
+
+    #[test]
+    fn editor_command_skips_when_edit_flag_absent() {
+        assert_eq!(editor_command(false, Some("vim"), true), EditorAction::Skip);
+        assert_eq!(editor_command(false, None, false), EditorAction::Skip);
     }
 
     #[test]

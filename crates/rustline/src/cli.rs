@@ -105,6 +105,9 @@ pub enum ThemeCmd {
         /// Overwrite an existing theme file.
         #[arg(long)]
         force: bool,
+        /// Open the new theme file in `$EDITOR` after writing it (needs a TTY).
+        #[arg(long)]
+        edit: bool,
     },
 }
 

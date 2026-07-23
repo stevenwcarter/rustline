@@ -1059,6 +1059,63 @@ fn completions_prints_nonempty_script_for_each_shell() {
 }
 
 #[test]
+fn theme_new_prints_use_followup() {
+    // `--edit` is deliberately NOT passed, so no editor spawn is attempted.
+    let tmp = tempdir().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["theme", "new", "mytheme"]);
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("theme use mytheme"), "prints the follow-up: {s}");
+    assert!(
+        tmp.path()
+            .join("cfg")
+            .join("rustline")
+            .join("themes")
+            .join("mytheme.toml")
+            .exists(),
+        "scaffold file written"
+    );
+}
+
+#[test]
+fn theme_new_edit_without_editor_hints_and_writes_no_spawn() {
+    // `--edit` with `$EDITOR` unset must degrade to a hint, never attempt to
+    // spawn anything (which would hang this test waiting on a real editor).
+    let tmp = tempdir().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["theme", "new", "mytheme", "--edit"]);
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+        .env_remove("EDITOR");
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("theme use mytheme"), "prints the follow-up: {s}");
+    assert!(s.contains("set $EDITOR"), "hints to set $EDITOR: {s}");
+    assert!(
+        tmp.path()
+            .join("cfg")
+            .join("rustline")
+            .join("themes")
+            .join("mytheme.toml")
+            .exists(),
+        "scaffold file still written"
+    );
+}
+
+#[test]
 fn theme_pick_non_tty_errors_and_writes_nothing() {
     let tmp = tempdir().unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
