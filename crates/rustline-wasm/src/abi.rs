@@ -46,11 +46,18 @@ pub struct CachedHttpResult {
     pub age_secs: i64,
 }
 
-/// What the host passes to a plugin's `render` export.
+/// What the host passes to a plugin's `render` export. `abi_version` carries
+/// the host's `rustline_abi::ABI_VERSION` on the wire; the primary version
+/// handshake, though, happens out-of-band during plugin registration via each
+/// guest's optional `abi_version()` export (see `crate::abi_decision`), not by
+/// a guest reading this field. Existing guests deserialize a `GuestRender`
+/// with no `abi_version` field and no `deny_unknown_fields`, so adding it here
+/// doesn't break them.
 #[derive(Serialize)]
 pub struct RenderInput<'a> {
     pub context: &'a Context,
     pub config: &'a serde_json::Value,
+    pub abi_version: u32,
 }
 
 /// Parse a plugin's `render` output into segments; any malformed output
@@ -181,8 +188,12 @@ mod tests {
         let input = RenderInput {
             context: &ctx,
             config: &config,
+            abi_version: rustline_abi::ABI_VERSION,
         };
         let json = serde_json::to_string(&input).unwrap();
+        // `abi_version` is a top-level field the guest's `GuestRender` doesn't
+        // declare and has no `deny_unknown_fields`, so it must still parse —
+        // pinning that adding the field doesn't break an existing guest.
         let parsed: rustline_abi::GuestRender = serde_json::from_str(&json).unwrap();
         assert!(parsed.context.toggled.contains("weather"));
         assert_eq!(parsed.config["zip"], "48183");

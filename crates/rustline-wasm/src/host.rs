@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use extism::{Manifest, PTR, PluginBuilder, UserData, Wasm, host_fn};
+use rustline_abi::ABI_VERSION;
 use rustline_core::{Context, RANGE_NAME_MAX_BYTES, Segment, Widget};
 
 use crate::abi::{RenderInput, parse_render_output};
@@ -133,6 +134,7 @@ impl Widget for WasmWidget {
         let input = RenderInput {
             context: ctx,
             config: &self.options,
+            abi_version: ABI_VERSION,
         };
         let payload = match serde_json::to_string(&input) {
             Ok(p) => p,
@@ -171,6 +173,7 @@ fn plugin_range_name(name: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use rustline_abi::ABI_VERSION;
     use rustline_core::{Config, Context, Registry};
 
     use super::plugin_range_name;
@@ -201,6 +204,7 @@ mod tests {
         let json = serde_json::to_string(&RenderInput {
             context: &sample_ctx_with_toggle("weather"),
             config: &serde_json::json!({}),
+            abi_version: ABI_VERSION,
         })
         .unwrap();
         assert!(

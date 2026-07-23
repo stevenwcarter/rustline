@@ -13,6 +13,19 @@ use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
+/// The wire-format ABI version. Bump this only when `WireContext`/
+/// `GuestRender`'s shape changes in a way that breaks an existing guest
+/// (removing/renaming a field, changing a type) — a purely additive change (a
+/// new `#[serde(default)]` field) doesn't need a bump, since serde already
+/// tolerates that on both sides.
+///
+/// A guest may export its own `abi_version() -> String` (returning this same
+/// number, stringified); the host compares it against this constant during
+/// plugin registration (`rustline_wasm::abi_decision`) and warns instead of
+/// silently misbehaving when they disagree. A guest with no such export
+/// registers anyway (the legacy path) so existing plugins keep working.
+pub const ABI_VERSION: u32 = 1;
+
 /// A terminal color, expressible in the ways tmux understands colors.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Color {

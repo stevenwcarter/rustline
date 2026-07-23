@@ -18,11 +18,37 @@ pub mod state;
 use std::path::Path;
 use std::sync::Arc;
 
+use rustline_abi::ABI_VERSION;
 use rustline_core::{Config, RANGE_NAME_MAX_BYTES, Registry, WidgetDescriptor, WidgetSource};
 
 pub use host::{WasmWidget, build_plugin};
 pub use manifest::{PluginManifest, resolve_manifest};
 pub use paths::{data_root, default_plugin_dir, expand_tilde, state_root};
+
+/// The outcome of comparing the host's [`ABI_VERSION`] against a guest's
+/// declared version (its optional `abi_version` export).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbiDecision {
+    /// The guest declares the same ABI version as the host — register.
+    Register,
+    /// The guest has no `abi_version` export (a pre-negotiation plugin) —
+    /// register anyway so existing plugins keep working.
+    RegisterLegacy,
+    /// The guest declares a different ABI version — skip; never register.
+    Skip,
+}
+
+/// Decide whether to register a plugin, given the host's ABI version and the
+/// guest's declared version (`None` when the guest has no `abi_version`
+/// export, or its output failed to parse as `u32`). Pure, so it's unit-tested
+/// directly; `register_plugins` is its only caller.
+pub fn abi_decision(host: u32, guest: Option<u32>) -> AbiDecision {
+    match guest {
+        Some(v) if v == host => AbiDecision::Register,
+        None => AbiDecision::RegisterLegacy,
+        Some(_) => AbiDecision::Skip,
+    }
+}
 
 /// Discover `*.wasm` in `plugin_dir` and register each **needed** plugin as a
 /// widget. Only plugins whose filename stem appears in `needed` are
@@ -74,6 +100,30 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
                 continue;
             }
         }
+        // Optional handshake: a guest may export `abi_version() -> String`
+        // declaring the ABI version it was built against. No export (an
+        // existing, pre-negotiation plugin) or an unparseable result both
+        // count as "unknown" and register anyway (invariant N2: a plugin
+        // never breaks the bar just for lacking this export).
+        let guest_abi_version = plugin
+            .call::<&str, &str>("abi_version", "")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok());
+        match abi_decision(ABI_VERSION, guest_abi_version) {
+            AbiDecision::Register => {}
+            AbiDecision::RegisterLegacy => {
+                tracing::info!(plugin = %stem, "plugin has no abi_version export, registering as legacy");
+            }
+            AbiDecision::Skip => {
+                tracing::warn!(
+                    plugin = %stem,
+                    host = ABI_VERSION,
+                    guest = ?guest_abi_version,
+                    "plugin ABI version mismatch, skipping"
+                );
+                continue;
+            }
+        }
         if stem.len() > RANGE_NAME_MAX_BYTES {
             tracing::warn!(plugin = %stem, "plugin name > 15 bytes; not click-toggleable");
         }
@@ -88,5 +138,17 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
             },
             Box::new(move || Box::new((*shared).clone())),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AbiDecision, abi_decision};
+
+    #[test]
+    fn abi_decision_matrix() {
+        assert!(matches!(abi_decision(1, Some(1)), AbiDecision::Register));
+        assert!(matches!(abi_decision(1, None), AbiDecision::RegisterLegacy));
+        assert!(matches!(abi_decision(1, Some(2)), AbiDecision::Skip));
     }
 }

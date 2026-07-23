@@ -6,6 +6,9 @@ license.workspace = true
 
 [dependencies]
 rustline-core = { path = "../rustline-core" }
+# For `ABI_VERSION`, checked against a guest's declared `abi_version()` export
+# during plugin registration (`abi_decision`), and carried on `RenderInput`.
+rustline-abi = { path = "../rustline-abi" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # For parsing capability manifests (sidecar `<name>.toml` and the embedded
@@ -37,7 +40,3 @@ wasm-e2e = []
 [dev-dependencies]
 tempfile = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# The round-trip seam test in `src/abi.rs` names `rustline_abi::WireContext`
-# directly to pin the host `Context` and guest `WireContext` wire shapes
-# together; only needed for tests, so it lives here.
-rustline-abi = { path = "../rustline-abi" }
