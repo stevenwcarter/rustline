@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
+# `GuestRender.config` is an opaque `serde_json::Value` (the plugin's own
+# config table), so serde_json is a normal dependency now; also serves the
+# crate's serde tests. In-memory only — no I/O, keeps the crate chrono-free.
 serde_json = "1"

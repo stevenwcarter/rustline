@@ -58,3 +58,112 @@ pub struct RenderInput<'a> {
 pub fn parse_render_output(s: &str) -> Vec<Segment> {
     serde_json::from_str(s).unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use chrono::{DateTime, Local, TimeZone};
+    use rustline_core::{
+        Battery, BatteryState, Color, Context, CpuUsage, MemInfo, NetIface, ThemeColors, WindowCtx,
+    };
+
+    use super::*;
+
+    /// A representative `Context` exercising every wire field (non-epoch `now`,
+    /// a battery/cpu/memory reading, a non-loopback interface, a toggled entry,
+    /// custom colors, and a current window).
+    fn sample_context() -> Context {
+        Context {
+            session_name: "main".into(),
+            window_index: "2".into(),
+            pane_index: "1".into(),
+            pane_current_path: "/home/steve/src/rustline".into(),
+            home: "/home/steve".into(),
+            hostname: "scadrial".into(),
+            loadavg: Some([0.42, 0.31, 0.29]),
+            now: Local
+                .with_ymd_and_hms(2026, 7, 20, 17, 49, 0)
+                .single()
+                .unwrap(),
+            window: Some(WindowCtx {
+                index: "2".into(),
+                name: "editor".into(),
+                flags: "*".into(),
+                is_current: true,
+            }),
+            interfaces: vec![NetIface {
+                name: "eth0".into(),
+                ipv4: "192.168.1.20".parse().unwrap(),
+            }],
+            battery: Some(Battery {
+                percent: 73,
+                state: BatteryState::Discharging,
+            }),
+            cpu: Some(CpuUsage { percent: 12.5 }),
+            memory: Some(MemInfo {
+                total_bytes: 16 * 1024 * 1024 * 1024,
+                used_bytes: 6 * 1024 * 1024 * 1024,
+                available_bytes: 10 * 1024 * 1024 * 1024,
+            }),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            toggled: BTreeSet::from(["weather".to_string()]),
+            colors: ThemeColors {
+                error: Color::Rgb(1, 2, 3),
+                ..ThemeColors::default()
+            },
+        }
+    }
+
+    /// The load-bearing seam test: the host serializes `&Context` verbatim (see
+    /// `RenderInput`), so the guest-side `WireContext` must parse those exact
+    /// bytes. Pins the two shapes together — if `Context` gains/renames a field
+    /// without a matching `WireContext` change, this fails.
+    #[test]
+    fn wire_context_round_trips_host_context_bytes() {
+        let ctx = sample_context();
+        let json = serde_json::to_string(&ctx).unwrap();
+        let wire: rustline_abi::WireContext = serde_json::from_str(&json).unwrap();
+
+        // `now` crosses as an RFC3339 string that parses back to the instant.
+        let parsed = DateTime::parse_from_rfc3339(&wire.now).unwrap();
+        assert_eq!(parsed, ctx.now);
+
+        assert_eq!(wire.session_name, ctx.session_name);
+        assert_eq!(wire.window_index, ctx.window_index);
+        assert_eq!(wire.pane_index, ctx.pane_index);
+        assert_eq!(wire.pane_current_path, ctx.pane_current_path);
+        assert_eq!(wire.home, ctx.home);
+        assert_eq!(wire.hostname, ctx.hostname);
+        assert_eq!(wire.loadavg, ctx.loadavg);
+        assert_eq!(wire.interfaces, ctx.interfaces);
+        assert_eq!(wire.battery, ctx.battery);
+        assert_eq!(wire.cpu, ctx.cpu);
+        assert_eq!(wire.memory, ctx.memory);
+        assert_eq!(wire.os, ctx.os);
+        assert_eq!(wire.arch, ctx.arch);
+        assert_eq!(wire.toggled, ctx.toggled);
+        assert_eq!(wire.colors, ctx.colors);
+        assert_eq!(
+            wire.window.map(|w| w.is_current),
+            ctx.window.map(|w| w.is_current)
+        );
+    }
+
+    /// The full guest input shape (`GuestRender`) parses the host's
+    /// `RenderInput` JSON: a typed `context` plus the opaque `config` table.
+    #[test]
+    fn guest_render_parses_full_input() {
+        let ctx = sample_context();
+        let config = serde_json::json!({ "zip": "48183" });
+        let input = RenderInput {
+            context: &ctx,
+            config: &config,
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let parsed: rustline_abi::GuestRender = serde_json::from_str(&json).unwrap();
+        assert!(parsed.context.toggled.contains("weather"));
+        assert_eq!(parsed.config["zip"], "48183");
+    }
+}

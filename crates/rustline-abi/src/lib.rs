@@ -1,5 +1,6 @@
 //! rustline-abi: the serde-serializable types that cross the WASM plugin
 //! boundary (Segment/Style/Color). No I/O, no chrono — the wire-format ABI.
+use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
@@ -139,6 +140,62 @@ pub struct CpuUsage {
     pub percent: f32,
 }
 
+/// The guest-side wire mirror of `rustline_core::WindowCtx`. A WASM guest
+/// deserializes this typed struct rather than hand-walking the JSON.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireWindowCtx {
+    pub index: String,
+    pub name: String,
+    pub flags: String,
+    pub is_current: bool,
+}
+
+/// The guest-side, typed mirror of `rustline_core::Context` as it appears on
+/// the WASM wire. Field-for-field identical to `Context` except `now` is a
+/// plain RFC3339 `String` (the host's `DateTime<Local>` serializes to one) and
+/// `window` nests [`WireWindowCtx`], so this crate stays chrono-free. Guests
+/// deserialize this instead of walking an untyped `serde_json::Value`.
+///
+/// The field names and serde behavior must match `Context`'s exactly: the host
+/// serializes `Context` verbatim and this must parse those bytes unchanged (the
+/// round-trip seam test in `rustline-wasm` pins the two together). No
+/// `deny_unknown_fields` — host/guest version skew must stay total, matching
+/// `Context`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WireContext {
+    pub session_name: String,
+    pub window_index: String,
+    pub pane_index: String,
+    pub pane_current_path: String,
+    pub home: String,
+    pub hostname: String,
+    pub loadavg: Option<[f64; 3]>,
+    /// The host's `DateTime<Local>` serialized as an RFC3339 string; a guest
+    /// that needs the instant parses it (`DateTime::parse_from_rfc3339`).
+    pub now: String,
+    pub window: Option<WireWindowCtx>,
+    pub interfaces: Vec<NetIface>,
+    pub battery: Option<Battery>,
+    pub cpu: Option<CpuUsage>,
+    pub memory: Option<MemInfo>,
+    pub os: String,
+    pub arch: String,
+    #[serde(default)]
+    pub toggled: BTreeSet<String>,
+    #[serde(default)]
+    pub colors: ThemeColors,
+}
+
+/// The whole input shape a guest's `render` export receives: the typed
+/// [`WireContext`] plus the opaque plugin `config` table (kept as
+/// `serde_json::Value` so a plugin reads its own keys). Mirrors the host's
+/// `rustline_wasm::abi::RenderInput`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct GuestRender {
+    pub context: WireContext,
+    pub config: serde_json::Value,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +238,75 @@ mod tests {
         let json = serde_json::to_string(&d).unwrap();
         let back: ThemeColors = serde_json::from_str(&json).unwrap();
         assert_eq!(back, d);
+    }
+
+    #[test]
+    fn wire_context_deserializes_representative_literal() {
+        let json = r#"{
+            "session_name":"main","window_index":"2","pane_index":"1",
+            "pane_current_path":"/home/steve/src","home":"/home/steve",
+            "hostname":"scadrial","loadavg":[0.42,0.31,0.29],
+            "now":"2026-07-20T17:49:00-04:00",
+            "window":{"index":"2","name":"editor","flags":"*","is_current":true},
+            "interfaces":[{"name":"eth0","ipv4":"192.168.1.20"}],
+            "battery":{"percent":73,"state":"discharging"},
+            "cpu":{"percent":12.5},
+            "memory":{"total_bytes":100,"used_bytes":40,"available_bytes":60},
+            "os":"linux","arch":"x86_64",
+            "toggled":["weather"],
+            "colors":{"fg":{"Indexed":255},"bar_bg":{"Indexed":234},
+                "success":{"Indexed":35},"info":{"Indexed":39},
+                "warning":{"Indexed":214},"error":{"Rgb":[1,2,3]}}
+        }"#;
+        let wire: WireContext = serde_json::from_str(json).unwrap();
+        assert_eq!(wire.session_name, "main");
+        assert_eq!(wire.now, "2026-07-20T17:49:00-04:00");
+        let win = wire.window.as_ref().unwrap();
+        assert_eq!(win.name, "editor");
+        assert!(win.is_current);
+        assert_eq!(wire.interfaces[0].name, "eth0");
+        assert_eq!(wire.battery.unwrap().percent, 73);
+        assert_eq!(wire.battery.unwrap().state, BatteryState::Discharging);
+        assert!(wire.toggled.contains("weather"));
+        assert_eq!(wire.colors.error, Color::Rgb(1, 2, 3));
+    }
+
+    #[test]
+    fn wire_context_defaults_toggled_and_colors_when_absent() {
+        // A minimal `WireContext` JSON omitting `toggled` and `colors` must
+        // still deserialize (host/guest version skew stays total, matching
+        // `Context`'s `#[serde(default)]` on the same fields).
+        let json = r#"{
+            "session_name":"0","window_index":"0","pane_index":"0",
+            "pane_current_path":"/home/steve","home":"/home/steve",
+            "hostname":"scadrial","loadavg":null,
+            "now":"2026-07-20T17:49:00-04:00",
+            "window":null,"interfaces":[],
+            "battery":null,"cpu":null,"memory":null,
+            "os":"linux","arch":"x86_64"
+        }"#;
+        let wire: WireContext = serde_json::from_str(json).unwrap();
+        assert!(wire.toggled.is_empty());
+        assert_eq!(wire.colors, ThemeColors::default());
+    }
+
+    #[test]
+    fn guest_render_parses_context_and_opaque_config() {
+        let json = r#"{
+            "context":{
+                "session_name":"0","window_index":"0","pane_index":"0",
+                "pane_current_path":"/home/steve","home":"/home/steve",
+                "hostname":"scadrial","loadavg":null,
+                "now":"2026-07-20T17:49:00-04:00",
+                "window":null,"interfaces":[],
+                "battery":null,"cpu":null,"memory":null,
+                "os":"linux","arch":"x86_64","toggled":["weather"]
+            },
+            "config":{"zip":"48183","refresh_secs":1800}
+        }"#;
+        let input: GuestRender = serde_json::from_str(json).unwrap();
+        assert!(input.context.toggled.contains("weather"));
+        assert_eq!(input.config["zip"], "48183");
+        assert_eq!(input.config["refresh_secs"], 1800);
     }
 }

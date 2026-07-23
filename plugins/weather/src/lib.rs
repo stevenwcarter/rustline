@@ -89,7 +89,7 @@ pub fn select_weather_format<'a>(toggled: bool, format: &'a str, alt_format: &'a
 mod guest {
     use super::*;
     use extism_pdk::*;
-    use rustline_abi::Segment;
+    use rustline_abi::{GuestRender, Segment};
     use serde_json::Value;
 
     #[host_fn]
@@ -104,18 +104,18 @@ mod guest {
 
     #[plugin_fn]
     pub fn render(input: String) -> FnResult<Json<Vec<Segment>>> {
-        let v: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
-        let now = v["context"]["now"].as_str().unwrap_or_default().to_string();
-        let cfg = &v["config"];
+        // Parse the typed guest input; a malformed input degrades to an empty
+        // render (never break the bar) rather than erroring.
+        let Ok(input) = serde_json::from_str::<GuestRender>(&input) else {
+            return Ok(Json(Vec::new()));
+        };
+        let now = input.context.now;
+        // `context.toggled` is the set of toggled widget/plugin names; this
+        // plugin is toggled when it contains its own name, "weather".
+        let toggled = input.context.toggled.contains("weather");
+        let cfg = &input.config;
         let zip = cfg["zip"].as_str().unwrap_or("48183").to_string();
         let raw_format = cfg["format"].as_str().unwrap_or("{icon} {temp_f}°F");
-        // `context.toggled` is a JSON array of names; this plugin is toggled
-        // when it contains its own name, "weather".
-        let toggled = v
-            .get("context")
-            .and_then(|c| c.get("toggled"))
-            .and_then(|t| t.as_array())
-            .is_some_and(|a| a.iter().any(|name| name.as_str() == Some("weather")));
         let alt_format = cfg["alt_format"].as_str().unwrap_or("");
         let format = select_weather_format(toggled, raw_format, alt_format);
         let refresh_secs = cfg["refresh_secs"].as_i64().unwrap_or(1800);

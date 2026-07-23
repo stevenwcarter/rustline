@@ -33,3 +33,7 @@ wasm-e2e = []
 [dev-dependencies]
 tempfile = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# The round-trip seam test in `src/abi.rs` names `rustline_abi::WireContext`
+# directly to pin the host `Context` and guest `WireContext` wire shapes
+# together; only needed for tests, so it lives here.
+rustline-abi = { path = "../rustline-abi" }
