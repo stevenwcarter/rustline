@@ -1,5 +1,10 @@
 //! The capability-checked effect functions. Each returns a structured result
 //! and never panics — the host_fn wrappers just serialize these to JSON.
+//!
+//! `perform_log` is the one exception to "capability-checked": it is
+//! **capability-free by design** (see invariant N1) — it only ever writes to
+//! the host's `tracing` subscriber, never the network or filesystem, so
+//! there is no allowlist to check and no denied-case test for it.
 
 use crate::abi::{CachedHttpResult, HttpResult, ReadResult, WriteResult};
 use crate::cache::{CacheEntry, age_secs, cache_path, is_fresh, read_entry, write_entry};
@@ -239,6 +244,30 @@ pub fn perform_file_write(ctx: &CapabilityCtx, path: &str, contents: &str) -> Wr
             ok: false,
             error: e.to_string(),
         },
+    }
+}
+
+/// Emit a guest log message through the host's `tracing` subscriber.
+///
+/// Unlike every other function in this module, `rl_log` is the **one
+/// intentional capability-free host function** (invariant N1): it never
+/// touches the network or filesystem, so there is no `CapabilityCtx`
+/// allowlist to check and — unlike `perform_http_get`/`perform_state_read`/
+/// etc. — no "denied" case to test. `plugin` tags the log line so
+/// multi-plugin output stays attributable; an unrecognized `level` string
+/// degrades to `info` (keeping the original string as a field) rather than
+/// dropping the message or panicking, matching invariant N2 (a plugin must
+/// never break the bar).
+pub fn perform_log(plugin: &str, level: &str, msg: &str) {
+    match level {
+        "error" => tracing::error!(target: "rustline_wasm::guest", %plugin, "{msg}"),
+        "warn" => tracing::warn!(target: "rustline_wasm::guest", %plugin, "{msg}"),
+        "info" => tracing::info!(target: "rustline_wasm::guest", %plugin, "{msg}"),
+        "debug" => tracing::debug!(target: "rustline_wasm::guest", %plugin, "{msg}"),
+        "trace" => tracing::trace!(target: "rustline_wasm::guest", %plugin, "{msg}"),
+        _ => {
+            tracing::info!(target: "rustline_wasm::guest", %plugin, orig_level = %level, "{msg}")
+        }
     }
 }
 
@@ -510,5 +539,125 @@ mod tests {
             ))
             .is_none()
         );
+    }
+}
+
+/// `perform_log` has no `CapabilityCtx` to pass through a fake `Fetcher`, so
+/// these tests capture real `tracing` events with a minimal hand-rolled
+/// `Subscriber` (no test-only dep needed — `Subscriber`/`Visit` are already
+/// part of the `tracing` crate) rather than reusing the fixtures above.
+#[cfg(test)]
+mod log_tests {
+    use std::sync::{Arc, Mutex};
+
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Level, Metadata, Subscriber};
+
+    use super::perform_log;
+
+    /// One captured event: its severity plus every field (incl. the implicit
+    /// `message` field carrying the formatted log text) as `(name, debug)`.
+    type CapturedEvent = (Level, Vec<(String, String)>);
+
+    #[derive(Default)]
+    struct FieldVisitor(Vec<(String, String)>);
+
+    impl Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+    }
+
+    /// A subscriber that accepts every event (no level filtering) and
+    /// records it, purely so a test can assert what `perform_log` emitted.
+    struct RecordingSubscriber(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    impl Subscriber for RecordingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .unwrap()
+                .push((*event.metadata().level(), visitor.0));
+        }
+
+        fn enter(&self, _span: &Id) {}
+        fn exit(&self, _span: &Id) {}
+    }
+
+    /// Run `f` under a scoped recording subscriber and return every event it
+    /// emitted, in order. Reads the shared buffer back out through the
+    /// `Mutex` rather than `Arc::try_unwrap`-ing it: `tracing`'s dispatcher
+    /// machinery can still be holding its own clone of the `Arc` briefly
+    /// after `with_default` returns, so asserting a unique strong count here
+    /// is not reliable.
+    fn capture(f: impl FnOnce()) -> Vec<CapturedEvent> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = RecordingSubscriber(events.clone());
+        tracing::subscriber::with_default(subscriber, f);
+        events.lock().unwrap().clone()
+    }
+
+    fn field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        fields
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn maps_each_known_level_string_to_the_matching_tracing_level() {
+        for (level_str, expected) in [
+            ("error", Level::ERROR),
+            ("warn", Level::WARN),
+            ("info", Level::INFO),
+            ("debug", Level::DEBUG),
+            ("trace", Level::TRACE),
+        ] {
+            let events = capture(|| perform_log("weather", level_str, "hello"));
+            assert_eq!(events.len(), 1, "level {level_str}");
+            let (level, fields) = &events[0];
+            assert_eq!(*level, expected, "level {level_str}");
+            assert_eq!(field(fields, "message"), Some("hello"));
+            assert_eq!(field(fields, "plugin"), Some("weather"));
+        }
+    }
+
+    #[test]
+    fn unrecognized_level_degrades_to_info_without_panicking() {
+        let events = capture(|| perform_log("weather", "bogus", "still logged"));
+        assert_eq!(events.len(), 1);
+        let (level, fields) = &events[0];
+        assert_eq!(*level, Level::INFO);
+        assert_eq!(field(fields, "message"), Some("still logged"));
+        assert_eq!(field(fields, "orig_level"), Some("bogus"));
+    }
+
+    #[test]
+    fn every_level_string_logs_with_no_network_or_filesystem_effect() {
+        // N1: rl_log is the one intentional capability-free host fn. There is
+        // no `CapabilityCtx` allowlist here to deny against, so — unlike the
+        // other six `perform_*` functions — there is no "denied" case to
+        // test; this just pins that every level (incl. an unknown one)
+        // completes with no side effect beyond the emitted tracing event.
+        for level in ["error", "warn", "info", "debug", "trace", "unknown"] {
+            let events = capture(|| perform_log("no-capability-needed", level, "logged"));
+            assert_eq!(events.len(), 1, "level {level}");
+        }
     }
 }

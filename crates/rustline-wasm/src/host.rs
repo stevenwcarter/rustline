@@ -12,7 +12,7 @@ use crate::abi::{RenderInput, parse_render_output};
 use crate::capability::CapabilityCtx;
 use crate::fetch::UreqFetcher;
 use crate::perform::{
-    perform_file_read, perform_file_write, perform_http_get, perform_http_get_cached,
+    perform_file_read, perform_file_write, perform_http_get, perform_http_get_cached, perform_log,
     perform_state_read, perform_state_write,
 };
 
@@ -57,9 +57,21 @@ host_fn!(rl_file_write(user_data: CapabilityCtx; path: String, contents: String)
     Ok(json(&perform_file_write(&ctx, &path, &contents)))
 });
 
+// `rl_log` is the one intentional capability-free host function (invariant
+// N1): it only writes to the host's `tracing` subscriber, so — unlike the six
+// wrappers above — there is no allowlist check here. `user_data` is still
+// used, but only to read this instance's plugin name for the log fields, not
+// to gate anything.
+host_fn!(rl_log(user_data: CapabilityCtx; level: String, msg: String) -> String {
+    let ctx = user_data.get()?;
+    let ctx = ctx.lock().unwrap();
+    perform_log(&ctx.name, &level, &msg);
+    Ok(String::new())
+});
+
 /// Build an Extism plugin from wasm bytes with wasi off, fuel + timeout +
-/// memory caps, and the six capability-gated host functions bound to this
-/// instance's `CapabilityCtx`.
+/// memory caps, and the seven host functions (six capability-gated, plus the
+/// capability-free `rl_log`) bound to this instance's `CapabilityCtx`.
 pub fn build_plugin(wasm: &[u8], ctx: CapabilityCtx) -> Result<extism::Plugin, extism::Error> {
     let ud = UserData::new(ctx);
     let manifest = Manifest::new([Wasm::data(wasm.to_vec())])
@@ -92,6 +104,7 @@ pub fn build_plugin(wasm: &[u8], ctx: CapabilityCtx) -> Result<extism::Plugin, e
             ud.clone(),
             rl_file_write,
         )
+        .with_function("rl_log", [PTR, PTR], [PTR], ud, rl_log)
         .build()
 }
 
