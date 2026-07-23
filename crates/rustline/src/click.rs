@@ -24,8 +24,9 @@ use rustline_core::{ClickBinding, Config};
 
 use crate::toggles;
 
-/// The button name tmux's `MouseDown1Status` binding sends today. Right/middle
-/// bindings are parsed and resolvable but need their own tmux bindings to fire.
+/// The button name tmux's `MouseDown1Status` binding sends; `middle`/`right`
+/// arrive via the `MouseDown2/3Status` bindings `init` now emits. This is the
+/// button that triggers the *default* (unconfigured) toggle behavior.
 const LEFT: &str = "left";
 
 /// The resolved action for a click, after applying the configured bindings and

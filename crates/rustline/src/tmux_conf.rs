@@ -108,6 +108,22 @@ bind -T root MouseDown1Status {
         }
     }
 }
+# rustline middle/right-click bindings ([widgets.*.click] actions; run/open_url).
+# Middle/right have no default window-list action to preserve, so they just
+# dispatch any non-empty range to `rustline click` (tmux button numbering:
+# 2=middle, 3=right). Injection-safe like the left binding: #{q:...} + --flag=.
+bind -T root MouseDown2Status {
+    if -F "#{mouse_status_range}" {
+        run-shell "@BINARY@ click --range=#{q:mouse_status_range} --button=middle"
+        refresh-client -S
+    }
+}
+bind -T root MouseDown3Status {
+    if -F "#{mouse_status_range}" {
+        run-shell "@BINARY@ click --range=#{q:mouse_status_range} --button=right"
+        refresh-client -S
+    }
+}
 "##,
     );
     if opts.two_line {
@@ -425,6 +441,37 @@ mod tests {
         assert!(
             b.contains("refresh-client -S"),
             "refreshes after toggle: {b}"
+        );
+    }
+
+    #[test]
+    fn init_block_wires_middle_and_right_click_bindings() {
+        // W36 click bindings ship live: middle/right mouse clicks on a status
+        // range dispatch to `rustline click` with the matching `--button`
+        // value, mirroring the left binding's injection-safe `#{q:...}` +
+        // `--flag=` form (invariant #4). tmux button numbering: 1=left,
+        // 2=middle, 3=right.
+        let b = init_block(&one_line("colour234", "colour255"));
+        assert!(b.contains("MouseDown2Status"), "binds middle click: {b}");
+        assert!(b.contains("MouseDown3Status"), "binds right click: {b}");
+        assert!(
+            b.contains("'/usr/bin/rustline' click --range=#{q:mouse_status_range} --button=middle"),
+            "middle dispatch q-escaped with --button=middle: {b}"
+        );
+        assert!(
+            b.contains("'/usr/bin/rustline' click --range=#{q:mouse_status_range} --button=right"),
+            "right dispatch q-escaped with --button=right: {b}"
+        );
+        // Never a bare, unescaped range in any binding.
+        assert!(
+            !b.contains("--range=#{mouse_status_range}"),
+            "must q-escape every binding's range: {b}"
+        );
+        // Every binding refreshes the client so the change shows immediately.
+        assert_eq!(
+            b.matches("refresh-client -S").count(),
+            5,
+            "two after-select hooks + three MouseDown{{1,2,3}} bindings each refresh: {b}"
         );
     }
 

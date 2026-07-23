@@ -21,9 +21,16 @@ pane, window, host, and system info, with zero required configuration.
   a `git status` shell-out.
 - Opt-in `disk` widget showing filesystem usage (used/total/available, a
   percentage, and a gauge bar) for a configured mount, read via `statvfs(2)`.
+- Opt-in `uptime` widget (humanized, e.g. `3d 4h`) and `media` now-playing
+  widget (artist/title/status, via `playerctl`).
 - Click-to-toggle widget alt views: give a widget an `alt_format` and
   left-clicking it in the status line swaps it to that view (e.g. a compact
-  `cpu` reading toggling to one with a gauge bar).
+  `cpu` reading toggling to one with a gauge bar). You can also bind a specific
+  mouse button (left/middle/right) to open a URL or run a command.
+- Per-widget color overrides (`fg`/`bg`) to pin a widget's colors.
+- Install third-party WASM plugins straight from GitHub
+  (`rustline plugin install owner/repo`), then grant only the capabilities they
+  need.
 - Seven built-in themes (a `default` plus six multi-accent, truecolor curated
   themes) selectable via `rustline theme use`, browsable interactively with
   `rustline theme pick`, plus a `theme new` scaffolder for tweaking your own
@@ -127,7 +134,8 @@ Widget names available for the `layout` arrays are: `pane_id` / `hostname`
 `datetime`, and the opt-in `lan_ip` / `tailscale_ip` (see [IP address
 widgets](#ip-address-widgets) below), `battery` (see [Battery
 widget](#battery-widget) below), `git` (see [Git widget](#git-widget)
-below), and `disk` (see [Disk widget](#disk-widget) below).
+below), `disk` (see [Disk widget](#disk-widget) below), and `uptime` / `media`
+(see [Uptime and media widgets](#uptime-and-media-widgets) below).
 
 Example — reorder the right region and change the clock format:
 
@@ -137,7 +145,13 @@ right = ["datetime", "cwd"]
 
 [widgets.datetime]
 format = "%H:%M"
+# timezone = "America/New_York"   # optional IANA zone; default renders local time
 ```
+
+`datetime` also takes an optional `timezone` (an IANA zone name, e.g.
+`"Europe/Berlin"`) that renders the clock in that zone instead of local time;
+an unrecognized name is logged and falls back to local time rather than
+erroring.
 
 Run `rustline print-config` to print the fully-resolved effective
 configuration (your overrides layered onto the defaults) as TOML.
@@ -145,7 +159,8 @@ configuration (your overrides layered onto the defaults) as TOML.
 config edit` opens it in `$EDITOR` (creating it from the starter template
 first if it doesn't exist); `rustline config validate` strictly parses it
 and reports any error with its location, unlike `Config::load`'s silent
-fallback to defaults.
+fallback to defaults. A global `--config <path>` flag points any subcommand
+at a different config file.
 
 ### Hostname and pane ID widgets
 
@@ -361,10 +376,74 @@ warn_percent = 85   # default; alert badge at/above this %
 crit_percent = 95   # default; 0 disables a tier
 ```
 
+### Uptime and media widgets
+
+Two more opt-in built-ins, neither in the default layout:
+
+`uptime` shows system uptime, humanized to the coarsest unit pair (`3d 4h`,
+`1h 15m`, `12m`, `<1m`). Its `format` (default `"{uptime}"`) substitutes
+`{uptime}`; on a platform where uptime can't be read it renders nothing (or its
+`down_format`).
+
+`media` shows the current now-playing track via `playerctl` (Linux). Its
+`format` (default `"{title} — {artist}"`) substitutes `{artist}`, `{title}`,
+and `{status}`; when `playerctl` is missing or no player is running it renders
+nothing (or its `down_format`) rather than a fake "not playing". Both also take
+an `alt_format` for [click-to-toggle](#click-to-toggle-widget-views).
+
+```toml
+[layout]
+right = ["media", "uptime", "cwd", "datetime"]
+
+[widgets.uptime]
+format = "up {uptime}"
+
+[widgets.media]
+format      = "♪ {title} — {artist}"
+down_format = ""                      # nothing when nothing is playing
+```
+
+### Per-widget colors
+
+Any format-bearing widget accepts optional `fg`/`bg` keys to pin its colors,
+using the same `Color` shapes as a theme (`{ Indexed = N }`,
+`{ Named = "cyan" }`, or `{ Rgb = [r, g, b] }`). `fg` always applies; `bg` only
+applies where the widget doesn't already have an explicit background (so it
+won't fight a threshold alert badge). Leave them unset to use the theme's
+cycling palette as before.
+
+```toml
+[widgets.cwd]
+fg = { Indexed = 250 }
+bg = { Rgb = [40, 44, 52] }
+```
+
+### Per-button click actions
+
+Beyond the default left-click toggle, a widget can bind a specific mouse button
+to open a URL or run a command, as `left_click` / `right_click` /
+`middle_click` under its `[widgets.<name>]` table:
+
+```toml
+[widgets.cpu]
+right_click  = { run = "tmux display-popup -E htop" }
+middle_click = { open_url = "https://grafana.example/host" }
+# left_click = { toggle = false }   # disable the default left-click toggle
+```
+
+The command in a `run` binding comes only from your own config (never from
+anything tmux passes in), and runs detached via `sh -c`. **One catch:** a
+widget only receives clicks once it emits a clickable range, which today
+happens when it has a non-empty `alt_format`. So a `run`/`open_url` binding on
+a widget with no `alt_format` won't fire — give the widget an `alt_format`
+(even a throwaway one) to make it clickable. This needs the same
+`MouseDown{1,2,3}Status` bindings the `rustline init` wizard writes and
+`set -g mouse on`.
+
 ### Click-to-toggle widget views
 
 `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg`,
-`git`, and `disk` each take an `alt_format` (default empty). Give a widget a non-empty
+`git`, `disk`, `uptime`, and `media` each take an `alt_format` (default empty). Give a widget a non-empty
 `alt_format` and it becomes clickable: left-clicking it in the tmux status
 line toggles it between `format` and `alt_format`, e.g. a compact CPU reading
 swapping to one with a gauge bar:
@@ -628,6 +707,22 @@ rustline plugin approve weather --yes  # non-interactive; for scripts
 `[plugins.<name>]`'s allowlists (never more than what's declared), and does
 nothing if the plugin has no manifest.
 
+Install a published plugin straight from a GitHub release instead of building
+it yourself:
+
+```bash
+rustline plugin install owner/repo          # downloads the .wasm into your plugin dir
+rustline plugin update my-widget            # re-fetch the latest release
+rustline plugin remove my-widget --yes      # delete the .wasm and its config entry
+```
+
+`install` downloads the plugin's `.wasm`, records its `source`/`tag`/`checksum`
+in `[plugins.<name>]`, and grants **no** capabilities — you still run
+`rustline plugin approve` (or `plugin url|path add`) to allow anything. If a
+plugin is ever denied something it asked for, `rustline plugin denials
+<name>` lists every capability it was refused, so you can decide whether to
+grant it.
+
 Scaffold a new plugin crate instead of copying `weather` by hand:
 
 ```bash
@@ -637,14 +732,22 @@ rustline plugin new my-widget --path plugins
 This writes `plugins/my-widget/Cargo.toml` (edition 2024, `crate-type =
 ["cdylib"]`, an empty `[workspace]` table so it builds standalone rather than
 joining rustline's own workspace) and `plugins/my-widget/src/lib.rs` (a
-`name`/`render` skeleton that deserializes the typed `GuestRender`/
-`WireContext` guest input), then prints the `cargo build --target
-wasm32-unknown-unknown` + install command and a starter
-`[plugins.my-widget]` config snippet. The plugin name must be
-`[A-Za-z0-9_-]`, at most 15 bytes, and not `window` — the same rule as a
-widget's [click-to-toggle](#click-to-toggle-widget-views) range name, since
-it becomes a tmux `range=user|<name>` argument verbatim. Pass `--force` to
-overwrite an existing scaffold.
+`name`/`render` skeleton built on the `rustline-plugin-sdk` crate, which bundles
+the typed host-capability wrappers, the `GuestRender`/`WireContext` wire types,
+and an `export_plugin!` macro so you write one crate instead of hand-rolling
+the Extism glue), then prints the `cargo build --target wasm32-unknown-unknown`
++ install command and a starter `[plugins.my-widget]` config snippet. The
+plugin name must be `[A-Za-z0-9_-]`, at most 15 bytes, and not `window` — the
+same rule as a widget's [click-to-toggle](#click-to-toggle-widget-views) range
+name, since it becomes a tmux `range=user|<name>` argument verbatim. Pass
+`--force` to overwrite an existing scaffold.
+
+Build any plugin crate and install its `.wasm` into your plugin dir in one
+step with `rustline plugin build <dir>`, or dry-run one against a sample
+`Context` (printing its segments and any capability denials, without touching
+your config) with `rustline plugin run <name>`. Plugins negotiate a small ABI
+version with the host, so a plugin built against an incompatible future ABI is
+skipped rather than loaded — existing plugins keep working.
 
 See the [design spec](docs/superpowers/specs/2026-07-20-rustline-wasm-plugins-design.md)
 for the full capability model, config schema, and plugin ABI.

@@ -51,7 +51,10 @@ pub enum Command {
     /// List, preview, select, or scaffold themes.
     #[command(subcommand)]
     Theme(ThemeCmd),
-    /// Toggle a widget's alt view (invoked by the tmux MouseDown1Status binding).
+    /// Resolve and dispatch a status-line click (invoked by the tmux
+    /// `MouseDown{1,2,3}Status` bindings): the default left-click toggles a
+    /// widget's alt view; a `[widgets.*.click]` binding can open a URL or run
+    /// a command per button.
     Click(ClickArgs),
     /// Diagnose documented prerequisites (tmux version, mouse mode,
     /// truecolor terminal, PATH, the managed tmux config block) and report
@@ -352,7 +355,9 @@ pub struct ClickArgs {
     /// The clicked widget's range name (tmux `#{mouse_status_range}`); empty = no-op.
     #[arg(long, default_value = "")]
     pub range: String,
-    /// Which mouse button (currently only `left` acts; others are reserved).
+    /// Which mouse button was clicked: `left` (default), `middle`, or `right`.
+    /// The action per (widget, button) comes from `[widgets.*.click]`, falling
+    /// back to a left-click toggle; an unrecognized value is a no-op.
     #[arg(long, default_value = "left")]
     pub button: String,
 }

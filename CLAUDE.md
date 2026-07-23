@@ -33,6 +33,16 @@ Cargo **workspace**, edition 2024, `resolver = "2"`:
   HTTP/FS; every effect is host-checked (`rl_log` is the sole intentional
   exception — see invariant N1). Reusable verbatim by a future daemon
   front-end.
+- `crates/rustline-plugin-sdk` — the **guest-side SDK** a WASM plugin depends
+  on (W39): one crate bundling typed host-capability wrappers (`http_get`,
+  `http_get_cached`, `state_read`/`state_write`, `file_read`/`file_write`,
+  `log`), re-exports of the shared wire types (`GuestRender`, `WireContext`,
+  `Segment`/`Style`/`Color` from `rustline-abi`), the `active_format` toggle
+  helper, and the `export_plugin!` macro (wires the `name`/`render`/
+  `abi_version` Extism exports in one line). Links the real Extism host imports
+  **only on `wasm32`**; on the host target the wrappers degrade to
+  `HostError::Unavailable` so a plugin's pure logic still compiles and
+  unit-tests under `cargo test`. All four example plugins depend on it.
 
 `plugins/` holds example/third-party plugin sources, each an **excluded**
 workspace member (own `Cargo.lock`, built for `wasm32-unknown-unknown`):
@@ -94,6 +104,7 @@ these shared types, not a design shortcut. Keep them serializable.
   `window: Option<WindowCtx>`, `interfaces: Vec<NetIface>`,
   `battery: Option<Battery>`, `cpu: Option<CpuUsage>`,
   `memory: Option<MemInfo>`, `git: Option<GitInfo>`, `disk: Option<DiskInfo>`,
+  `uptime: Option<u64>` (seconds), `media: Option<MediaInfo>`,
   `os: String`, `arch:
   String`, `toggled: BTreeSet<String>`, `colors: ThemeColors`), plus
   `Context::default()` (an empty, epoch-timestamped instance, so test/synthetic
@@ -116,7 +127,12 @@ these shared types, not a design shortcut. Keep them serializable.
   (mirroring the `cpu`/`memory` read-gating below); `DiskInfo { total_bytes,
   used_bytes, available_bytes }` (all bytes as `u64`) is a filesystem-usage
   snapshot for a configured mount, likewise read once at `Context`-build time
-  ONLY when `disk` is in the active layout; `os`/`arch` come from
+  ONLY when `disk` is in the active layout; `uptime` (seconds since boot) and
+  `media` (a `MediaInfo` now-playing snapshot) are read once at build time and
+  gated the same way on their widget being in the active layout — but,
+  unlike the others, are NOT mirrored into `WireContext` (not exposed to WASM
+  guests, so a guest still sees a field-for-field `Context` mirror minus these
+  two); `os`/`arch` come from
   `std::env::consts::OS`/`ARCH`; `toggled` (`#[serde(default)]`) is the set of
   widget/plugin names the user has click-toggled to their `alt_format` view,
   read once at `Context`-build time from the toggles state file (invariant #1)
@@ -157,9 +173,9 @@ these shared types, not a design shortcut. Keep them serializable.
   `descriptors()`/`available_names()` enumerate them in registration order
   (W22) — the enabling abstraction for a future widget-listing command, not
   itself exposed as a CLI subcommand yet.
-- `widgets/` — the thirteen built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
+- `widgets/` — the fifteen built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
   `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`,
-  `git`, `disk`, plus `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
+  `git`, `disk`, `uptime`, `media`, plus `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
   LAN/Tailscale interface-selection and `{ip}` formatting logic shared by
   `lan_ip`/`tailscale_ip` (no I/O — operates on `Context.interfaces`).
   `alert.rs` is the shared threshold-alert helper used by `cpu`/`memory`/
@@ -209,14 +225,23 @@ these shared types, not a design shortcut. Keep them serializable.
   directly from widget config — not read from `Context`) placeholders, plus
   `warn_percent`(85)/`crit_percent`(95) threshold config (via `alert_over`);
   NOT in the default layout.
+  `uptime.rs` is the `uptime` widget (W37): pure over `Context.uptime`, a
+  single `{uptime}` placeholder rendered via `humanize_uptime` (coarsest
+  non-zero unit pair — `3d 4h`, `1h 15m`, `12m`, `<1m`), plus
+  `alt_format`/`down_format`; NOT threshold-aware and NOT in the default layout.
+  `media.rs` is the `media` widget (W41): pure over `Context.media`, with
+  `{artist}`/`{title}`/`{status}` placeholders (default `"{title} — {artist}"`),
+  plus `alt_format`/`down_format`; NOT threshold-aware and NOT in the default
+  layout.
   `toggle.rs` holds the shared click-toggle helpers
   `active_format(ctx, name, format, alt) -> &str`
   (picks `alt` iff it's non-empty AND `name` is in `ctx.toggled`, else
   `format`) and `clickable_range(name, alt) -> Option<&str>` (`Some(name)` iff
   `alt` is non-empty AND `name.len() <= 15`, tmux's `range=user|X` byte limit);
-  the nine format-bearing widgets (`datetime`, `lan_ip`, `tailscale_ip`,
-  `battery`, `cpu`, `memory`, `loadavg`, `git`, `disk`) each carry an `alt_format`
-  field and call both helpers from their `render`/`range_name`.
+  the eleven format-bearing widgets (`datetime`, `lan_ip`, `tailscale_ip`,
+  `battery`, `cpu`, `memory`, `loadavg`, `git`, `disk`, `uptime`, `media`) each
+  carry an `alt_format` field and call both helpers from their
+  `render`/`range_name`.
 - `assemble.rs` — `assign_palette`, `render_named_region` (panic-guarded per
   widget via `catch_unwind`; now range-wraps via `render_region_ranged`,
   remembering each widget's `range_name()` across the palette-assignment
@@ -241,7 +266,21 @@ these shared types, not a design shortcut. Keep them serializable.
   applying overrides (unknown/absent `base` falls back to `Theme::default()`).
   `Config::load_reporting` returns the load-failure
   message instead of logging it, so the binary can install its log subscriber
-  first and then emit the `"invalid config"` warning into the file.
+  first and then emit the `"invalid config"` warning into the file. Two
+  per-widget option groups are `#[serde(flatten)]`ed into every clickable
+  widget's `[widgets.<name>]` table: `ColorOverride { fg, bg: Option<Color> }`
+  (W29, an explicit color pin applied centrally in `render_named_region`; see
+  Config) and `ClickBindings { left_click, right_click, middle_click:
+  Option<ClickBinding> }` (W36, the config-value `ClickBinding` enum —
+  `{ toggle = bool } | { open_url } | { run }`). `Config::click_map() ->
+  HashMap<&str, WidgetClick>` projects each widget's toggleability + bindings
+  for the binary's `resolve_click`; `WidgetClick` distinguishes a known-but-
+  not-toggleable built-in from an absent name (a plugin/unknown range) so the
+  pre-W36 plugin-flip behavior is preserved (invariant #7). `datetime` gains a
+  `timezone: Option<String>` (W30, an IANA zone via `chrono-tz`). `PluginConfig`
+  gains `source: Option<PluginSource>` (a typed enum that still accepts a bare
+  `owner/repo` string) plus `checksum`/`tag: Option<String>` recorded by
+  `plugin install` (W38).
 - `ansi.rs` — `tmux_to_ansi(&str) -> String`: transcodes the tmux markup we emit
   into ANSI SGR (`colourN` → 256-color, `#rrggbb` → truecolor, named → basic)
   for the `--preview` flag.
@@ -270,6 +309,12 @@ these shared types, not a design shortcut. Keep them serializable.
   deserializes (W26), so a plugin no longer hand-walks an untyped
   `serde_json::Value` for its `Context` input; `plugin new`'s scaffold and the
   `counter`/`filewatch`/`httpget` examples all use these typed wire structs.
+  Also `MediaInfo { artist, title, status }` (W41, a now-playing snapshot
+  riding `Context.media`; NOT in `WireContext` — not exposed to guests, like
+  `Context.uptime`) and `pub const ABI_VERSION: u32 = 1` (W32) — the host↔guest
+  ABI version the host stamps onto `RenderInput.abi_version` and a guest may
+  echo from its optional `abi_version()` export (see `rustline-wasm`'s
+  `abi_decision`).
   The WASM wire types, re-exported by `rustline-core`.
 
 `rustline-wasm`:
@@ -320,13 +365,50 @@ these shared types, not a design shortcut. Keep them serializable.
   anything itself — it's just a declaration `rustline plugin approve` turns
   into an allowlist write; a malformed manifest from either source is logged
   and treated as absent, never breaking discovery (N2).
-- `lib.rs::register_plugins` — discovers `*.wasm` in the plugin dir, and for
+- `denials.rs` — `FileDenialObserver` (W28), the production `DenialObserver`
+  wired as the default in `register_plugins`: it dedupes `(plugin, kind,
+  target)` and appends each newly-seen capability denial as a JSON line to
+  `<data_root>/denials.jsonl` (best-effort — a write failure `warn!`s, never
+  panics, per N2). `denials_path()`/`read_denials_at`/`read_denials` back
+  `rustline plugin denials <name>`. NOTE: the record has no quota/rotation yet
+  — a guest that varies its `target` defeats the dedup and grows the file
+  unbounded (a follow-up; see WHATS-NEXT).
+- `lib.rs::{abi_decision, register_plugins, instantiate_named}` —
+  `abi_decision(host: u32, guest: Option<u32>) -> AbiDecision`
+  (`{Register, RegisterLegacy, Skip}`, W32) is the pure ABI-version handshake:
+  a guest declaring the host's version registers; a guest with no
+  `abi_version` export registers as legacy (existing plugins keep working); a
+  mismatched version is **skipped, never registered**. `register_plugins`
+  discovers `*.wasm` in the plugin dir, and for
   each name in the caller's `needed` list (i.e. actually referenced by a
   layout region — avoids paying wasm cold-start for unused plugins):
-  instantiates it, verifies the exported `name()` equals the filename stem
-  (mismatch → `warn!` + skip), and registers a `WasmWidget` factory. A stem
+  instantiates it, runs `abi_decision`, verifies the exported `name()` equals
+  the filename stem (mismatch → `warn!` + skip), and registers a `WasmWidget`
+  factory (each instance getting its own `FileDenialObserver`). A stem
   colliding with a built-in is skipped (built-in wins). A stem longer than 15
   bytes gets a one-time `warn!` (not click-toggleable) but still registers.
+  `instantiate_named(plugin_dir, name, &PluginConfig, observer)` builds a
+  single named plugin (reusing `build_plugin` + `with_observer`) for the
+  read-only `rustline plugin run` dev harness, capturing denials via a
+  `CollectingObserver`.
+
+`rustline-plugin-sdk`:
+- `lib.rs` — the guest-side SDK (W39). Typed host-capability wrappers
+  (`http_get`, `http_get_cached`, `state_read`/`state_write`,
+  `file_read`/`file_write`, `log`) that call the host functions and decode
+  their JSON responses into result structs, returning `Result<_, HostError>`
+  (`{Call, Decode, Unavailable}`) instead of an untyped `serde_json::Value`;
+  re-exports of `rustline_abi::{Color, GuestRender, Segment, Style,
+  WireContext}`; the `active_format` toggle helper and `LogLevel` enum; and the
+  `export_plugin!` macro, which emits the `name`/`render`/`abi_version` Extism
+  exports (the last returning the real `rustline_abi::ABI_VERSION`) from one
+  line. The capability wrappers link the Extism PDK **only on `wasm32`**; on the
+  host target they return `HostError::Unavailable` so a plugin's pure logic
+  compiles and unit-tests under `cargo test`. NOTE: the SDK currently
+  re-declares the host wire-result types (`HttpResult`/`CachedHttpResult`/
+  `ReadResult`/`WriteResult`, field-identical to `rustline-wasm`'s `abi.rs`,
+  guarded by the e2e test) — hoisting them into `rustline-abi` is a recorded
+  follow-up (see WHATS-NEXT).
 
 `plugins/weather` (excluded workspace member, `wasm32-unknown-unknown`):
 - `lib.rs` — pure logic (`code_to_icon`, `render_format`, `parse_wttr`,
@@ -363,12 +445,15 @@ mod guest`): three more worked examples, each covering a host capability
   `rl_log`ging the failure reason.
 
 `rustline` (bin):
-- `cli.rs` — `clap` derive. `render`, `plugin`, and `theme` are subcommand
-  *groups* (`ThemeCmd { List, Show { name }, Use { name }, Pick, New { name,
-  from, force } }`); `init` (`InitArgs { defaults, print }`, both plain flags) is the
-  onboarding-wizard subcommand (see CLI below); `click` (`ClickArgs { range,
-  button }`, both defaulted so an empty click is a parseable no-op) is a flat
-  subcommand invoked by the tmux mouse binding.
+- `cli.rs` — `clap` derive. A global `--config <path>` flag (W35, alongside
+  `-v`) overrides the config-file path for every subcommand that reads/writes
+  it. `render`, `config`, `plugin`, and `theme` are subcommand *groups*; the
+  `plugin` group now spans `list`, `url|path`, `approve`, `new`, `build`
+  (W31), `run` (W34), `install`/`update`/`remove` (W38), and `denials` (W28).
+  `init` (`InitArgs`) is the onboarding-wizard subcommand (see CLI below);
+  `click` (`ClickArgs { range, button }`, both defaulted so an empty click is a
+  parseable no-op) is a flat subcommand invoked by the tmux mouse binding
+  (`MouseDown{1,2,3}Status`).
 - `battery.rs` — `read_battery()`, a `#[cfg(target_os)]` read surface (one of
   three — see `cpu.rs`/`memory.rs` below): a Linux sysfs
   (`/sys/class/power_supply/*/{capacity,status}`) arm and a macOS
@@ -418,6 +503,28 @@ mod guest`): three more worked examples, each covering a host capability
   arithmetic), is `#[cfg(any(target_os = …, test))]`-gated, matching the
   platforms it's exercised on. `None` on any failure: a nul byte in `mount`,
   or the `statvfs` call itself failing (e.g. a nonexistent mount).
+- `uptime.rs` — `read_uptime() -> Option<u64>` (W37), a `#[cfg(target_os)]`
+  read surface following the `battery.rs`/`cpu.rs` pattern: Linux parses
+  `/proc/uptime` (`parse_proc_uptime`), macOS derives it from `sysctl -n
+  kern.boottime` vs now (`parse_kern_boottime`); both pure parsers are
+  `#[cfg(any(target_os = …, test))]`-compiled and unit-tested on Linux.
+- `media.rs` — `read_media() -> Option<MediaInfo>` (W41), a Linux shell-out to
+  `playerctl metadata` behind the pure `parse_playerctl`; `None` on any failure
+  (`playerctl` missing, no player, malformed output). Non-Linux → `None`.
+- `click.rs` — click resolution + dispatch (W36): `resolve_click(&Config,
+  range, button) -> ClickAction` (`{Toggle, OpenUrl, Run, NoOp}`, pure over the
+  config) and `dispatch(action, range, &impl ClickExecutor)`. The
+  `ClickExecutor` seam (`RealExecutor` spawns detached `sh -c`/`xdg-open`; a
+  recording fake in tests) keeps resolve+dispatch unit-tested without spawning.
+  Default (no binding) is byte-identical to the pre-W36 toggle behavior; the
+  only text `sh -c` ever sees comes from the user's own config, never the tmux
+  `range` value (invariant #4).
+- `plugin_install.rs` — `plugin install/update/remove` (W38): a `Downloader`
+  seam (`UreqDownloader`, rustls, redirect-limited, User-Agent) over the GitHub
+  releases API, pure `parse_owner_repo`/`select_wasm_asset`/`sha256_hex`.
+  Install downloads a repo's `.wasm` into the plugin dir and records
+  `source`/`tag`/`checksum` — granting **no** capabilities (TOFU: it records
+  the hash, doesn't verify against a pin).
 - `build_context.rs` — builds `Context` from args + `gethostname`,
   `libc::getloadavg` (the only `unsafe` in this file — `disk.rs`'s `statvfs`
   call is its own `unsafe`, isolated there — guarded on `n == 3`),
@@ -471,7 +578,13 @@ mod guest`): three more worked examples, each covering a host capability
   unconditionally with `--yes`) — writes **exactly** those requested URL/path
   patterns into `[plugins.<name>]`'s allowlists (idempotent append, never a
   wider grant); `list` also now shows a `run \`plugin approve <name>\`` hint
-  when a manifest resolves for that plugin.
+  when a manifest resolves for that plugin. Also handles `build` (W31, any
+  cdylib crate → `.wasm` in the plugin dir; pure `wasm_artifact_path`/
+  `cargo_build_args`/`package_name`), `run` (W34, the read-only dev harness via
+  `rustline_wasm::instantiate_named` + `format_run_output`, printing segments
+  and captured denials), `denials` (W28, read-only over
+  `rustline_wasm::denials::read_denials`), and delegates
+  `install`/`update`/`remove` to `plugin_install.rs`.
 - `theme_cmd.rs` — `rustline theme …`, mirroring `plugin_cmd.rs`'s `toml_edit`
   approach: `list` prints every built-in and themes-dir `*.toml` stem,
   marking the active one (`cfg.theme.base`, default `"default"`) with `*` and
@@ -509,9 +622,11 @@ mod guest`): three more worked examples, each covering a host capability
   toward `theme show`/`theme use` and exits non-zero, writing nothing) and,
   on a choice, reuses `use_theme` for the actual config write.
 - `tmux_conf.rs` — `init_block(&InitBlockOpts)` (`bar_bg`, `fg`, `two_line`,
-  `mouse`, `interval`): the tmux config block `rustline init` emits, incl. a
-  `bind -T root MouseDown1Status` block (see CLI below); one-line/mouse-off/
-  interval-1 output stays byte-identical to the pre-wizard block. `two_line`
+  `mouse`, `interval`, `binary`): the tmux config block `rustline init` emits,
+  incl. `bind -T root MouseDown{1,2,3}Status` blocks — left (window-select
+  default preserved, else `click --button=left`), plus middle/right dispatching
+  `click --button=middle`/`--button=right` for W36 config bindings (see CLI
+  below); one-line/mouse-off/interval-1 output stays otherwise unchanged. `two_line`
   additionally emits `set -g status 2` plus the author's verbatim two-line
   `status-format[0]`/`[1]` (window list on its own line). `TMUX_BEGIN`/
   `TMUX_END` (`# >>> rustline >>>` / `# <<< rustline <<<`) and
@@ -544,11 +659,13 @@ mod guest`): three more worked examples, each covering a host capability
   ANSI) + `resolve_plugin_dir` (`--plugin-dir` flag › config `plugin_dir` ›
   `rustline_wasm::default_plugin_dir()`). Only `render left`/`render right`
   discover and register plugins; `render window` is built-ins only.
-  `run_click` handles `Command::Click`: a no-op unless `button == "left"` and
-  `range` is non-empty, else flips `range`'s membership via
-  `toggles::{read,apply,write}_toggles` — the single choke point for click
-  dispatch, so a future `left_click`/`right_click` script-handler mechanism
-  extends resolution here rather than adding parallel dispatch elsewhere.
+  `run_click` handles `Command::Click` by delegating to
+  `click::resolve_click(&cfg, range, button)` + `click::dispatch` with the
+  production `RealExecutor` (W36) — the single choke point for click dispatch;
+  the default (no configured binding) still flips `range`'s toggle-set
+  membership exactly as before. A global `--config <path>` (W35) is resolved
+  once into `effective_config_path` and threaded into every subcommand that
+  reads/writes the config.
   `themes_dir()` resolves `$XDG_CONFIG_HOME/rustline/themes` (fallback
   `~/.config/rustline/themes`), parallel to `config_path()`; `resolve_theme(&Config)
   -> Theme` is the file-aware layering used by `render`/`init` (`Theme::default()`
@@ -574,7 +691,10 @@ mod guest`): three more worked examples, each covering a host capability
 
 A global `-v`/`--verbose` (repeatable) raises the **file** log level:
 `-v`=warn, `-vv`=info, `-vvv`=debug, `-vvvv`=trace. Works in any position
-(`rustline -vv render left`).
+(`rustline -vv render left`). A global `--config <path>` (W35) overrides the
+config-file path for every subcommand that reads or writes it (default:
+`$XDG_CONFIG_HOME/rustline/config.toml`, falling back to
+`~/.config/rustline/config.toml`).
 
 - `rustline render left|right [--session= --window= --pane= --pane-path=] [--preview] [--plugin-dir=]`
 - `rustline render window [--current] --index= [--name=] [--flags=] [--preview]`
@@ -640,6 +760,27 @@ A global `-v`/`--verbose` (repeatable) raises the **file** log level:
   `--yes`) — write exactly those requested URL/path patterns into
   `[plugins.<name>]`'s allowlists; declines (writing nothing) without
   confirmation, and does nothing if the plugin has no manifest.
+- `rustline plugin build <dir> [--release] [--plugin-dir <d>]` — build any
+  WASM guest plugin crate (any `cdylib`-for-`wasm32-unknown-unknown` crate,
+  not just this repo's `plugins/*`) and install the resulting `.wasm` into the
+  plugin dir. Errors (never panics) on a missing crate/artifact.
+- `rustline plugin run <name> [--plugin-dir <d>]` — dev harness: instantiate
+  one plugin, render it against a fabricated sample `Context`, and print its
+  segments plus any capability denials it triggered. Read-only — touches
+  neither config nor the toggles file.
+- `rustline plugin install <owner/repo> [--name <n>] [--tag <t>] [--plugin-dir
+  <d>]` — download a plugin's `.wasm` from its GitHub release into the plugin
+  dir and record `source`/`tag`/`checksum` in `[plugins.<name>]`, granting
+  **no** capabilities (run `approve` or `url|path add` afterward).
+- `rustline plugin update <name> [--plugin-dir <d>]` — re-resolve the latest
+  release for a recorded `owner/repo` source, re-download, and refresh the
+  recorded `checksum`/`tag`.
+- `rustline plugin remove <name> [--yes] [--plugin-dir <d>]` — delete an
+  installed plugin's `.wasm`; with `--yes` also drop its `[plugins.<name>]`
+  config entry.
+- `rustline plugin denials <name>` — list a plugin's persisted capability
+  denials (every distinct `(kind, target)` it was actually denied, recorded by
+  the host's `FileDenialObserver` in `<data_root>/denials.jsonl`). Read-only.
 - `rustline theme list` — every built-in + themes-dir theme, marking the
   active one and any built-in shadowed by a same-named file.
 - `rustline theme show <name>` — ANSI preview of `<name>` (default layout,
@@ -660,10 +801,13 @@ A global `-v`/`--verbose` (repeatable) raises the **file** log level:
   warning/error alert-badge colors on/off. Requires a terminal — a non-TTY
   invocation prints a hint toward `theme show`/`theme use` and exits non-zero
   without writing.
-- `rustline click --range=<name> [--button=left]` — flip `<name>`'s membership
-  in the global toggle state file; invoked by the `init`-emitted tmux mouse
-  binding. Only `left` acts today; other button values are reserved for a
-  future `left_click`/`right_click` script-handler mechanism.
+- `rustline click --range=<name> [--button=left|middle|right]` — resolve the
+  click via `click::resolve_click` and dispatch it (W36): the default
+  (unconfigured) action is a left-click toggle of `<name>`'s membership in the
+  global toggle state file; a `[widgets.<name>.click]` binding
+  (`left_click`/`right_click`/`middle_click`) overrides per button with a
+  toggle/`open_url`/`run` action. Invoked by the `init`-emitted
+  `MouseDown{1,2,3}Status` tmux bindings (left/middle/right).
 - `rustline bench [--only regions|widgets|sources|plugins|all] [--iters N]
   [--real-iters N] [--warmup N] [--cold] [--format table|markdown]
   [--output FILE] [--plugin-dir DIR] [--state-dir DIR]` — feature-gated
@@ -690,11 +834,18 @@ bare `rustline`, since tmux's `#(...)` shells out via the *tmux server's*
 `/bin/sh`, whose `$PATH` may not include wherever the user installed it
 (e.g. `~/.local/bin`) — a bare name there can silently resolve to nothing and
 leave the bar empty — and adds `after-select-pane`/`after-select-window` →
-`refresh-client -S` hooks for instant updates. It also emits a
-`bind -T root MouseDown1Status` block: a
-window-name click still runs the default `select-window`, and any other
-non-empty `#{mouse_status_range}` runs `rustline click --range=… --button=left`
-then `refresh-client -S`. This requires **tmux ≥ 3.1** (that's when
+`refresh-client -S` hooks for instant updates. It also emits three
+`bind -T root MouseDown{1,2,3}Status` blocks (left/middle/right — tmux button
+numbering): the **left** binding keeps the default `select-window` on a
+window-name click and otherwise runs `rustline click --range=… --button=left`;
+the **middle**/**right** bindings (W36) have no window-list default to preserve,
+so they simply dispatch any non-empty `#{mouse_status_range}` as
+`--button=middle`/`--button=right` — the action per (widget, button) is chosen
+by `[widgets.<name>.click]`, which is why right/middle previously shipped inert
+(they resolved but had no tmux binding to fire them). Each block ends with
+`refresh-client -S`. All three follow the same injection-safe
+`--range=#{q:mouse_status_range}` form (invariant #4). This requires
+**tmux ≥ 3.1** (that's when
 `range=user|X` status ranges and the `mouse_status_range` format variable were
 added) and, at the tmux-config level, `set -g mouse on` — the wizard's mouse
 question (`InitAnswers.mouse`) can add that setter for you (`--print` never
@@ -899,9 +1050,53 @@ warn_percent = 85   # default; 0 disables a tier
 crit_percent = 95   # default
 ```
 
-**Click-to-toggle widget views:** the nine format-bearing widgets —
+**Uptime widget:** `uptime` is opt-in — not in the default layout. It reads
+system uptime once at `Context`-build time (`/proc/uptime` on Linux,
+`kern.boottime` on macOS; `Context.uptime` is `None`/renders `down_format` on
+any failure). Takes a `format` (default `"{uptime}"`) whose `{uptime}`
+placeholder is the humanized coarsest unit pair (`3d 4h`, `1h 15m`, `12m`,
+`<1m`), plus `alt_format`/`down_format`. NOT threshold-aware.
+
+```toml
+[widgets.uptime]
+format      = "up {uptime}"   # default "{uptime}"
+down_format = ""
+```
+
+**Media widget:** `media` is opt-in — not in the default layout. It reads the
+current now-playing track by shelling out to `playerctl metadata` (Linux only;
+`Context.media` is `None`/renders `down_format` when `playerctl` is missing, no
+player is running, or the read fails — never a faked "not playing" reading).
+Takes a `format` (default `"{title} — {artist}"`) with `{artist}`/`{title}`/
+`{status}` placeholders, plus `alt_format`/`down_format`. NOT threshold-aware.
+
+```toml
+[widgets.media]
+format      = "{title} — {artist}"   # default
+alt_format  = "{status}: {title}"    # left-click toggles to this
+down_format = ""
+```
+
+**Per-widget color override (`fg`/`bg`):** every format-bearing widget accepts
+optional `fg`/`bg` keys (W29) that pin its foreground/background color,
+flattened directly into its `[widgets.<name>]` table. Applied centrally in
+`render_named_region` — after the widget renders, before `assign_palette` fills
+the cycling palette — so widgets stay `Context`-only (invariant #1). `bg` only
+takes effect on a segment that doesn't already carry an explicit background
+(the same rule `assign_palette` follows for an alert badge); `fg` applies
+wherever set. Both default to `None`, so an unset override is byte-identical to
+before (invariant #3). Colors are `Color` enums (`{ Indexed = N }` /
+`{ Named = "cyan" }` / `{ Rgb = [r,g,b] }`).
+
+```toml
+[widgets.cwd]
+fg = { Indexed = 250 }
+bg = { Rgb = [40, 44, 52] }
+```
+
+**Click-to-toggle widget views:** the eleven format-bearing widgets —
 `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg`,
-`git`, `disk` — each take an additional `alt_format` (default `""`, `#[serde(default)]`, so
+`git`, `disk`, `uptime`, `media` — each take an additional `alt_format` (default `""`, `#[serde(default)]`, so
 covered by invariant #3 like every other opt). A non-empty `alt_format` makes
 that widget clickable: left-clicking it in the tmux status line toggles it
 between `format` and `alt_format`.
@@ -911,6 +1106,30 @@ between `format` and `alt_format`.
 format     = "{icon} {percent}%"
 alt_format = "{icon} {bar} {percent}%"   # left-click toggles to this
 ```
+
+**Per-button click bindings (`[widgets.<name>.click]`):** beyond the default
+left-click toggle, any widget can bind a specific mouse button to a
+`toggle`/`open_url`/`run` action (W36), flattened as
+`left_click`/`right_click`/`middle_click` into its `[widgets.<name>]` table.
+The default action fires only when no binding matches, so an unconfigured
+widget is byte-identical to before (invariant #3).
+
+```toml
+[widgets.cpu]
+right_click = { run = "tmux display-popup -E htop" }
+middle_click = { open_url = "https://grafana.example/host" }
+# left_click = { toggle = false }   # explicitly disable the default left toggle
+```
+
+**Important — a `run`/`open_url` binding needs the widget to emit a clickable
+range.** A widget only becomes a tmux click target when it emits
+`#[range=user|NAME]`, which today happens iff it has a non-empty `alt_format`
+(or it's a plugin/unknown name). So a `run`/`open_url` binding on a widget with
+no `alt_format` resolves correctly but never fires — tmux never sends a click
+for a widget that emits no range. Give such a widget an `alt_format` (even a
+throwaway one) to make it clickable, or wait for a future range-on-binding
+change. Left-click `run`/`open_url` on an `alt_format` widget works today;
+right/middle now fire via the new `MouseDown2/3Status` bindings.
 
 Toggle state is **global**, not per-widget-instance or per-session: one flat,
 newline-delimited set of toggled widget/plugin names at
@@ -997,10 +1216,12 @@ filename stem):
 plugin_dir = "~/.local/share/rustline/plugins"   # optional
 
 [plugins.weather]
-source = "steve/rustline-weather"          # optional provenance note
+source = "steve/rustline-weather"          # owner/repo; consumed by `plugin update`
 allowed_urls = ["https://wttr.in/*"]        # glob, or "re:<pattern>" for regex
 allowed_paths = []
 max_state_bytes = 52428800                  # default: 50 MB
+# tag = "v1.2.0"                            # recorded by `plugin install/update`
+# checksum = "<sha256-hex>"                 # recorded by `plugin install/update` (TOFU)
 
 [plugins.weather.options]
 zip = "48183"
@@ -1023,6 +1244,15 @@ approve <name>` turns into exactly those allowlist entries above, after
 confirmation (see CLI above). A manifest alone grants nothing; only
 `approve` (or hand-editing the config) ever widens an allowlist.
 
+`source` is a typed `PluginSource` that still accepts a bare `owner/repo`
+string; `rustline plugin install <owner/repo>` (W38) downloads the plugin's
+`.wasm` from its GitHub release into the plugin dir and records
+`source`/`tag`/`checksum` here — but grants **no** capabilities (the same
+allowlist-widening rule: run `approve` or `url|path add` afterward). The
+recorded `checksum` is TOFU (trust-on-first-use — noted, not verified against a
+pin). `plugin update` re-resolves the latest release for that `source` and
+refreshes `checksum`/`tag`.
+
 **Logging:** a `[log]` table controls the two sinks. `rustline` logs to a
 rotated file (`$XDG_DATA_HOME/rustline/rustline.log`, default level `info`) and
 to stderr (default level `error`). `RUST_LOG` is **not** consulted. Raise the
@@ -1044,7 +1274,13 @@ info|debug|trace` and is parsed leniently (a typo falls back to the default).
 2. **`Segment`/`Context`/`Style`/`Color` stay serde-serializable** — this is
    the WASM ABI. `Segment`/`Style`/`Color` now live in `rustline-abi`
    (re-exported by `rustline-core`); `Context`/`WindowCtx` stay in
-   `rustline-core` (they carry `chrono`).
+   `rustline-core` (they carry `chrono`). `rustline_abi::ABI_VERSION` (W32,
+   currently `1`) versions this wire contract: the host stamps it onto every
+   `RenderInput`, and `abi_decision` **skips** a guest that declares a
+   *different* version (a guest with no `abi_version` export still registers as
+   legacy). Keep the wire types **additive** — no `deny_unknown_fields`, so an
+   older guest keeps deserializing a newer `Context` (this is why `uptime`/
+   `media` could be omitted from `WireContext` without breaking anything).
 3. **`Config::load` is total** — a bad config must never break the bar.
 4. **`init` output must be injection-safe** (`#{q:}` + `--flag=` form).
 5. **`render_region` puts `segments[0]` leftmost regardless of `Direction`.** The
@@ -1082,7 +1318,10 @@ branch on platform.
    host capability means adding its gate *and* a denied-case test. The
    TTL-cached GET (`rl_http_get_cached`) gates `allowed_urls` before any fetch
    (gate-first: a denied URL makes no network call and touches no cache),
-   with its own denied-case test.
+   with its own denied-case test. Every deny site also calls `observe_denial`
+   (before returning `ok:false`) so the default `FileDenialObserver` records
+   the `(kind, target)` for `rustline plugin denials` (W28) — recording is
+   best-effort and never changes the gate outcome.
 9. **N2. A plugin never breaks the bar.** Any instantiation error, render
    error, timeout, or malformed output degrades to empty segments
    (`WasmWidget::render`), bounded by fuel + wall-clock timeout + memory caps.
@@ -1268,19 +1507,50 @@ branch on platform.
   spec](docs/superpowers/specs/2026-07-22-rustline-whatsnext-bundle-design.md)
   / [plan](docs/superpowers/plans/2026-07-22-rustline-whatsnext-bundle.md) for
   the full 22-item, 5-phase bundle these entries summarize.
+- Done (whats-next bundle #2, branch `whats-next/2026-07-23` — see the
+  [design spec](docs/superpowers/specs/2026-07-23-rustline-whatsnext-bundle-2-design.md)
+  / [plan](docs/superpowers/plans/2026-07-23-rustline-whatsnext-bundle-2.md)):
+  - `uptime` widget (W37, the fourteenth built-in) — `Context.uptime`,
+    `read_uptime` (`/proc/uptime` / `kern.boottime`), a humanized `{uptime}`.
+  - `media`/now-playing widget (W41, the fifteenth built-in) —
+    `Context.media`/`MediaInfo`, `read_media` via `playerctl metadata`,
+    `{artist}`/`{title}`/`{status}`. Both `uptime`/`media` are opt-in,
+    layout-gated, and deliberately NOT mirrored into `WireContext`.
+  - datetime `timezone` (W30) — an IANA zone name via `chrono-tz`, default
+    `None` = local time unchanged; an unknown name falls back to local.
+  - per-widget `fg`/`bg` color override (W29) — `ColorOverride` flattened into
+    every widget's table, applied centrally in `render_named_region`.
+  - per-button click bindings (W36) — `ClickBinding`/`ClickBindings` +
+    `Config::click_map`, and `click.rs`'s `resolve_click`/`dispatch`/
+    `ClickExecutor`; `MouseDown{2,3}Status` tmux bindings (T15) so
+    middle/right actually fire (they previously resolved but shipped inert).
+  - ABI version negotiation (W32) — `rustline_abi::ABI_VERSION` + `abi_decision`
+    (skip a mismatched guest, register a legacy one).
+  - `rustline-plugin-sdk` crate (W39) — the guest-side SDK bundling typed
+    capability wrappers, wire re-exports, and `export_plugin!`; all four example
+    plugins migrated onto it.
+  - plugin lifecycle CLI — `plugin build` (W31), `plugin run` dev harness (W34),
+    `plugin install`/`update`/`remove` by `owner/repo` with recorded
+    `source`/`tag`/`checksum` (W38, granting no capabilities), and `plugin
+    denials` over the host's `FileDenialObserver` record (W28).
+  - global `--config <path>` (W35) — override the config-file path for every
+    subcommand.
+  - W43 (compiled-module cache) was spiked, not implemented — a small
+    `PluginBuilder::with_cache_config` seam, gated on a `build_plugin`-timing
+    measurement; see the
+    [feasibility note](docs/superpowers/notes/2026-07-23-w43-compiled-module-cache-feasibility.md).
 - Historical sparkline (last-X-seconds graph) for `cpu`/`memory` — `cpu`'s
   `read_cpu` now persists one sample across invocations (the `cpu-sample`
   cache, above), but only the single latest reading; a sparkline needs a
   short rolling history of samples (and the same treatment for `memory`,
   which still reads a single-shot snapshot), deferred to its own spec.
-- Plugin auto-download by `owner/repo` (today, `source` is just a config note;
-  installing a plugin means putting the `.wasm` in the plugin dir yourself).
 - Optional daemon front-end for sub-second / push-driven widgets (the pure core
   and the wasm host are already daemon-ready).
 - Per-widget richer customization; naming the widget in the panic-guard `warn!`.
-- `left_click`/`right_click` script handlers — today only a left click on a
-  widget acts (toggling `alt_format`); `ClickArgs.button` already threads
-  through other button values for this to extend into later.
+- Range-on-binding — today a `run`/`open_url` click binding only fires on a
+  widget that already emits a clickable range (i.e. has a non-empty
+  `alt_format`); making any widget with a configured binding emit a range would
+  let a `run`/`open_url` binding fire without a throwaway `alt_format`.
 - A widget-management TUI/popup (enable/disable/reorder layout widgets,
   writing `config.toml`) — parked in `TODO.md`; distinct from this feature's
   transient click-toggle view state.
@@ -1301,3 +1571,6 @@ branch on platform.
 - Plan (themes/theme picker): `docs/superpowers/plans/2026-07-21-rustline-themes-theme-picker.md`
 - Spec (whats-next bundle): `docs/superpowers/specs/2026-07-22-rustline-whatsnext-bundle-design.md`
 - Plan (whats-next bundle): `docs/superpowers/plans/2026-07-22-rustline-whatsnext-bundle.md`
+- Spec (whats-next bundle #2): `docs/superpowers/specs/2026-07-23-rustline-whatsnext-bundle-2-design.md`
+- Plan (whats-next bundle #2): `docs/superpowers/plans/2026-07-23-rustline-whatsnext-bundle-2.md`
+- Note (W43 compiled-module cache feasibility): `docs/superpowers/notes/2026-07-23-w43-compiled-module-cache-feasibility.md`
