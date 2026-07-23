@@ -3,6 +3,7 @@ mod battery;
 mod bench;
 mod build_context;
 mod cli;
+mod click;
 mod config_cmd;
 mod cpu;
 mod disk;
@@ -138,21 +139,19 @@ fn resolve_theme(cfg: &Config) -> Theme {
     cfg.to_theme_over(base)
 }
 
-/// Handle `rustline click`: on a left-click with a non-empty range, flip that
-/// widget's membership in the toggle state file. Any other button, or an
-/// empty range, is a no-op. Never fails the process (invariant: never break
-/// the bar).
+/// Handle `rustline click`: resolve the configured [`click::ClickAction`] for
+/// this `(range, button)` and dispatch it (W36). With no binding configured,
+/// resolution is byte-identical to the pre-W36 behavior — a left-click on a
+/// clickable widget or a plugin/unknown range flips its toggle-set membership,
+/// everything else is a no-op. Never fails the process (invariant: never break
+/// the bar); every process spawn is best-effort inside [`click::RealExecutor`].
 ///
-/// This is the single choke point for click dispatch: a future `left_click`/
-/// `right_click` script-handler mechanism should extend the resolution here
-/// rather than adding parallel dispatch elsewhere.
-fn run_click(args: &cli::ClickArgs) {
-    if args.button != "left" || args.range.is_empty() {
-        return;
-    }
-    let mut set = toggles::read_toggles();
-    toggles::apply_toggle(&mut set, &args.range);
-    toggles::write_toggles(&set);
+/// This is the single choke point for click dispatch: new buttons or action
+/// kinds extend [`click::resolve_click`]/[`click::dispatch`], not this
+/// function.
+fn run_click(args: &cli::ClickArgs, cfg: &Config) {
+    let action = click::resolve_click(cfg, &args.range, &args.button);
+    click::dispatch(action, &args.range, &click::RealExecutor);
 }
 
 fn main() {
@@ -234,7 +233,7 @@ fn main() {
             plugin_cmd::run(cmd, &cfg_path, &plugin_dir);
         }
         Command::Theme(cmd) => theme_cmd::run(cmd, &cfg_path, &themes_dir()),
-        Command::Click(args) => run_click(&args),
+        Command::Click(args) => run_click(&args, &cfg),
         Command::Doctor => {
             let plugin_dir = resolve_plugin_dir(None, &cfg);
             let paths = doctor::DoctorPaths {

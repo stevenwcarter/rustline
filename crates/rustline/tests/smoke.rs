@@ -1199,8 +1199,19 @@ fn click_toggles_state_file() {
     let tmp = tempfile::tempdir().unwrap();
     let toggles_path = tmp.path().join("data/rustline/toggles");
 
+    // W36: a default left-click only toggles a *clickable* widget, so give cpu
+    // a non-empty alt_format (what makes it click-toggleable) via config.
+    let cfgdir = tmp.path().join("cfg").join("rustline");
+    std::fs::create_dir_all(&cfgdir).unwrap();
+    std::fs::write(
+        cfgdir.join("config.toml"),
+        "[widgets.cpu]\nalt_format = \"{icon} {bar}\"\n",
+    )
+    .unwrap();
+
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
     cmd.args(["click", "--range=cpu", "--button=left"]);
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
     isolate(&mut cmd, tmp.path());
     let out = cmd.output().unwrap();
     assert!(
@@ -1214,6 +1225,7 @@ fn click_toggles_state_file() {
     // second click toggles off
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
     cmd.args(["click", "--range=cpu", "--button=left"]);
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
     isolate(&mut cmd, tmp.path());
     let out = cmd.output().unwrap();
     assert!(
@@ -1223,6 +1235,30 @@ fn click_toggles_state_file() {
     );
     let toggles = std::fs::read_to_string(&toggles_path).unwrap_or_default();
     assert!(!toggles.contains("cpu"), "cpu toggled off: {toggles:?}");
+}
+
+/// W36: a plugin/unknown range (absent from `[widgets.*]`) must still flip on a
+/// left-click, exactly as the pre-W36 `run_click` did — the invariant-#7
+/// characterization at the binary boundary (unit-tested in `click.rs` too).
+#[test]
+fn click_toggles_unknown_plugin_range_by_default() {
+    let tmp = tempfile::tempdir().unwrap();
+    let toggles_path = tmp.path().join("data/rustline/toggles");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["click", "--range=weatherplug", "--button=left"]);
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let toggles = std::fs::read_to_string(&toggles_path).unwrap();
+    assert!(
+        toggles.contains("weatherplug"),
+        "plugin toggled on: {toggles:?}"
+    );
 }
 
 #[test]

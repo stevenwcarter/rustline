@@ -73,6 +73,8 @@ pub struct DateTimeOpts {
     pub timezone: Option<String>,
     #[serde(default, flatten)]
     pub color: ColorOverride,
+    #[serde(default, flatten)]
+    pub click: ClickBindings,
 }
 
 fn default_dt_format() -> String {
@@ -86,6 +88,7 @@ impl Default for DateTimeOpts {
             alt_format: String::new(),
             timezone: None,
             color: ColorOverride::default(),
+            click: ClickBindings::default(),
         }
     }
 }
@@ -202,6 +205,8 @@ pub struct LanIpOpts {
     pub interface: Option<String>,
     #[serde(default, flatten)]
     pub color: ColorOverride,
+    #[serde(default, flatten)]
+    pub click: ClickBindings,
 }
 
 impl Default for LanIpOpts {
@@ -212,6 +217,7 @@ impl Default for LanIpOpts {
             down_format: String::new(),
             interface: None,
             color: ColorOverride::default(),
+            click: ClickBindings::default(),
         }
     }
 }
@@ -227,6 +233,8 @@ pub struct TailscaleIpOpts {
     pub down_format: String,
     #[serde(default, flatten)]
     pub color: ColorOverride,
+    #[serde(default, flatten)]
+    pub click: ClickBindings,
 }
 
 impl Default for TailscaleIpOpts {
@@ -236,6 +244,7 @@ impl Default for TailscaleIpOpts {
             alt_format: String::new(),
             down_format: String::new(),
             color: ColorOverride::default(),
+            click: ClickBindings::default(),
         }
     }
 }
@@ -275,6 +284,8 @@ pub struct BatteryOpts {
     pub icon: Option<String>,
     #[serde(default, flatten)]
     pub color: ColorOverride,
+    #[serde(default, flatten)]
+    pub click: ClickBindings,
 }
 
 impl Default for BatteryOpts {
@@ -287,6 +298,7 @@ impl Default for BatteryOpts {
             crit_percent: default_bat_crit(),
             icon: None,
             color: ColorOverride::default(),
+            click: ClickBindings::default(),
         }
     }
 }
@@ -346,6 +358,8 @@ pub struct CpuOpts {
     pub icon: Option<String>,
     #[serde(default, flatten)]
     pub color: ColorOverride,
+    #[serde(default, flatten)]
+    pub click: ClickBindings,
 }
 
 impl Default for CpuOpts {
@@ -359,6 +373,7 @@ impl Default for CpuOpts {
             crit_percent: default_cpu_crit(),
             icon: None,
             color: ColorOverride::default(),
+            click: ClickBindings::default(),
         }
     }
 }
@@ -385,6 +400,8 @@ pub struct MemoryOpts {
     pub icon: Option<String>,
     #[serde(default, flatten)]
     pub color: ColorOverride,
+    #[serde(default, flatten)]
+    pub click: ClickBindings,
 }
 
 impl Default for MemoryOpts {
@@ -398,6 +415,7 @@ impl Default for MemoryOpts {
             crit_percent: default_mem_crit(),
             icon: None,
             color: ColorOverride::default(),
+            click: ClickBindings::default(),
         }
     }
 }
@@ -428,6 +446,8 @@ pub struct LoadAvgOpts {
     pub crit_load: f64,
     #[serde(default, flatten)]
     pub color: ColorOverride,
+    #[serde(default, flatten)]
+    pub click: ClickBindings,
 }
 
 impl Default for LoadAvgOpts {
@@ -439,6 +459,7 @@ impl Default for LoadAvgOpts {
             warn_load: 0.0,
             crit_load: 0.0,
             color: ColorOverride::default(),
+            click: ClickBindings::default(),
         }
     }
 }
@@ -469,6 +490,8 @@ pub struct GitOpts {
     pub dirty_glyph: String,
     #[serde(default, flatten)]
     pub color: ColorOverride,
+    #[serde(default, flatten)]
+    pub click: ClickBindings,
 }
 
 impl Default for GitOpts {
@@ -479,6 +502,7 @@ impl Default for GitOpts {
             alt_format: String::new(),
             dirty_glyph: default_dirty_glyph(),
             color: ColorOverride::default(),
+            click: ClickBindings::default(),
         }
     }
 }
@@ -521,6 +545,8 @@ pub struct DiskOpts {
     pub alt_format: String,
     #[serde(default, flatten)]
     pub color: ColorOverride,
+    #[serde(default, flatten)]
+    pub click: ClickBindings,
 }
 
 impl Default for DiskOpts {
@@ -534,6 +560,7 @@ impl Default for DiskOpts {
             crit_percent: default_disk_crit(),
             alt_format: String::new(),
             color: ColorOverride::default(),
+            click: ClickBindings::default(),
         }
     }
 }
@@ -554,6 +581,8 @@ pub struct UptimeOpts {
     pub down_format: String,
     #[serde(default, flatten)]
     pub color: ColorOverride,
+    #[serde(default, flatten)]
+    pub click: ClickBindings,
 }
 
 impl Default for UptimeOpts {
@@ -563,6 +592,7 @@ impl Default for UptimeOpts {
             alt_format: String::new(),
             down_format: String::new(),
             color: ColorOverride::default(),
+            click: ClickBindings::default(),
         }
     }
 }
@@ -583,6 +613,8 @@ pub struct MediaOpts {
     pub down_format: String,
     #[serde(default, flatten)]
     pub color: ColorOverride,
+    #[serde(default, flatten)]
+    pub click: ClickBindings,
 }
 
 impl Default for MediaOpts {
@@ -592,6 +624,7 @@ impl Default for MediaOpts {
             alt_format: String::new(),
             down_format: String::new(),
             color: ColorOverride::default(),
+            click: ClickBindings::default(),
         }
     }
 }
@@ -617,6 +650,73 @@ pub struct ColorOverride {
     pub fg: Option<Color>,
     #[serde(default)]
     pub bg: Option<Color>,
+}
+
+/// One configured click action for a widget button (W36). Serde shape, one
+/// per button field: `{ toggle = true }` | `{ open_url = "…" }` |
+/// `{ run = "…" }`.
+///
+/// This is the *config-value* type (what a `left_click`/`right_click`/
+/// `middle_click` field holds); the binary's `resolve_click` maps it to the
+/// runtime `ClickAction` it dispatches on. The `toggle` payload is a bool so
+/// the TOML `{ toggle = true }` shape round-trips (`false` explicitly disables
+/// the default toggle).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClickBinding {
+    /// Toggle the widget's `alt_format` view (the default left-click action).
+    Toggle(bool),
+    /// Open a URL with the OS opener (`xdg-open`/`open`).
+    OpenUrl(String),
+    /// Run a shell command (`sh -c <cmd>`), detached.
+    Run(String),
+}
+
+/// Per-widget, per-button click bindings, flattened into each clickable
+/// widget's `[widgets.<name>]` table (W36) — the same flatten pattern as
+/// [`ColorOverride`]. All optional; an absent button falls back to the
+/// default click behavior, so an unconfigured widget is byte-identical to
+/// before this feature (invariant #3).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClickBindings {
+    #[serde(default)]
+    pub left_click: Option<ClickBinding>,
+    #[serde(default)]
+    pub right_click: Option<ClickBinding>,
+    #[serde(default)]
+    pub middle_click: Option<ClickBinding>,
+}
+
+impl ClickBindings {
+    /// The configured binding for a mouse-button name, if any. The button
+    /// string is a boundary value (tmux `MouseDown1Status` sends `left`
+    /// today); an unrecognized button yields `None`, so a click with no
+    /// matching binding falls through to the default behavior.
+    pub fn for_button(&self, button: &str) -> Option<&ClickBinding> {
+        match button {
+            "left" => self.left_click.as_ref(),
+            "right" => self.right_click.as_ref(),
+            "middle" => self.middle_click.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+/// A widget's click-relevant configuration, projected by [`Config::click_map`]
+/// and consumed by the binary's `resolve_click`: whether the widget is
+/// click-toggleable (has a non-empty `alt_format`) and its per-button
+/// bindings. Distinguishing a *known* built-in that isn't toggleable (→ no-op
+/// on a default left-click) from a name absent from the map (a plugin, whose
+/// bindings live under `[plugins.*]`, or an unknown range) is what lets
+/// `resolve_click` preserve the pre-W36 plugin/unknown flip behavior
+/// (invariant #7).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WidgetClick {
+    /// True when the widget has a non-empty `alt_format`, so a default
+    /// left-click toggles its view.
+    pub toggleable: bool,
+    /// Per-button overrides; a set button wins over the default action.
+    pub bindings: ClickBindings,
 }
 
 /// Per-widget option overrides, keyed by widget name.
@@ -947,6 +1047,82 @@ impl Config {
             .into_iter()
             .filter(|(_, color)| color.fg.is_some() || color.bg.is_some())
             .map(|(name, color)| (name.to_string(), color.clone()))
+            .collect()
+    }
+
+    /// Project the clickable built-in widgets into a name→[`WidgetClick`] map,
+    /// keyed by the same widget name used in `layout.*` — the shape the
+    /// binary's `resolve_click` consumes to decide a click's action (W36).
+    ///
+    /// Every click-*candidate* built-in (the format-bearing widgets that carry
+    /// an `alt_format`) is included, even with no binding configured, so
+    /// `resolve_click` can tell a *known* non-toggleable widget (→ no-op on a
+    /// default left-click) from a name absent from the map (a WASM plugin,
+    /// configured under `[plugins.*]` not `[widgets.*]`, or an unknown range),
+    /// which it treats as toggleable to preserve the pre-W36 flip behavior
+    /// (invariant #7). Mirrors [`Config::color_overrides`]'s candidate-table
+    /// projector.
+    pub fn click_map(&self) -> HashMap<String, WidgetClick> {
+        let candidates: [(&str, &str, &ClickBindings); 11] = [
+            (
+                "datetime",
+                &self.widgets.datetime.alt_format,
+                &self.widgets.datetime.click,
+            ),
+            (
+                "lan_ip",
+                &self.widgets.lan_ip.alt_format,
+                &self.widgets.lan_ip.click,
+            ),
+            (
+                "tailscale_ip",
+                &self.widgets.tailscale_ip.alt_format,
+                &self.widgets.tailscale_ip.click,
+            ),
+            (
+                "battery",
+                &self.widgets.battery.alt_format,
+                &self.widgets.battery.click,
+            ),
+            ("cpu", &self.widgets.cpu.alt_format, &self.widgets.cpu.click),
+            (
+                "memory",
+                &self.widgets.memory.alt_format,
+                &self.widgets.memory.click,
+            ),
+            (
+                "loadavg",
+                &self.widgets.loadavg.alt_format,
+                &self.widgets.loadavg.click,
+            ),
+            ("git", &self.widgets.git.alt_format, &self.widgets.git.click),
+            (
+                "disk",
+                &self.widgets.disk.alt_format,
+                &self.widgets.disk.click,
+            ),
+            (
+                "uptime",
+                &self.widgets.uptime.alt_format,
+                &self.widgets.uptime.click,
+            ),
+            (
+                "media",
+                &self.widgets.media.alt_format,
+                &self.widgets.media.click,
+            ),
+        ];
+        candidates
+            .into_iter()
+            .map(|(name, alt_format, bindings)| {
+                (
+                    name.to_string(),
+                    WidgetClick {
+                        toggleable: !alt_format.is_empty(),
+                        bindings: bindings.clone(),
+                    },
+                )
+            })
             .collect()
     }
 }
@@ -1598,5 +1774,143 @@ bg = { Named = "blue" }
     #[test]
     fn color_overrides_is_empty_by_default() {
         assert!(Config::default().color_overrides().is_empty());
+    }
+
+    #[test]
+    fn click_bindings_default_to_none_and_parse_per_button() {
+        let c = Config::default();
+        assert_eq!(c.widgets.cpu.click, ClickBindings::default());
+        assert!(c.widgets.cpu.click.left_click.is_none());
+        assert!(c.widgets.cpu.click.right_click.is_none());
+        assert!(c.widgets.cpu.click.middle_click.is_none());
+
+        let toml = r#"
+[widgets.cpu]
+right_click = { run = "htop" }
+[widgets.datetime]
+left_click = { toggle = true }
+middle_click = { open_url = "https://example.com" }
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            c.widgets.cpu.click.right_click,
+            Some(ClickBinding::Run("htop".into()))
+        );
+        assert_eq!(
+            c.widgets.datetime.click.left_click,
+            Some(ClickBinding::Toggle(true))
+        );
+        assert_eq!(
+            c.widgets.datetime.click.middle_click,
+            Some(ClickBinding::OpenUrl("https://example.com".into()))
+        );
+        // sibling widget fields are untouched by the flattened bindings
+        assert_eq!(c.widgets.cpu.format, "{icon} {percent}%");
+        assert!(c.widgets.datetime.click.right_click.is_none());
+    }
+
+    #[test]
+    fn click_bindings_serialize_round_trip() {
+        // Guards the `print-config` path: a config carrying click bindings must
+        // survive `toml::to_string` → re-parse (flattened enum-of-table values).
+        let mut cfg = Config::default();
+        cfg.widgets.cpu.click.right_click = Some(ClickBinding::Run("htop".into()));
+        cfg.widgets.datetime.click.left_click = Some(ClickBinding::Toggle(true));
+        cfg.widgets.datetime.click.middle_click =
+            Some(ClickBinding::OpenUrl("https://example.com".into()));
+        let serialized = toml::to_string(&cfg).expect("serialize config with click bindings");
+        let back: Config = toml::from_str(&serialized).expect("re-parse serialized config");
+        assert_eq!(
+            back.widgets.cpu.click.right_click,
+            Some(ClickBinding::Run("htop".into()))
+        );
+        assert_eq!(
+            back.widgets.datetime.click.left_click,
+            Some(ClickBinding::Toggle(true))
+        );
+        assert_eq!(
+            back.widgets.datetime.click.middle_click,
+            Some(ClickBinding::OpenUrl("https://example.com".into()))
+        );
+    }
+
+    #[test]
+    fn malformed_click_binding_falls_back_to_default() {
+        let dir = std::env::temp_dir().join("rustline_test_badclick");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        // `run` must be a string; an integer makes the binding (and so the
+        // whole config) invalid — Config::load must still stay total.
+        std::fs::write(&p, "[widgets.cpu]\nright_click = { run = 5 }\n").unwrap();
+        let c = Config::load(&p);
+        assert!(c.widgets.cpu.click.right_click.is_none());
+        assert_eq!(c.layout.left, Config::default().layout.left);
+    }
+
+    #[test]
+    fn for_button_maps_only_known_buttons() {
+        let bindings = ClickBindings {
+            left_click: Some(ClickBinding::Toggle(true)),
+            right_click: Some(ClickBinding::Run("htop".into())),
+            middle_click: None,
+        };
+        assert_eq!(
+            bindings.for_button("left"),
+            Some(&ClickBinding::Toggle(true))
+        );
+        assert_eq!(
+            bindings.for_button("right"),
+            Some(&ClickBinding::Run("htop".into()))
+        );
+        assert_eq!(bindings.for_button("middle"), None);
+        assert_eq!(bindings.for_button("scroll"), None); // unknown button
+    }
+
+    #[test]
+    fn click_map_reports_toggleable_and_bindings() {
+        let mut cfg = Config::default();
+        cfg.widgets.datetime.alt_format = "%H:%M".into();
+        cfg.widgets.cpu.click.right_click = Some(ClickBinding::Run("htop".into()));
+        let map = cfg.click_map();
+
+        // datetime is toggleable via its non-empty alt_format, no binding set.
+        let datetime = map.get("datetime").unwrap();
+        assert!(datetime.toggleable);
+        assert_eq!(datetime.bindings, ClickBindings::default());
+
+        // cpu is NOT toggleable (empty alt_format) but carries a right-click.
+        let cpu = map.get("cpu").unwrap();
+        assert!(!cpu.toggleable);
+        assert_eq!(
+            cpu.bindings.right_click,
+            Some(ClickBinding::Run("htop".into()))
+        );
+
+        // non-clickable-candidate built-ins (no alt_format) are absent, so
+        // resolve_click can distinguish them from plugins/unknown ranges.
+        assert!(!map.contains_key("hostname"));
+        assert!(!map.contains_key("windows"));
+    }
+
+    #[test]
+    fn click_map_covers_all_eleven_clickable_widgets_by_default() {
+        let map = Config::default().click_map();
+        for name in [
+            "datetime",
+            "lan_ip",
+            "tailscale_ip",
+            "battery",
+            "cpu",
+            "memory",
+            "loadavg",
+            "git",
+            "disk",
+            "uptime",
+            "media",
+        ] {
+            let wc = map.get(name).unwrap_or_else(|| panic!("{name} in map"));
+            assert!(!wc.toggleable, "{name} not toggleable by default");
+            assert_eq!(wc.bindings, ClickBindings::default());
+        }
     }
 }

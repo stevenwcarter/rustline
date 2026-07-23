@@ -11,7 +11,10 @@ pub mod widgets;
 
 pub use ansi::tmux_to_ansi;
 pub use assemble::{assign_palette, render_named_region, render_window};
-pub use config::{ColorOverride, Config, LogConfig, PluginConfig, ThemeConfig};
+pub use config::{
+    ClickBinding, ClickBindings, ColorOverride, Config, LogConfig, PluginConfig, ThemeConfig,
+    WidgetClick,
+};
 pub use context::{
     Battery, BatteryState, Context, CpuUsage, DiskInfo, GitInfo, MediaInfo, MemInfo, NetIface,
     WindowCtx,
