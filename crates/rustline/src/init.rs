@@ -3,6 +3,7 @@
 //! (template mutation, config merge, prompt parsing) are unit-tested; the
 //! interactive prompt loop is a thin I/O shell over them.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
@@ -229,9 +230,12 @@ pub fn defaults() -> InitAnswers {
 /// one-line block, write nothing) using the caller's already-resolved
 /// `current_theme` (`[theme].base` plus any inline `[theme]` overrides), so
 /// its `status-style` colors stay byte-identical to today's `rustline init`.
-/// Else gather answers (`--defaults` or the interactive prompt), then write
-/// both files. A non-interactive invocation (stdin not a TTY) without a flag
-/// errors rather than writing silently.
+/// Else gather answers (`--defaults` or the interactive prompt) the same way
+/// a real run would. `--dry-run` then previews both artifacts and writes
+/// nothing (see [`preview`]); otherwise `apply` writes both files. A
+/// non-interactive invocation (stdin not a TTY) without `--defaults` errors
+/// rather than writing/previewing silently, whether or not `--dry-run` was
+/// also given.
 ///
 /// `binary` is the resolved absolute path substituted into the tmux block's
 /// `#(...)` calls in place of a bare `rustline` (see `crate::resolve_binary`);
@@ -272,6 +276,10 @@ pub fn run(
         );
         std::process::exit(2);
     };
+    if args.dry_run {
+        preview(&answers, config_path, tmux_conf_path, binary);
+        return;
+    }
     apply(&answers, config_path, tmux_conf_path, binary);
 }
 
@@ -335,6 +343,146 @@ fn apply(a: &InitAnswers, config_path: &Path, tmux_conf_path: &Path, binary: &st
         tmux_conf_path.display(),
         tmux_conf_path.display()
     );
+}
+
+/// `init --dry-run`'s entry point: print, but never write, the config.toml and
+/// tmux block [`apply`] would produce for `answers`. Each artifact gets a
+/// `# --- ... ---` header naming its target path (see [`print_artifact`]);
+/// exits 1 (without writing anything) if an existing target can't be safely
+/// read, mirroring `apply`'s own refusal to clobber an unreadable file.
+fn preview(a: &InitAnswers, config_path: &Path, tmux_conf_path: &Path, binary: &str) {
+    match dry_run_config(a, config_path) {
+        Ok((text, existing)) => {
+            print_artifact("config.toml", config_path, existing.as_deref(), &text)
+        }
+        Err(e) => {
+            eprintln!("failed to preview {}: {e}", config_path.display());
+            std::process::exit(1);
+        }
+    }
+    match dry_run_tmux_block(a, tmux_conf_path, binary) {
+        Ok((text, existing)) => {
+            print_artifact("tmux block", tmux_conf_path, existing.as_deref(), &text)
+        }
+        Err(e) => {
+            eprintln!("failed to preview {}: {e}", tmux_conf_path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Compute the config.toml text [`write_config`] would produce for `answers`
+/// against `config_path`, without touching disk. `Ok((text, existing))`,
+/// where `existing` is the file's current contents when one is already
+/// there (so the caller can diff against it) or `None` for a fresh file.
+/// `Err` on the same unreadable/unparseable-existing-file failure modes
+/// `write_config` itself would refuse to overwrite on.
+fn dry_run_config(a: &InitAnswers, config_path: &Path) -> Result<(String, Option<String>), String> {
+    let generated = starter_config_toml(a);
+    match fs::read_to_string(config_path) {
+        Ok(existing) => {
+            let merged = merge_config(&existing, &generated, &a.theme)?;
+            Ok((merged, Some(existing)))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((generated, None)),
+        Err(e) => Err(format!("failed to read {}: {e}", config_path.display())),
+    }
+}
+
+/// Compute the tmux block text `apply` would upsert into `tmux_conf_path` for
+/// `answers`, without touching disk. Same `Ok`/`Err` shape as
+/// [`dry_run_config`].
+fn dry_run_tmux_block(
+    a: &InitAnswers,
+    tmux_conf_path: &Path,
+    binary: &str,
+) -> Result<(String, Option<String>), String> {
+    let theme = crate::resolve_base_theme(&a.theme).unwrap_or_default();
+    let bar_bg = theme.bar_bg.to_tmux();
+    let fg = theme.fg.to_tmux();
+    let block = tmux_conf::init_block(&InitBlockOpts {
+        bar_bg: &bar_bg,
+        fg: &fg,
+        two_line: a.two_line,
+        mouse: a.mouse,
+        interval: a.interval,
+        binary,
+    });
+    match fs::read_to_string(tmux_conf_path) {
+        Ok(existing) => {
+            let updated = tmux_conf::upsert_tmux_block(&existing, &block);
+            Ok((updated, Some(existing)))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((block, None)),
+        Err(e) => Err(format!("failed to read {}: {e}", tmux_conf_path.display())),
+    }
+}
+
+/// Print one dry-run artifact: a `# --- label (path) ---` header, then either
+/// a "new file" note or (for a target that already exists) a line diff of
+/// what would change plus a note that a `.rustline.bak` backup would be
+/// written first, then the full resulting content.
+fn print_artifact(label: &str, target: &Path, existing: Option<&str>, generated: &str) {
+    println!("# --- {label} ({}) ---", target.display());
+    match existing {
+        Some(old) => {
+            println!(
+                "# existing file found; would back up to {} first. Diff of what would change (- old / + new):",
+                backup_path(target).display()
+            );
+            let diff = line_diff(old, generated);
+            if diff.is_empty() {
+                println!("# (no changes)");
+            } else {
+                print!("{diff}");
+            }
+        }
+        None => println!("# new file (does not exist yet)"),
+    }
+    println!("# resulting content:");
+    println!("{generated}");
+}
+
+/// A minimal unified-style line diff (`-old_line`/`+new_line`; unchanged
+/// lines omitted) between `old` and `new`, computed via a textbook
+/// dynamic-programming LCS. Used only to preview `init --dry-run`'s effect on
+/// an existing file; config/tmux files are small enough (tens of lines) that
+/// the O(n*m) table cost is irrelevant.
+fn line_diff(old: &str, new: &str) -> String {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let (n, m) = (old_lines.len(), new_lines.len());
+    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if old_lines[i] == new_lines[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let mut out = String::new();
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if old_lines[i] == new_lines[j] {
+            i += 1;
+            j += 1;
+        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+            let _ = writeln!(out, "-{}", old_lines[i]);
+            i += 1;
+        } else {
+            let _ = writeln!(out, "+{}", new_lines[j]);
+            j += 1;
+        }
+    }
+    for line in &old_lines[i..] {
+        let _ = writeln!(out, "-{line}");
+    }
+    for line in &new_lines[j..] {
+        let _ = writeln!(out, "+{line}");
+    }
+    out
 }
 
 /// Read a line from stdin (untrimmed — callers trim via `parse_menu_choice`/

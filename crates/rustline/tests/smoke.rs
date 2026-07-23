@@ -258,6 +258,107 @@ fn init_defaults_writes_config_and_tmux_marker_block() {
 }
 
 #[test]
+fn init_dry_run_defaults_prints_both_artifacts_and_writes_nothing() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.arg("init").arg("--dry-run").arg("--defaults");
+    cmd.env("HOME", &home)
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+        .env_remove("RUST_LOG");
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "dry-run exits 0; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("config.toml"), "config header present: {s}");
+    assert!(s.contains("[theme]"), "config content printed: {s}");
+    assert!(s.contains("tmux block"), "tmux header present: {s}");
+    assert!(s.contains("#('"), "tmux block content printed: {s}");
+    assert!(
+        s.matches("new file").count() == 2,
+        "both artifacts noted as new: {s}"
+    );
+
+    let cfg_path = tmp.path().join("cfg").join("rustline").join("config.toml");
+    assert!(!cfg_path.exists(), "dry-run must not write config.toml");
+    let tmux_path = home.join(".tmux.conf");
+    assert!(!tmux_path.exists(), "dry-run must not write tmux.conf");
+    assert!(
+        !Path::new(&format!("{}.rustline.bak", cfg_path.display())).exists(),
+        "dry-run must not write a config backup"
+    );
+}
+
+#[test]
+fn init_dry_run_with_existing_files_shows_diff_and_writes_nothing() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let cfgdir = tmp.path().join("cfg").join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg_path = cfgdir.join("config.toml");
+    let cfg_original = "[widgets.cpu]\nformat = \"USER {percent}%\"\n";
+    fs::write(&cfg_path, cfg_original).unwrap();
+    let tmux_path = home.join(".tmux.conf");
+    let tmux_original = "# my own line\n";
+    fs::write(&tmux_path, tmux_original).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.arg("init").arg("--dry-run").arg("--defaults");
+    cmd.env("HOME", &home)
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+        .env_remove("RUST_LOG");
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "dry-run exits 0; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.matches("existing file found").count() == 2,
+        "both artifacts noted as existing: {s}"
+    );
+    assert!(
+        s.contains("USER {percent}%"),
+        "preserved user cpu format visible in resulting content: {s}"
+    );
+    assert!(
+        s.contains("+# >>> rustline >>>"),
+        "diff shows the tmux marker block being added: {s}"
+    );
+    assert!(
+        s.contains("+[theme]"),
+        "diff shows added config section: {s}"
+    );
+
+    assert_eq!(
+        fs::read_to_string(&cfg_path).unwrap(),
+        cfg_original,
+        "existing config.toml must be byte-for-byte unchanged"
+    );
+    assert_eq!(
+        fs::read_to_string(&tmux_path).unwrap(),
+        tmux_original,
+        "existing tmux.conf must be byte-for-byte unchanged"
+    );
+    assert!(
+        !Path::new(&format!("{}.rustline.bak", cfg_path.display())).exists(),
+        "dry-run must not write a config backup"
+    );
+    assert!(
+        !Path::new(&format!("{}.rustline.bak", tmux_path.display())).exists(),
+        "dry-run must not write a tmux backup"
+    );
+}
+
+#[test]
 fn init_non_tty_without_flags_errors() {
     let tmp = tempdir().unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
