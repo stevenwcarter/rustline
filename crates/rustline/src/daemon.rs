@@ -26,12 +26,6 @@
 //! not self-daemonize (no fork): it binds the socket and blocks in the
 //! foreground.
 
-// `serve`/`status`/`stop`/`DaemonState` are unused by the rest of the binary
-// until a later task wires the `daemon` subcommand + client fallback into the
-// render arms; until then `dead_code` would fire on the whole module — same
-// precedent as `daemon_proto.rs`/`daemon_client.rs`.
-#![allow(dead_code)]
-
 use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};

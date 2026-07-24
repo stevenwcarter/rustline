@@ -4,14 +4,20 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
-/// Point `HOME` and `XDG_DATA_HOME` at throwaway dirs under `tmp` (and strip
-/// any inherited `RUST_LOG`), so a smoke-test spawn can never create or
-/// append to the developer's real `~/.local/share/rustline/rustline.log`.
-/// Callers that also need an isolated config dir set `XDG_CONFIG_HOME`
-/// themselves — this only adds the two vars every binary spawn needs.
+/// Point `HOME`, `XDG_DATA_HOME`, and `XDG_RUNTIME_DIR` at throwaway dirs
+/// under `tmp` (and strip any inherited `RUST_LOG`), so a smoke-test spawn
+/// can never create or append to the developer's real
+/// `~/.local/share/rustline/rustline.log`, nor (W48) ever probe a REAL daemon
+/// socket the developer might have running at their actual
+/// `$XDG_RUNTIME_DIR/rustline/daemon.sock` — every `render`/`daemon` spawn
+/// below now touches `daemon_client::try_render`/`daemon::status`, which
+/// resolve the socket path from `XDG_RUNTIME_DIR` when it's set. Callers that
+/// also need an isolated config dir set `XDG_CONFIG_HOME` themselves — this
+/// only adds the vars every binary spawn needs.
 fn isolate(cmd: &mut Command, tmp: &Path) {
     cmd.env("HOME", tmp.join("home"))
         .env("XDG_DATA_HOME", tmp.join("data"))
+        .env("XDG_RUNTIME_DIR", tmp.join("runtime"))
         .env_remove("RUST_LOG");
 }
 
@@ -1407,13 +1413,15 @@ fn theme_pick_non_tty_errors_and_writes_nothing() {
     );
 }
 
-/// A `rustline` invocation with an isolated HOME/XDG environment so logging
-/// and config read/write a throwaway tree, never the developer's real dirs.
+/// A `rustline` invocation with an isolated HOME/XDG environment so logging,
+/// config, and (W48) daemon-socket probing all read/write a throwaway tree,
+/// never the developer's real dirs or a real daemon they might have running.
 fn isolated_cmd(home: &Path, xdg_data: &Path, xdg_config: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_rustline"));
     c.env("HOME", home)
         .env("XDG_DATA_HOME", xdg_data)
         .env("XDG_CONFIG_HOME", xdg_config)
+        .env("XDG_RUNTIME_DIR", xdg_data.join("runtime"))
         .env_remove("RUST_LOG");
     c
 }
@@ -2031,5 +2039,29 @@ fn plugin_approve_no_manifest_writes_nothing() {
         fs::read_to_string(&cfg).unwrap(),
         original,
         "no manifest leaves config untouched"
+    );
+}
+
+/// W48: `rustline daemon status` with no daemon bound at the socket path
+/// exits non-zero and reports "not running" on stderr. `isolate` pins
+/// `XDG_RUNTIME_DIR` to an isolated tempdir, so this never depends on, or
+/// collides with, a real daemon the developer might already have running on
+/// their own machine.
+#[test]
+fn daemon_status_with_no_daemon_running_exits_nonzero() {
+    let tmp = tempdir().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["daemon", "status"]);
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        !out.status.success(),
+        "no daemon running -> non-zero exit; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not running"),
+        "prints \"not running\": {stderr}"
     );
 }

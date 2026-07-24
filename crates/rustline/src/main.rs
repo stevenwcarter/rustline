@@ -32,7 +32,8 @@ use std::path::PathBuf;
 
 use build_context::{build_region_context, build_window_context};
 use clap::{CommandFactory, Parser};
-use cli::{Cli, Command, PluginCmd, Render};
+use cli::{Cli, Command, DaemonCmd, DaemonRunArgs, PluginCmd, Render};
+use daemon_proto::{RegionKind, RenderArgsWire};
 use rustline_core::{
     Config, Direction, Registry, Theme, ThemeConfig, builtin_theme, render_named_region,
     render_window, tmux_to_ansi,
@@ -178,42 +179,91 @@ fn main() {
 
     match cli.command {
         Command::Render(Render::Left(args)) => {
-            let plugin_dir = resolve_plugin_dir(args.plugin_dir.as_deref(), &cfg);
-            let mut registry = Registry::with_builtins(&cfg);
-            rustline_wasm::register_plugins(&mut registry, &cfg, &plugin_dir, &cfg.layout.left);
-            let ctx = build_region_context(&args, &cfg.layout.left, &theme, &cfg);
-            let overrides = cfg.color_overrides();
-            let out = render_named_region(
-                Direction::Left,
-                &cfg.layout.left,
-                &ctx,
-                &registry,
-                &theme,
-                &overrides,
-            );
-            emit(&out, args.preview);
+            let wire = RenderArgsWire {
+                session: args.session.clone(),
+                window: args.window.clone(),
+                pane: args.pane.clone(),
+                pane_path: args.pane_path.clone(),
+                preview: args.preview,
+                ..RenderArgsWire::default()
+            };
+            match daemon_client::try_render(RegionKind::Left, wire) {
+                Some(markup) => emit(&markup, args.preview),
+                None => {
+                    let plugin_dir = resolve_plugin_dir(args.plugin_dir.as_deref(), &cfg);
+                    let mut registry = Registry::with_builtins(&cfg);
+                    rustline_wasm::register_plugins(
+                        &mut registry,
+                        &cfg,
+                        &plugin_dir,
+                        &cfg.layout.left,
+                    );
+                    let ctx = build_region_context(&args, &cfg.layout.left, &theme, &cfg);
+                    let overrides = cfg.color_overrides();
+                    let out = render_named_region(
+                        Direction::Left,
+                        &cfg.layout.left,
+                        &ctx,
+                        &registry,
+                        &theme,
+                        &overrides,
+                    );
+                    emit(&out, args.preview);
+                }
+            }
         }
         Command::Render(Render::Right(args)) => {
-            let plugin_dir = resolve_plugin_dir(args.plugin_dir.as_deref(), &cfg);
-            let mut registry = Registry::with_builtins(&cfg);
-            rustline_wasm::register_plugins(&mut registry, &cfg, &plugin_dir, &cfg.layout.right);
-            let ctx = build_region_context(&args, &cfg.layout.right, &theme, &cfg);
-            let overrides = cfg.color_overrides();
-            let out = render_named_region(
-                Direction::Right,
-                &cfg.layout.right,
-                &ctx,
-                &registry,
-                &theme,
-                &overrides,
-            );
-            emit(&out, args.preview);
+            let wire = RenderArgsWire {
+                session: args.session.clone(),
+                window: args.window.clone(),
+                pane: args.pane.clone(),
+                pane_path: args.pane_path.clone(),
+                preview: args.preview,
+                ..RenderArgsWire::default()
+            };
+            match daemon_client::try_render(RegionKind::Right, wire) {
+                Some(markup) => emit(&markup, args.preview),
+                None => {
+                    let plugin_dir = resolve_plugin_dir(args.plugin_dir.as_deref(), &cfg);
+                    let mut registry = Registry::with_builtins(&cfg);
+                    rustline_wasm::register_plugins(
+                        &mut registry,
+                        &cfg,
+                        &plugin_dir,
+                        &cfg.layout.right,
+                    );
+                    let ctx = build_region_context(&args, &cfg.layout.right, &theme, &cfg);
+                    let overrides = cfg.color_overrides();
+                    let out = render_named_region(
+                        Direction::Right,
+                        &cfg.layout.right,
+                        &ctx,
+                        &registry,
+                        &theme,
+                        &overrides,
+                    );
+                    emit(&out, args.preview);
+                }
+            }
         }
         Command::Render(Render::Window(args)) => {
-            // Windows don't run plugins in v1: builtins only.
-            let registry = Registry::with_builtins(&cfg);
-            let ctx = build_window_context(&args);
-            emit(&render_window(&ctx, &registry, &theme), args.preview);
+            let wire = RenderArgsWire {
+                index: Some(args.index.clone()),
+                name: Some(args.name.clone()),
+                flags: Some(args.flags.clone()),
+                current: args.current,
+                preview: args.preview,
+                ..RenderArgsWire::default()
+            };
+            match daemon_client::try_render(RegionKind::Window, wire) {
+                Some(markup) => emit(&markup, args.preview),
+                None => {
+                    // Windows don't run plugins in v1: builtins only.
+                    let registry = Registry::with_builtins(&cfg);
+                    let ctx = build_window_context(&args);
+                    emit(&render_window(&ctx, &registry, &theme), args.preview);
+                }
+            }
         }
         Command::Init(args) => {
             let binary = resolve_binary(args.binary.as_deref());
@@ -261,6 +311,32 @@ fn main() {
                 tmux_conf: &tmux_conf_path(),
             };
             std::process::exit(doctor::run(&paths));
+        }
+        Command::Daemon(args) => {
+            match args
+                .command
+                .unwrap_or(DaemonCmd::Run(DaemonRunArgs::default()))
+            {
+                DaemonCmd::Run(run_args) => {
+                    let plugin_dir = resolve_plugin_dir(run_args.plugin_dir.as_deref(), &cfg);
+                    if let Err(e) = daemon::serve(&cfg_path, plugin_dir) {
+                        eprintln!("daemon failed: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                DaemonCmd::Status => {
+                    let running = daemon::status();
+                    eprintln!("{}", if running { "running" } else { "not running" });
+                    std::process::exit(if running { 0 } else { 1 });
+                }
+                DaemonCmd::Stop => match daemon::stop() {
+                    Ok(()) => eprintln!("daemon stopped"),
+                    Err(e) => {
+                        eprintln!("failed to stop daemon: {e}");
+                        std::process::exit(1);
+                    }
+                },
+            }
         }
         Command::Completions { shell } => {
             clap_complete::generate(

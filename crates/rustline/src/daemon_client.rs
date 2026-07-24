@@ -6,13 +6,6 @@
 //! bar"). No fallback logic lives here; that's the caller's job (Task 12
 //! wires this into the render arms).
 
-// `try_render`/`daemon_socket_path` are unused by the rest of the binary
-// until Task 12 wires them into the render arms; until then `dead_code`
-// would fire on the whole module (the tests below only prove the round-trip,
-// they don't count as a production call site) — same precedent as
-// `daemon_proto.rs`.
-#![allow(dead_code)]
-
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

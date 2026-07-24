@@ -15,6 +15,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use crate::{daemon, daemon_client};
+
 /// Minimum tmux version rustline's click-to-toggle needs: status-line click
 /// ranges and the `mouse_status_range` format variable were added in 3.1.
 const MIN_TMUX_VERSION: (u32, u32) = (3, 1);
@@ -248,6 +250,38 @@ fn check_managed_block(tmux_conf: &Path) -> Check {
     }
 }
 
+/// Whether the optional persistent render daemon (`rustline daemon run`,
+/// W48) is present and reachable. Purely informational: daemon mode is an
+/// opt-in speedup, not a requirement (`try_render` always falls back to an
+/// in-process render), so this is never a `Fail` — only `Ok` (reachable) or
+/// `Warn` (not running, or a stale socket file that doesn't answer).
+fn check_daemon() -> Check {
+    let sock = daemon_client::daemon_socket_path();
+    if !sock.exists() {
+        return Check {
+            name: "render daemon",
+            status: CheckStatus::Warn,
+            detail: "not running (optional; see `rustline daemon run`)".to_string(),
+        };
+    }
+    if daemon::status() {
+        Check {
+            name: "render daemon",
+            status: CheckStatus::Ok,
+            detail: format!("running at {}", sock.display()),
+        }
+    } else {
+        Check {
+            name: "render daemon",
+            status: CheckStatus::Warn,
+            detail: format!(
+                "socket present at {} but not reachable (stale socket from a killed daemon?)",
+                sock.display()
+            ),
+        }
+    }
+}
+
 /// Whether a resolved directory (config/themes/plugin/log) already exists.
 /// Absence is only a `Warn` — every one of these is created on first use
 /// (invariant: `Config::load` is total), so a fresh install legitimately has
@@ -284,6 +318,7 @@ pub(crate) fn run(paths: &DoctorPaths) -> i32 {
         check_truecolor(),
         check_binary_on_path(),
         check_managed_block(paths.tmux_conf),
+        check_daemon(),
         check_dir("config dir", config_dir),
         check_dir("themes dir", paths.themes_dir),
         check_dir("plugin dir", paths.plugin_dir),

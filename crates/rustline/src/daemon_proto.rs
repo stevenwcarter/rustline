@@ -14,12 +14,6 @@
 //! covering all three `RegionKind`s — fields that don't apply to the
 //! requested kind are simply absent/default.
 
-// Every item here is `pub` for the daemon client/server tasks that consume
-// this module next; until they land, nothing in the binary references them,
-// so `dead_code` would otherwise fire on the whole module (the tests below
-// only prove the round-trip, they don't count as a production call site).
-#![allow(dead_code)]
-
 use std::io::{self, Read, Write};
 
 use serde::de::DeserializeOwned;

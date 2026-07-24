@@ -60,6 +60,12 @@ pub enum Command {
     /// truecolor terminal, PATH, the managed tmux config block) and report
     /// pass/warn/fail, plus the resolved config/themes/plugin/log paths.
     Doctor,
+    /// Run, check the status of, or stop the persistent render daemon (W48):
+    /// a long-lived process that keeps config/theme/plugin state warm and
+    /// answers renders over a Unix socket, so `render left|right|window` can
+    /// skip per-invocation startup when it's reachable. Bare `rustline
+    /// daemon` (no further subcommand) is shorthand for `rustline daemon run`.
+    Daemon(DaemonArgs),
     /// Print a shell-completion script for the given shell to stdout.
     Completions {
         /// Which shell to generate a completion script for.
@@ -360,6 +366,37 @@ pub struct ClickArgs {
     /// back to a left-click toggle; an unrecognized value is a no-op.
     #[arg(long, default_value = "left")]
     pub button: String,
+}
+
+/// Arguments for `rustline daemon`. Wraps an optional subcommand so a bare
+/// `rustline daemon` invocation (no `run`/`status`/`stop`) still parses and
+/// defaults to running the server, same as `rustline daemon run`.
+#[derive(Args)]
+pub struct DaemonArgs {
+    #[command(subcommand)]
+    pub command: Option<DaemonCmd>,
+}
+
+/// `rustline daemon` subcommands.
+#[derive(Subcommand)]
+pub enum DaemonCmd {
+    /// Run the daemon server in the foreground (the default when no
+    /// subcommand is given): binds the Unix socket and serves renders until
+    /// stopped.
+    Run(DaemonRunArgs),
+    /// Check whether the daemon is running and reachable; exits non-zero
+    /// (and prints "not running") if it isn't.
+    Status,
+    /// Ask a running daemon to stop.
+    Stop,
+}
+
+/// Arguments for `rustline daemon run` (and bare `rustline daemon`).
+#[derive(Args, Default)]
+pub struct DaemonRunArgs {
+    /// Override the plugin discovery directory (same resolution as render).
+    #[arg(long)]
+    pub plugin_dir: Option<String>,
 }
 
 /// Arguments for `rustline bench` (feature `bench`).
