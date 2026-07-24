@@ -2618,6 +2618,11 @@ mount = "/data"
         let cfg3 = Config::default();
         assert!(!cfg3.spark_referenced_in_layout(&["cpu".into()], "cpu"));
         assert!(!cfg3.spark_referenced_in_layout(&["disk".into()], "disk"));
+
+        // Memory base widget with {spark} — the structurally-identical memory arm.
+        let mut cfg_mem = Config::default();
+        cfg_mem.widgets.memory.format = "{icon} {spark} {percent}%".into();
+        assert!(cfg_mem.spark_referenced_in_layout(&["memory".into()], "memory"));
     }
 
     #[test]

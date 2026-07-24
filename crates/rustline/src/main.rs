@@ -273,8 +273,8 @@ fn main() {
             // $TMUX to run `tmux list-windows`, and the batched path is
             // already cheap (lean WindowCtxs, builtins only, no plugins).
             let registry = Registry::with_builtins(&cfg);
-            let windows = read_windows(args.session.as_deref());
-            let markup = render_windows(&windows, &registry, &theme);
+            let window_ctxs = read_windows(args.session.as_deref());
+            let markup = render_windows(&window_ctxs, &registry, &theme);
             emit(&markup, args.preview);
         }
         Command::Init(args) => {

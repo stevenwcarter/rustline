@@ -401,6 +401,10 @@ mod tests {
             !STATUS_FORMAT_0.contains("#{window_name}"),
             "no bare untrusted var"
         );
+        assert!(
+            !STATUS_FORMAT_0.contains("#{window_index}"),
+            "no bare untrusted window index"
+        );
     }
 
     #[test]
