@@ -329,7 +329,15 @@ these shared types, not a design shortcut. Keep them serializable.
   themed rounded pill via `render.rs::render_window_pill`, keyed on
   `ctx.window.is_current`; still `catch_unwind`-guarded → `""` on panic/no
   window; the window pill is never clickable — `render window` has no
-  `--plugin-dir` and no range wrapping).
+  `--plugin-dir` and no range wrapping), and `render_windows(windows:
+  &[WindowCtx], &Registry, &Theme) -> String` (W42, the batched two-line
+  window-list render). `render_window` and `render_windows` now share a
+  private `window_pill` helper (one window → one pill, factored out of
+  `render_window`'s prior body); unlike the singular path, `render_windows`
+  DOES wrap each pill in `#[range=window|<index>]…#[norange]` — it re-emits
+  the same `range=window|IDX` markers tmux's own `#{W:}` loop used to (see
+  tmux integration model below), so window-select clicks keep working. Pills
+  are joined with no separator (each is self-contained).
 - `config.rs` — `Config` (TOML): `layout`, `theme`, `widgets`, a top-level
   `plugin_dir: Option<String>`, and a typed `plugins: HashMap<String,
   PluginConfig>` table (see Config below). `Config::load` is **total**
@@ -384,7 +392,16 @@ these shared types, not a design shortcut. Keep them serializable.
   throughput_interfaces(&self, layout: &[String]) -> BTreeSet<Option<String>>`
   collect the distinct mounts/interfaces the layout's `disk`/`throughput`
   entries (base + every instance) actually reference, for the per-mount/
-  per-interface reads below. A module-level `const BUILTIN_WIDGET_NAMES: [&str;
+  per-interface reads below. `pub fn spark_referenced_in_layout(&self, layout:
+  &[String], kind: &str) -> bool` (W57) is the `{spark}`-gate's own kind-aware
+  scan: true iff the layout's base `cpu`/`memory` widget OR any
+  `[instances.<name>]` of that `kind` in the layout has `{spark}` in its
+  `format`/`alt_format` (shared private `refs_spark` helper) — `build_context.rs`
+  calls this instead of checking only the base widget, so a `{spark}` that
+  appears only on an instance (no base widget of that kind in the layout at
+  all) still populates the shared `Context.cpu_history`/`mem_history` ring
+  (supersedes W56's base-only check). A module-level `const
+  BUILTIN_WIDGET_NAMES: [&str;
   16]` + `fn is_builtin_widget_name(name: &str) -> bool` is the built-in-wins
   precedence guard: `color_overrides()`/`click_map()`/`layout_kinds` all skip
   a `[instances.<name>]` entry whose name collides with a built-in, mirroring
@@ -701,6 +718,16 @@ mod guest`): three more worked examples, each covering a host capability
   `#[cfg(any(target_os = "linux", test))]`-compiled (same as `cpu.rs`), so
   they're unit-tested on any dev box; `interface` pins the read to one named
   interface, `None` aggregates all non-loopback interfaces.
+- `windows.rs` — `read_windows(session: Option<&str>) -> Vec<WindowCtx>` (W42),
+  a platform-agnostic shell-out to `tmux list-windows -F
+  "#{window_index}\t#{window_active}\t#{window_flags}\t#{window_name}"` (name
+  last so a tab inside a window name can't misalign the earlier fields; the
+  pure `parse_list_windows` does the `splitn(4, '\t')` parse, unconditionally
+  unit-tested — no cfg-gating needed, same shape as `git.rs`'s tool-shell-out
+  pattern). Empty `Vec` on ANY failure (`tmux` missing, bad session, non-zero
+  exit) — never a fabricated window (invariant #6). Backs `render windows`
+  (the batched two-line window-list render; called directly from `main.rs`,
+  not routed through `build_context.rs`).
 - `sample_store.rs` — shared best-effort atomic per-widget state persistence
   (W52): `read_sample`/`write_sample` read/write a small text file under a state
   dir via temp-file + rename, `warn!`ing (never panicking) on I/O failure. A
@@ -834,10 +861,12 @@ mod guest`): three more worked examples, each covering a host capability
   region's layout, mirroring the `cpu`/`memory` gate), `throughput` (via
   `throughput::read_throughput`, gated the same way on `throughput` being in
   the layout, W47), the `{spark}`-gated `cpu_history`/`mem_history` (only read —
-  via `cpu::read_cpu_history`/`memory::read_memory_history` — when the `cpu`/
-  `memory` widget's `format` **or** `alt_format` references `{spark}` (W56); a
-  `spark` struct threaded alongside the layout carries each widget's `format` +
-  `spark_width`, W45), `os`, `arch`
+  via `cpu::read_cpu_history`/`memory::read_memory_history` — when the base
+  `cpu`/`memory` widget OR any `cpu`/`memory`-kind `[instances.<name>]` in the
+  layout references `{spark}` in its `format`/`alt_format`
+  (`Config::spark_referenced_in_layout`, W57 — supersedes W56's base-only
+  check); a `spark` struct threaded alongside the layout carries each widget's
+  `format` + `spark_width`, W45), `os`, `arch`
   (from `std::env::consts::OS`/`ARCH`), and `toggled` (via
   `toggles::read_toggles()`, unconditionally — cheap relative to the gated
   cpu/memory/git/disk reads). `pub fn build_region_context(args: &RegionArgs,
@@ -1065,6 +1094,12 @@ config-file path for every subcommand that reads or writes it (default:
 - `rustline render left|right [--session= --window= --pane= --pane-path=] [--preview] [--plugin-dir=]`
 - `rustline render window [--current] --index= [--name=] [--flags=] [--preview]`
   (no `--plugin-dir` — windows don't run plugins in v1)
+- `rustline render windows [--session=<s>] [--preview]` (W42) — renders a
+  whole session's window list in one call (batched; backs the two-line
+  `status-format[0]`); shells out to `tmux list-windows` client-side; runs
+  **in-process, NOT daemon-routed** (a systemd/launchd daemon has no `$TMUX`
+  to run `tmux list-windows` against). One-line mode is unchanged — it still
+  renders per-window via `render window`.
 - `rustline init` — interactive onboarding wizard (needs a TTY): asks theme
   (with preview), one-/two-line status, mouse/click-to-toggle, machine-type
   widgets (laptop → `battery`, Tailscale → `tailscale_ip`, LAN → `lan_ip`),
@@ -1284,6 +1319,24 @@ added) and, at the tmux-config level, `set -g mouse on` — the wizard's mouse
 question (`InitAnswers.mouse`) can add that setter for you (`--print` never
 does; it always emits the mouse-off, one-line legacy block regardless of
 config).
+
+**Two-line window list is batched (W42).** In two-line mode, `status-format[0]`
+(the window-list line) used to invoke tmux's own `#{W:...}` loop, which expanded
+to a `#{T:window-status-format}` per-window `#(<binary> render window …)` call —
+one process spawn per window, every refresh. It's now a single `#(<binary>
+render windows --session=#{q:session_name})` call: `rustline` itself shells out
+to `tmux list-windows -F` (`windows.rs`, client-side — not another tmux format
+expansion) and renders every window's pill in one process, re-emitting each
+one's `#[range=window|IDX]` so tmux's built-in window-select click keeps
+working (N spawns per refresh → 1). Injection-safe: the only interpolated tmux
+var is the `#{q:}`-escaped `session_name`; window names/flags come back from
+`tmux list-windows -F`, never through the shell. This batched path is
+deliberately **in-process only** — unlike the singular `render window` (and
+`render left`/`render right`), it does not try the daemon first, since a
+systemd/launchd-managed daemon has no `$TMUX` in its environment to run `tmux
+list-windows` against. **One-line mode is unchanged** —
+`window-status-format`/`window-status-current-format` still call `render
+window` once per window.
 
 **Injection safety (critical):** tmux expands `#{…}` inside `#(…)` *before*
 `/bin/sh -c` and does not shell-escape. So the `init` block passes every tmux var
@@ -2155,6 +2208,25 @@ branch on platform.
     custom themes, not just built-ins.
   - W40 — `--json` on every read-only list surface (`plugin list`, `theme list`,
     `plugin url|path list`, `plugin denials`).
+- Done (branch `whats-next/2026-07-24-execute-2` — see the
+  [design spec](docs/superpowers/specs/2026-07-24-rustline-batched-window-render-design.md)
+  / [plan](docs/superpowers/plans/2026-07-24-rustline-batched-window-render.md)):
+  - W42 — batched two-line window-list render: `rustline render windows
+    [--session=<s>] [--preview]` (`windows.rs`'s `read_windows` +
+    `rustline-core`'s `render_windows`) shells out to `tmux list-windows -F`
+    once and renders the whole window list in a single process call instead
+    of tmux's own per-window `#{W:}` loop (N spawns per refresh → 1); the
+    two-line `status-format[0]` now calls `#(<binary> render windows
+    --session=#{q:session_name})`, re-emitting each pill's
+    `#[range=window|IDX]` so click-to-select keeps working. In-process only,
+    not daemon-routed (no `$TMUX` inside a systemd/launchd daemon to run
+    `tmux list-windows`); one-line mode is unchanged (still per-window
+    `render window`).
+  - W57 — the `{spark}` history gate (`Config::spark_referenced_in_layout`)
+    now scans the base `cpu`/`memory` widget OR any layout
+    `[instances.<name>]` of that kind, not just the base (W56) — an
+    instance-only `{spark}` now populates `Context.cpu_history`/
+    `mem_history` too.
 - Per-widget richer customization; naming the widget in the panic-guard `warn!`.
 - Range-on-binding — today a `run`/`open_url` click binding only fires on a
   widget that already emits a clickable range (i.e. has a non-empty
@@ -2189,3 +2261,5 @@ branch on platform.
 - Plan (whats-next bundle #4): `docs/superpowers/plans/2026-07-23-rustline-whatsnext-bundle-4.md`
 - Spec (whats-next bundle #5): `docs/superpowers/specs/2026-07-24-rustline-whatsnext-bundle-5-design.md`
 - Plan (whats-next bundle #5): `docs/superpowers/plans/2026-07-24-rustline-whatsnext-bundle-5.md`
+- Spec (batched window render): `docs/superpowers/specs/2026-07-24-rustline-batched-window-render-design.md`
+- Plan (batched window render): `docs/superpowers/plans/2026-07-24-rustline-batched-window-render.md`

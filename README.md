@@ -81,7 +81,10 @@ tmux source-file ~/.tmux.conf
 ```
 
 The wizard wires `rustline render` into `status-left` / `status-right` and the
-window list, sets `status-interval` (1s or 5s, your choice), adds
+window list — in two-line mode the window list renders in a single batched
+`rustline render windows --session=<s>` call instead of one process per window
+(one-line mode still renders each window separately) — sets `status-interval`
+(1s or 5s, your choice), adds
 `after-select-pane` / `after-select-window` hooks that call `refresh-client -S`
 so the bar updates immediately when you switch panes or windows, and — if you
 opt in — binds a left click on any clickable widget to toggle its `alt_format`
