@@ -10,6 +10,15 @@
 //! the widget catalog, then drives a `ratatui`/crossterm draw loop until the
 //! user quits. [`TerminalGuard`] restores raw mode and the alternate screen on
 //! every exit path, including a panic unwinding through the loop.
+//!
+//! CENTER is not a fourth freely-editable region: tmux's window list is
+//! rendered by a dedicated, hardcoded path (`assemble.rs`'s `window_pill`,
+//! resolving only the `windows` widget), so `[layout].center` has no render
+//! path that reads it. [`Column::Center`] stays focusable/visible so a user
+//! can see the window list lives there, but every edit that would touch it
+//! is refused (see [`EditorState::targets_center`]) — a silent no-op, which
+//! is what an edit to CENTER used to be before this restriction, would be
+//! worse than being told why.
 
 use std::io::{self, IsTerminal, Stdout};
 use std::path::Path;
@@ -32,6 +41,14 @@ use toml_edit::DocumentMut;
 
 /// The four focusable columns: the three layout regions plus the pool of
 /// widgets that aren't currently placed.
+///
+/// `Center` is special: tmux renders the window list there itself
+/// (`assemble.rs`'s `window_pill`, called by both `render_window` and
+/// `render_windows`, hardcodes `registry.resolve(&["windows".to_string()])`
+/// — no render path reads `[layout].center`). It stays **focusable and
+/// visible** rather than being skipped entirely, so a user who lands on it
+/// can see what's there and learn *why* it can't be changed; every edit that
+/// would touch it is refused instead (see [`EditorState::targets_center`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Column {
     Left,
@@ -61,12 +78,22 @@ impl Column {
     pub fn title(self) -> &'static str {
         match self {
             Column::Left => "LEFT",
-            Column::Center => "CENTER",
+            Column::Center => "CENTER (fixed)",
             Column::Right => "RIGHT",
             Column::Available => "AVAILABLE",
         }
     }
 }
+
+/// Shown in the status line when an edit is refused because it targets
+/// CENTER — tmux renders the window list there itself, so
+/// `[layout].center`'s contents aren't configurable from this editor (or from
+/// `widget enable|move --region center`; see `widget_cmd.rs`'s
+/// `warn_if_center`, which warns rather than refuses there, since CLI edits
+/// to `center` still need to remain writable — e.g. round-tripping the
+/// default `center = ["windows"]`).
+const CENTER_FIXED_STATUS: &str =
+    "CENTER is fixed: tmux renders the window list there, not [layout].center — nothing to edit";
 
 /// A key press, already mapped out of crossterm's `KeyEvent` so the state
 /// machine has no terminal dependency.
@@ -307,12 +334,25 @@ impl EditorState {
         self.set_cursor(next);
     }
 
+    /// True when the pending Space edit would touch CENTER — either removing
+    /// directly from it, or adding into it from AVAILABLE (when CENTER was
+    /// the last focused region before AVAILABLE). Both are refused; see
+    /// [`CENTER_FIXED_STATUS`].
+    fn targets_center(&self) -> bool {
+        self.column == Column::Center
+            || (self.column == Column::Available && self.last_region == Column::Center)
+    }
+
     /// Space: AVAILABLE → append to the last focused region; a region → back
     /// to AVAILABLE.
     fn toggle_selected(&mut self) {
         let Some(name) = self.selected().map(str::to_string) else {
             return;
         };
+        if self.targets_center() {
+            self.status = CENTER_FIXED_STATUS.to_string();
+            return;
+        }
         let result = match self.column.region() {
             Some(_) => layout_disable(&mut self.layout, &name),
             None => {
@@ -332,6 +372,10 @@ impl EditorState {
 
     fn nudge(&mut self, delta: i32) {
         if self.column.region().is_none() {
+            return;
+        }
+        if self.column == Column::Center {
+            self.status = CENTER_FIXED_STATUS.to_string();
             return;
         }
         let Some(name) = self.selected().map(str::to_string) else {
@@ -862,6 +906,87 @@ mod tests {
         assert_eq!(
             map_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)),
             KeyKind::Other
+        );
+    }
+
+    #[test]
+    fn center_remains_focusable_and_shows_its_contents() {
+        // tmux owns the window list, but a curious user must still be able
+        // to land on the column and see what's there — see Column::Center's
+        // doc comment for why it isn't skipped from focus entirely.
+        let mut s = state();
+        s.on_key(KeyKind::Right);
+        assert_eq!(s.column(), Column::Center);
+        assert_eq!(s.column_items(Column::Center), ["windows"]);
+        assert_eq!(s.selected(), Some("windows"));
+    }
+
+    #[test]
+    fn center_title_is_marked_fixed() {
+        assert_eq!(Column::Center.title(), "CENTER (fixed)");
+    }
+
+    #[test]
+    fn space_on_center_is_refused_leaves_layout_unchanged_and_does_not_dirty() {
+        let mut s = state();
+        s.on_key(KeyKind::Right); // Left -> Center, cursor on "windows"
+        assert_eq!(s.column(), Column::Center);
+        let before = s.layout().clone();
+        s.on_key(KeyKind::Space);
+        assert_eq!(s.layout(), &before, "center layout must be unchanged");
+        assert!(
+            !s.is_dirty(),
+            "a refused edit must not mark the buffer dirty"
+        );
+        assert!(
+            !s.status().is_empty(),
+            "status explains why the edit was refused"
+        );
+    }
+
+    #[test]
+    fn nudge_on_center_is_refused_leaves_layout_unchanged_and_does_not_dirty() {
+        let mut s = state();
+        s.on_key(KeyKind::Right); // Left -> Center
+        let before = s.layout().clone();
+
+        s.on_key(KeyKind::NudgeDown);
+        assert_eq!(s.layout(), &before);
+        assert!(!s.is_dirty());
+        assert!(!s.status().is_empty());
+
+        s.on_key(KeyKind::NudgeUp);
+        assert_eq!(s.layout(), &before);
+        assert!(!s.is_dirty());
+    }
+
+    #[test]
+    fn placing_from_available_into_center_is_refused() {
+        // The direct path to this state is `focus AVAILABLE with CENTER as
+        // the last focused region`. Column::ALL's fixed adjacency
+        // ([Left, Center, Right, Available]) means normal per-key navigation
+        // always passes through Right immediately before reaching Available,
+        // which overwrites `last_region` to `Right` — so this exact state
+        // isn't reachable via keys today. Set the fields directly (legal:
+        // this test module is a descendant of widget_tui, so it shares
+        // privacy with EditorState's fields) so the guard is proven correct
+        // regardless of how focus got there, and stays correct if a future
+        // change (a "jump to column" key, a reordered Column::ALL) makes the
+        // path reachable.
+        let mut s = state();
+        s.column = Column::Available;
+        s.last_region = Column::Center;
+        assert_eq!(s.selected(), Some("disk"));
+        let before = s.layout().clone();
+        s.on_key(KeyKind::Space);
+        assert_eq!(s.layout(), &before, "center layout must be unchanged");
+        assert!(
+            !s.is_dirty(),
+            "a refused edit must not mark the buffer dirty"
+        );
+        assert!(
+            !s.status().is_empty(),
+            "status explains why the edit was refused"
         );
     }
 

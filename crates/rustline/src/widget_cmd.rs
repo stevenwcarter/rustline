@@ -7,6 +7,16 @@
 //! (`layout_enable`/`layout_disable`/`layout_move`), so the CLI and the TUI
 //! (`widget_tui.rs`) share one definition of a legal edit. A refused edit
 //! writes nothing at all and exits non-zero.
+//!
+//! `--region center` is the one case that's *legal but inert*: nothing in the
+//! render pipeline reads `[layout].center` (tmux's window list is rendered by
+//! a dedicated, hardcoded path — see `widget_tui.rs`'s module doc), so an
+//! `enable`/`move` there still writes and exits `0` (refusing it would break
+//! round-tripping the default `center = ["windows"]`), but `warn_if_center`
+//! prints a note so the user isn't left wondering why nothing changed on the
+//! rendered bar. The interactive TUI, by contrast, refuses a CENTER edit
+//! outright — it can put an explanation right in the column, where a "wrote
+//! but nothing happened" surprise is more costly at commit time.
 
 use std::io::Write;
 use std::path::Path;
@@ -120,6 +130,24 @@ fn describe(change: &LayoutChange) -> String {
     }
 }
 
+/// `enable`/`move --region center` write valid, round-trippable config (the
+/// default config itself is `center = ["windows"]`), so — unlike the TUI's
+/// `widget_tui.rs`, which refuses a CENTER edit outright — the CLI must not
+/// refuse here. But nothing renders `[layout].center`: tmux's window list is
+/// rendered by a dedicated, hardcoded path (`assemble.rs`'s `window_pill`,
+/// which always resolves the `windows` widget regardless of config; see the
+/// module doc). Warn so the user isn't left wondering why a `center` edit had
+/// no visible effect on the rendered bar.
+fn warn_if_center(region: Region) {
+    if region == Region::Center {
+        eprintln!(
+            "note: tmux renders the window list in the center region itself; \
+             [layout].center is not read by any render path, so this change \
+             won't affect the rendered status line"
+        );
+    }
+}
+
 /// Ask tmux to redraw the status line, so an edit is visible immediately.
 /// Best-effort: outside tmux, or if the spawn fails, this is a silent no-op —
 /// a failed refresh must never turn a successful config write into an error.
@@ -155,9 +183,13 @@ pub fn run(cmd: WidgetCmd, config_path: &Path, plugin_dir: &Path) -> i32 {
                     return 1;
                 }
             };
-            mutate(config_path, plugin_dir, &name, |layout| {
+            let code = mutate(config_path, plugin_dir, &name, |layout| {
                 layout_enable(layout, &name, region, index)
-            })
+            });
+            if code == 0 {
+                warn_if_center(region);
+            }
+            code
         }
         WidgetCmd::Disable { name } => mutate(config_path, plugin_dir, &name, |layout| {
             layout_disable(layout, &name)
@@ -174,9 +206,13 @@ pub fn run(cmd: WidgetCmd, config_path: &Path, plugin_dir: &Path) -> i32 {
                     return 1;
                 }
             };
-            mutate(config_path, plugin_dir, &name, |layout| {
+            let code = mutate(config_path, plugin_dir, &name, |layout| {
                 layout_move(layout, &name, region, index.unwrap_or(usize::MAX))
-            })
+            });
+            if code == 0 {
+                warn_if_center(region);
+            }
+            code
         }
         WidgetCmd::Edit => crate::widget_tui::run(config_path, plugin_dir),
     }
