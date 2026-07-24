@@ -118,9 +118,10 @@ these shared types, not a design shortcut. Keep them serializable.
   `throughputs: BTreeMap<String, Throughput>` (keyed by interface, `""` =
   aggregate) — the per-instance reading maps multiple `disk`/`throughput`
   widget **instances** (W46, see `config.rs` below) each consult by their own
-  `mount`/`iface_key`; both `#[serde(default)]` and, like `uptime`/`media`/
-  `throughput`/`cpu_history`/`mem_history`, NOT mirrored into `WireContext`
-  (invariant #2) — `Context.disk`/`Context.throughput` stay populated with
+  `mount`/`iface_key`; both `#[serde(default)]` and the only two `Context`
+  fields NOT mirrored into `WireContext` (invariant #2 — `throughput`/
+  `uptime`/`media`/`cpu_history`/`mem_history` ARE mirrored as of W54, see
+  below) — `Context.disk`/`Context.throughput` stay populated with
   just the *base* widget's reading (the WASM mirror; a guest never sees the
   maps),
   `os: String`, `arch:
@@ -152,13 +153,15 @@ these shared types, not a design shortcut. Keep them serializable.
   `cpu_history`/`mem_history` (`Vec<f32>`, `#[serde(default)]`) are the recent
   cpu%/memory-used% readings (oldest first) feeding the `{spark}` placeholder,
   populated at build time from a persisted ring ONLY when the respective
-  widget's `format` references `{spark}` (empty otherwise — no history I/O);
+  widget's `format` **or** `alt_format` references `{spark}` (W56; empty
+  otherwise — no history I/O);
   `uptime` (seconds since boot) and
   `media` (a `MediaInfo` now-playing snapshot) are read once at build time and
-  gated the same way on their widget being in the active layout — and,
-  like `throughput`/`cpu_history`/`mem_history`, are NOT mirrored into
-  `WireContext` (not exposed to WASM guests, so a guest sees a field-for-field
-  `Context` mirror minus these five); `os`/`arch` come from
+  gated the same way on their widget being in the active layout. `throughput`/
+  `uptime`/`media`/`cpu_history`/`mem_history` are all mirrored into
+  `WireContext` (W54, purely additive) — a WASM guest now sees a
+  field-for-field `Context` mirror minus only `disks`/`throughputs` (the
+  per-instance maps above); `os`/`arch` come from
   `std::env::consts::OS`/`ARCH`; `toggled` (`#[serde(default)]`) is the set of
   widget/plugin names the user has click-toggled to their `alt_format` view,
   read once at `Context`-build time from the toggles state file (invariant #1)
@@ -247,7 +250,8 @@ these shared types, not a design shortcut. Keep them serializable.
   sparkline (one glyph per historical reading, clamped `0..=1` of `max`) backing
   the `{spark}` placeholder in both `cpu.rs` and `memory.rs`; the history itself
   rides `Context.cpu_history`/`mem_history`, populated at the bin's build edge
-  only when a widget's `format` references `{spark}` (see `history.rs`/`cpu.rs`/
+  only when a widget's `format` **or** `alt_format` references `{spark}` (W56;
+  see `history.rs`/`cpu.rs`/
   `memory.rs` in the bin). `cpu.rs` is the `cpu` widget: pure over
   `Context.cpu`, with an nf-md-chip `{icon}`, `{percent}`, `{bar}`, and
   `{spark}` (over `Context.cpu_history`, `spark_width` ring length)
@@ -360,7 +364,8 @@ these shared types, not a design shortcut. Keep them serializable.
   (W47 — `format`/`alt_format`/`down_format`/`interface`/color/click, mirroring
   the other opt-in widgets), and `CpuOpts`/`MemoryOpts` each gain a
   `spark_width` (W45, default 8 — the `{spark}` history ring length, consulted
-  only when `format` references `{spark}`). `Config` also gains `pub
+  when `format` **or** `alt_format` references `{spark}`, W56). `Config` also
+  gains `pub
   instances: HashMap<String, toml::Value>` (`#[serde(default)]`, W46) — one
   raw `[instances.<name>]` table per named widget instance; the entry's
   `kind` key selects which built-in kind to build, and the rest of the table
@@ -631,7 +636,7 @@ mod guest`): three more worked examples, each covering a host capability
   load via `sample_store` + `history::parse_history`, push the current reading,
   truncate to `spark_width`, persist, and return — feeding the `cpu` widget's
   `{spark}` placeholder. Only called from the build edge when `cpu`'s `format`
-  references `{spark}`.
+  **or** `alt_format` references `{spark}` (W56).
 - `memory.rs` — `read_memory()`, a `#[cfg(target_os)]` read surface: Linux
   reads `/proc/meminfo` (`MemTotal`/`MemAvailable` in kB, `parse_meminfo`);
   macOS shells out to `sysctl -n hw.memsize` + `vm_stat` and derives available
@@ -836,6 +841,10 @@ mod guest`): three more worked examples, each covering a host capability
   `write_toggles` (best-effort atomic temp-file + rename; a write failure
   `warn!`s and never panics — a broken toggle must never break the bar).
 - `plugin_cmd.rs` — `rustline plugin …`: `list` reads the effective `Config`;
+  `list`/`url|path list`/`denials` each take a `--json` flag (W40,
+  `plugin_list_json`/`pattern_list_json`/`denials_json`) emitting a
+  `serde_json`-pretty array instead of the human text, human output
+  unchanged when the flag is absent;
   `url|path add/remove` mutate the config file in place via `toml_edit`
   (preserving comments/formatting), creating `[plugins.<name>]` if absent;
   `new <name> [--path] [--force]` scaffolds a ready-to-build WASM guest
@@ -863,12 +872,18 @@ mod guest`): three more worked examples, each covering a host capability
 - `theme_cmd.rs` — `rustline theme …`, mirroring `plugin_cmd.rs`'s `toml_edit`
   approach: `list` prints every built-in and themes-dir `*.toml` stem,
   marking the active one (`cfg.theme.base`, default `"default"`) with `*` and
-  a built-in **shadowed** by a same-named file; `show <name>` resolves
+  a built-in **shadowed** by a same-named file; `list --json` (W40) emits
+  `theme_list_json` instead — one `{name, active, source, shadowed}` entry per
+  theme (`source` `"builtin"`/`"file"`), built-ins first then themes-dir
+  files, human output unchanged when the flag is absent; `show <name>` resolves
   (file-first, then built-in), builds a synthetic `Context` engineered to
   trip warning+error badges, renders the default layout, and prints ANSI via
   `tmux_to_ansi`; `use <name>` validates `<name>` resolves, then sets
   `[theme].base = "<name>"` in the config file via `toml_edit` (refuses to
-  write on an unknown name or unparseable existing config); `new <name>
+  write on an unknown name or unparseable existing config). Both `use` and
+  `show`'s unknown-name error lists every resolvable theme via the shared
+  `available_themes_line(themes_dir)` (W18) — built-ins AND themes-dir custom
+  stems, not just built-ins (the pre-W18 hint). `new <name>
   [--from <seed>] [--force]` resolves `<seed>` (default `"default"`) to a
   full `Theme`, converts it via `ThemeConfig::from_theme` to an all-`Some`
   config, and writes `<themes_dir>/<name>.toml` with a header comment
@@ -1072,11 +1087,15 @@ config-file path for every subcommand that reads or writes it (default:
   `pass` when it's reachable; never affects `doctor`'s exit code.
 - `rustline completions <bash|zsh|fish>` — print a shell-completion script
   (via `clap_complete`) to stdout.
-- `rustline plugin list` — discovered/configured plugins with their source,
-  allowlists, and state quota.
-- `rustline plugin url|path list|add|remove <plugin> [pattern]` — read or
-  edit a plugin's `allowed_urls`/`allowed_paths` (`add`/`remove` rewrite the
-  config file in place via `toml_edit`, preserving comments/formatting).
+- `rustline plugin list [--json]` — discovered/configured plugins with their
+  source, allowlists, and state quota; `--json` emits a JSON array of
+  `{name, source, tag, allowed_urls, allowed_paths, max_state_bytes,
+  has_manifest}` instead of human text.
+- `rustline plugin url|path list [--json]|add|remove <plugin> [pattern]` —
+  read or edit a plugin's `allowed_urls`/`allowed_paths` (`add`/`remove`
+  rewrite the config file in place via `toml_edit`, preserving
+  comments/formatting); `list --json` emits the patterns as a JSON array of
+  strings (`[]` for an absent/empty plugin) instead of one per line.
 - `rustline plugin new <name> [--path <dir>] [--force]` — scaffold a
   ready-to-build WASM guest plugin crate at `<dir or cwd>/<name>/`
   (`Cargo.toml` with an empty `[workspace]` table + edition 2024 + cdylib,
@@ -1110,11 +1129,15 @@ config-file path for every subcommand that reads or writes it (default:
 - `rustline plugin remove <name> [--yes] [--plugin-dir <d>]` — delete an
   installed plugin's `.wasm`; with `--yes` also drop its `[plugins.<name>]`
   config entry.
-- `rustline plugin denials <name>` — list a plugin's persisted capability
-  denials (every distinct `(kind, target)` it was actually denied, recorded by
-  the host's `FileDenialObserver` in `<data_root>/denials.jsonl`). Read-only.
-- `rustline theme list` — every built-in + themes-dir theme, marking the
-  active one and any built-in shadowed by a same-named file.
+- `rustline plugin denials <name> [--json]` — list a plugin's persisted
+  capability denials (every distinct `(kind, target)` it was actually denied,
+  recorded by the host's `FileDenialObserver` in `<data_root>/denials.jsonl`).
+  Read-only; `--json` emits a JSON array of `{kind, target}` instead of human
+  text.
+- `rustline theme list [--json]` — every built-in + themes-dir theme, marking
+  the active one and any built-in shadowed by a same-named file; `--json`
+  emits a JSON array of `{name, active, source, shadowed}` (`source` is
+  `"builtin"` or `"file"`) instead of human text.
 - `rustline theme show <name>` — ANSI preview of `<name>` (default layout,
   synthetic Context tuned to show warning/error alert badges).
 - `rustline theme use <name>` — set `[theme].base = "<name>"` in the config
@@ -1734,11 +1757,12 @@ info|debug|trace` and is parsed leniently (a typo falls back to the default).
    `RenderInput`, and `abi_decision` **skips** a guest that declares a
    *different* version (a guest with no `abi_version` export still registers as
    legacy). Keep the wire types **additive** — no `deny_unknown_fields`, so an
-   older guest keeps deserializing a newer `Context` (this is why `uptime`/
-   `media`/`throughput`/`cpu_history`/`mem_history` could be omitted from
-   `WireContext` without breaking anything — and why W46's `Context.disks`/
-   `Context.throughputs` maps (the per-instance disk/throughput readings) are
-   likewise NOT mirrored into `WireContext`; a WASM guest still sees only the
+   older guest keeps deserializing a newer `Context` (this is why W54 could
+   mirror `uptime`/`media`/`throughput`/`cpu_history`/`mem_history` into
+   `WireContext` as a plain field addition, breaking nothing). W46's
+   `Context.disks`/`Context.throughputs` maps (the per-instance disk/
+   throughput readings) are the only fields still NOT mirrored into
+   `WireContext`; a WASM guest still sees only the
    base `Context.disk`/`Context.throughput` singular reading, unaffected by
    how many `disk`/`throughput` instances exist in the layout).
 3. **`Config::load` is total** — a bad config must never break the bar.
@@ -1986,8 +2010,9 @@ branch on platform.
     `read_uptime` (`/proc/uptime` / `kern.boottime`), a humanized `{uptime}`.
   - `media`/now-playing widget (W41, the fifteenth built-in) —
     `Context.media`/`MediaInfo`, `read_media` via `playerctl metadata`,
-    `{artist}`/`{title}`/`{status}`. Both `uptime`/`media` are opt-in,
-    layout-gated, and deliberately NOT mirrored into `WireContext`.
+    `{artist}`/`{title}`/`{status}`. Both `uptime`/`media` are opt-in and
+    layout-gated; at the time deliberately NOT mirrored into `WireContext`
+    (bundle #5's W54 later mirrored them in — see below).
   - datetime `timezone` (W30) — an IANA zone name via `chrono-tz`, default
     `None` = local time unchanged; an unknown name falls back to local.
   - per-widget `fg`/`bg` color override (W29) — `ColorOverride` flattened into
@@ -2019,11 +2044,13 @@ branch on platform.
     `rustline_abi::Throughput`, `throughput::read_throughput` (`/proc/net/dev`
     counters diffed against a persisted prior sample; `None` until one exists),
     `{down}`/`{up}` rates; opt-in, layout-gated, click-toggleable, NOT
-    threshold-aware, and NOT mirrored into `WireContext`.
+    threshold-aware; at the time NOT mirrored into `WireContext` (bundle #5's
+    W54 later mirrored it in — see below).
   - `{spark}` sparkline (W45) on `cpu`/`memory` — `widgets/spark.rs`'s
     `sparkline`, `Context.cpu_history`/`mem_history` (persisted rings read at
-    the build edge ONLY when `format` references `{spark}`; a `{spark}` placed
-    solely in `alt_format` renders empty), and the `spark_width` option. Shared
+    the build edge ONLY when `format` references `{spark}`; at the time a
+    `{spark}` placed solely in `alt_format` rendered empty — bundle #5's W56
+    later closed that gap, see below), and the `spark_width` option. Shared
     `history.rs`/`sample_store.rs` bin helpers back the persistence.
   - W51 — the four host-effect wire-result types (`HttpResult`/
     `CachedHttpResult`/`ReadResult`/`WriteResult`) hoisted into `rustline-abi`
@@ -2076,6 +2103,19 @@ branch on platform.
     self-daemonization (`daemon run` is foreground-only; a supervisor
     backgrounds it) and no auto-spawn. `doctor` gained an advisory-only
     daemon-reachability row.
+- Done (whats-next bundle #5, branch `whats-next/2026-07-24-execute` — see the
+  [design spec](docs/superpowers/specs/2026-07-24-rustline-whatsnext-bundle-5-design.md)
+  / [plan](docs/superpowers/plans/2026-07-24-rustline-whatsnext-bundle-5.md)):
+  - W54 — `WireContext` now mirrors `throughput`/`uptime`/`media`/`cpu_history`/
+    `mem_history` (purely additive; `disks`/`throughputs` stay host-only).
+  - W55 — `ensure_wasmtime_cache_config` self-heals a stale `wasmtime-cache.toml`
+    (compare-and-rewrite on content mismatch), guarding the N2 upgrade hazard.
+  - W56 — `{spark}` history now populates when `{spark}` is in `format` OR
+    `alt_format` (the prior `alt_format`-only caveat is gone).
+  - W18 — `theme use`/`theme show` "unknown theme" errors now list themes-dir
+    custom themes, not just built-ins.
+  - W40 — `--json` on every read-only list surface (`plugin list`, `theme list`,
+    `plugin url|path list`, `plugin denials`).
 - Per-widget richer customization; naming the widget in the panic-guard `warn!`.
 - Range-on-binding — today a `run`/`open_url` click binding only fires on a
   widget that already emits a clickable range (i.e. has a non-empty
@@ -2108,3 +2148,5 @@ branch on platform.
 - Note (W43 compiled-module cache feasibility): `docs/superpowers/notes/2026-07-23-w43-compiled-module-cache-feasibility.md`
 - Spec (whats-next bundle #4): `docs/superpowers/specs/2026-07-23-rustline-whatsnext-bundle-4-design.md`
 - Plan (whats-next bundle #4): `docs/superpowers/plans/2026-07-23-rustline-whatsnext-bundle-4.md`
+- Spec (whats-next bundle #5): `docs/superpowers/specs/2026-07-24-rustline-whatsnext-bundle-5-design.md`
+- Plan (whats-next bundle #5): `docs/superpowers/plans/2026-07-24-rustline-whatsnext-bundle-5.md`

@@ -567,6 +567,7 @@ per-widget threshold alerts that use each theme's semantic colors.
 
 ```bash
 rustline theme list                  # built-ins + your themes-dir files, active marked *
+rustline theme list --json           # same list as a JSON array, for scripting
 rustline theme show pastel-rainbow   # ANSI preview (with sample alert badges)
 rustline theme use nord              # sets [theme].base = "nord" in config.toml
 rustline theme new my-nord --from nord   # scaffold a tweakable copy to edit by hand
@@ -864,7 +865,9 @@ Manage a plugin's allowlists from the command line without hand-editing TOML:
 
 ```bash
 rustline plugin list
+rustline plugin list --json                        # same info as a JSON array, for scripting
 rustline plugin url add weather "https://wttr.in/*"
+rustline plugin url list weather --json             # its allowed_urls as a JSON array of strings
 ```
 
 A plugin can also declare a capability *manifest* — a sidecar
@@ -895,7 +898,7 @@ in `[plugins.<name>]`, and grants **no** capabilities — you still run
 `rustline plugin approve` (or `plugin url|path add`) to allow anything. If a
 plugin is ever denied something it asked for, `rustline plugin denials
 <name>` lists every capability it was refused, so you can decide whether to
-grant it.
+grant it — add `--json` for a machine-readable `{kind, target}` array.
 
 Scaffold a new plugin crate instead of copying `weather` by hand:
 
