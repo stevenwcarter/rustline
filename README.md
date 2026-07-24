@@ -323,9 +323,7 @@ a `format` (default `"{icon} {used}/{total}"`) with `{icon}` (nf-md-memory),
 `{percent}`, `{bar}`, and `{spark}` placeholders. `{bar}` is a `bar_width`-cell
 (default 8) Unicode block-eighths gauge shared by both widgets; `{spark}` is a
 Unicode sparkline of the last `spark_width` readings (default 8), persisted
-across refreshes. **`{spark}` only accumulates history when it appears in
-`format`** — a `{spark}` placed only in a widget's click-toggle `alt_format`
-renders empty (put it in `format` for it to populate). Both also take a
+across refreshes. Both also take a
 `down_format` (default empty) shown on an unsupported platform or a failed
 read — same collapse-to-nothing behavior as the `battery` widget's
 `down_format` — and an `alt_format` for

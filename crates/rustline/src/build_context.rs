@@ -7,6 +7,14 @@ use std::env;
 use crate::cli::{RegionArgs, WindowArgs};
 use rustline_core::{Config, Context, NetIface, Theme, WindowCtx};
 
+/// A widget accumulates `{spark}` history when EITHER its `format` or its
+/// click-toggle `alt_format` references `{spark}` — a `{spark}` that only
+/// appears in `alt_format` (a compact default that expands on click) must
+/// still populate the ring, else it renders permanently empty (W56).
+fn spark_referenced(format: &str, alt_format: &str) -> bool {
+    format.contains("{spark}") || alt_format.contains("{spark}")
+}
+
 /// Read the 1/5/15-minute load average via `getloadavg(3)`.
 ///
 /// Returns `None` if the platform call doesn't report all three samples
@@ -68,9 +76,9 @@ pub(crate) fn read_interfaces() -> Vec<NetIface> {
 /// the singular `Context.disk`/`throughput` stay the *base* widget's entry so
 /// the built-in `disk`/`throughput` widget resolves unchanged. The cpu/memory
 /// `{spark}` history is read+persisted only when the base widget both is in
-/// the layout AND its configured `format` contains the literal `{spark}` —
-/// otherwise `Context.cpu_history`/`mem_history` stay empty with no history
-/// I/O, keeping `{spark}`-absent output byte-identical (W45).
+/// the layout AND its configured `format` **or** `alt_format` references
+/// `{spark}` — otherwise `Context.cpu_history`/`mem_history` stay empty with
+/// no history I/O, keeping `{spark}`-absent output byte-identical (W45, W56).
 pub fn build_region_context(
     args: &RegionArgs,
     layout: &[String],
@@ -139,11 +147,13 @@ pub fn build_region_context(
         None
     };
     let cpu_history = match cpu {
-        Some(c) if cfg.widgets.cpu.format.contains("{spark}") => crate::cpu::read_cpu_history(
-            &rustline_wasm::state_root(),
-            c.percent,
-            cfg.widgets.cpu.spark_width,
-        ),
+        Some(c) if spark_referenced(&cfg.widgets.cpu.format, &cfg.widgets.cpu.alt_format) => {
+            crate::cpu::read_cpu_history(
+                &rustline_wasm::state_root(),
+                c.percent,
+                cfg.widgets.cpu.spark_width,
+            )
+        }
         _ => Vec::new(),
     };
     let memory = if kinds.contains("memory") {
@@ -152,7 +162,7 @@ pub fn build_region_context(
         None
     };
     let mem_history = match memory {
-        Some(m) if cfg.widgets.memory.format.contains("{spark}") => {
+        Some(m) if spark_referenced(&cfg.widgets.memory.format, &cfg.widgets.memory.alt_format) => {
             let percent = if m.total_bytes == 0 {
                 0.0
             } else {
@@ -458,6 +468,32 @@ mod tests {
         // SAFETY: serialized by `ENV_LOCK` against the other tests in this
         // module that also mutate this var (history I/O routes through
         // `rustline_wasm::state_root()`, which reads it).
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", tmp.path());
+        }
+        let layout = ["cpu".to_string(), "memory".to_string()];
+        let ctx = build_region_context(&RegionArgs::default(), &layout, &Theme::default(), &cfg);
+        // SAFETY: matches the set above; restores the process env for other tests.
+        unsafe {
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        drop(guard);
+        assert_eq!(ctx.cpu_history.len(), 1);
+        assert_eq!(ctx.mem_history.len(), 1);
+    }
+
+    #[test]
+    fn cpu_mem_history_populated_when_spark_only_in_alt_format() {
+        // {spark} present ONLY in the click-toggle alt_format (format is the
+        // default, {spark}-free) must still populate the history ring (W56) —
+        // otherwise the sparkline renders permanently empty.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.widgets.cpu.alt_format = "{icon} {spark} {percent}%".into();
+        cfg.widgets.memory.alt_format = "{icon} {spark} {percent}%".into();
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by `ENV_LOCK` against the other tests here that
+        // also mutate this var (history I/O routes through state_root()).
         unsafe {
             std::env::set_var("XDG_DATA_HOME", tmp.path());
         }

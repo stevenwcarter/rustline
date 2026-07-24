@@ -800,7 +800,7 @@ mod guest`): three more worked examples, each covering a host capability
   `throughput::read_throughput`, gated the same way on `throughput` being in
   the layout, W47), the `{spark}`-gated `cpu_history`/`mem_history` (only read —
   via `cpu::read_cpu_history`/`memory::read_memory_history` — when the `cpu`/
-  `memory` widget's configured `format` contains the literal `{spark}`; a
+  `memory` widget's `format` **or** `alt_format` references `{spark}` (W56); a
   `spark` struct threaded alongside the layout carries each widget's `format` +
   `spark_width`, W45), `os`, `arch`
   (from `std::env::consts::OS`/`ARCH`), and `toggled` (via
@@ -1411,14 +1411,6 @@ warn_percent = 80   # default; 0 disables a tier
 crit_percent = 92   # default
 # icon = "MEM"      # optional; overrides the built-in Nerd-Font glyph
 ```
-
-**`{spark}` history caveat (important):** the rolling history that backs
-`{spark}` is read and persisted at `Context`-build time **only when the
-widget's `format` contains `{spark}`** — a `{spark}` placed *only* in a
-widget's click-toggle `alt_format` (and never in `format`) never populates the
-history, so it renders permanently empty. Put `{spark}` in `format` (you can
-have it in both) for it to accumulate. (This gating checks `format` only; a
-follow-up to also gate on `alt_format` is recorded in WHATS-NEXT.)
 
 **Load average widget:** `loadavg` is in the **default** right layout. It takes
 a `format` (default `"{load1} {load5} {load15}"`) with `{load1}`/`{load5}`/
