@@ -260,42 +260,62 @@ pub struct WidgetPlacement {
 ///
 /// Ordering is built-ins (in registration order) → instances (sorted) →
 /// plugin stems (sorted), which is also the order `widget list` prints and the
-/// TUI's AVAILABLE column shows. An `[instances.<name>]` entry whose name
-/// collides with a built-in is skipped — built-in always wins, the same
+/// TUI's AVAILABLE column shows. This is enforced by partitioning on each
+/// candidate's [`WidgetSource`] rather than by which of the three inputs
+/// below it arrived through — a candidate's `source` (trustworthy since
+/// `Registry::with_builtins` labels every `[instances.<name>]` descriptor
+/// `WidgetSource::Instance`, not `Builtin`) decides its group, and only
+/// group order is fixed; within the instance/plugin groups, names are always
+/// sorted regardless of `descriptors`' own order (which for instances
+/// reflects a `Registry`'s `HashMap<String, Value>` iteration over
+/// `cfg.instances`, itself unspecified). An `[instances.<name>]` entry whose
+/// name collides with a built-in is skipped — built-in always wins, the same
 /// precedence `Registry::with_builtins` and `is_builtin_widget_name` enforce.
 pub fn widget_placements(
     cfg: &Config,
     descriptors: &[WidgetDescriptor],
     plugin_names: &[String],
 ) -> Vec<WidgetPlacement> {
-    let mut out: Vec<WidgetPlacement> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
+    // Built-ins keep the order they're first seen in (a `Registry`'s
+    // registration order); instances and plugins are sorted by name below,
+    // so their intake order here doesn't matter.
+    let mut builtins: Vec<(String, String, WidgetSource)> = Vec::new();
+    let mut instances: Vec<(String, String, WidgetSource)> = Vec::new();
+    let mut plugins: Vec<(String, String, WidgetSource)> = Vec::new();
 
-    let mut push = |name: String, summary: String, source: WidgetSource| {
-        if seen.insert(name.clone()) {
-            let placement = cfg.layout.find(&name);
-            out.push(WidgetPlacement {
-                name,
-                summary,
-                source,
-                placement,
-            });
+    // First candidate for a name wins (a later duplicate, e.g. a name
+    // appearing in both `descriptors` and `plugin_names`, is dropped);
+    // deduped entries are then sorted into one of the three ordering groups
+    // by their own `source`, never by which pass produced them.
+    let mut classify = |name: String, summary: String, source: WidgetSource| {
+        if !seen.insert(name.clone()) {
+            return;
+        }
+        match &source {
+            WidgetSource::Builtin => builtins.push((name, summary, source)),
+            WidgetSource::Instance { .. } => instances.push((name, summary, source)),
+            WidgetSource::Plugin => plugins.push((name, summary, source)),
         }
     };
 
     for d in descriptors {
-        push(d.name.clone(), d.summary.clone(), d.source.clone());
+        classify(d.name.clone(), d.summary.clone(), d.source.clone());
     }
-    let mut instances: Vec<(&String, &Value)> = cfg.instances.iter().collect();
-    instances.sort_by(|a, b| a.0.cmp(b.0));
-    for (name, value) in instances {
+    // A dedicated scan over `cfg.instances` covers a caller that passes
+    // `descriptors` without having run `Registry::with_builtins` first (e.g.
+    // a bare `&[]`) — the instance is still offered, just via this pass
+    // instead of arriving pre-labeled.
+    let mut instance_entries: Vec<(&String, &Value)> = cfg.instances.iter().collect();
+    instance_entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, value) in instance_entries {
         if is_builtin_widget_name(name) {
             continue;
         }
         let Some(kind) = Config::instance_kind(value) else {
             continue;
         };
-        push(
+        classify(
             name.clone(),
             format!("{kind} instance"),
             WidgetSource::Instance {
@@ -303,16 +323,31 @@ pub fn widget_placements(
             },
         );
     }
-    let mut plugins: Vec<&String> = plugin_names.iter().collect();
-    plugins.sort();
-    for name in plugins {
-        push(
+    for name in plugin_names {
+        classify(
             name.clone(),
             "wasm plugin".to_string(),
             WidgetSource::Plugin,
         );
     }
-    out
+
+    instances.sort_by(|a, b| a.0.cmp(&b.0));
+    plugins.sort_by(|a, b| a.0.cmp(&b.0));
+
+    builtins
+        .into_iter()
+        .chain(instances)
+        .chain(plugins)
+        .map(|(name, summary, source)| {
+            let placement = cfg.layout.find(&name);
+            WidgetPlacement {
+                name,
+                summary,
+                source,
+                placement,
+            }
+        })
+        .collect()
 }
 
 /// Options for the `datetime` widget.
@@ -3173,6 +3208,36 @@ mount = "/data"
     }
 
     #[test]
+    fn placements_from_a_real_registry_label_instances_correctly() {
+        // The exact composition every real caller uses (see
+        // `crates/rustline/src/widget_cmd.rs`'s `known_names`/`list`):
+        // `widget_placements(cfg, Registry::with_builtins(cfg).descriptors(),
+        // &plugins)`. Regression test for a bug where
+        // `Registry::with_builtins`'s instance-registration pass reused
+        // `builtin_descriptor`, hardcoding `WidgetSource::Builtin` onto every
+        // instance's descriptor — so `widget_placements`'s name-based dedup
+        // (first source wins) locked each instance in as `Builtin` before the
+        // dedicated `cfg.instances` pass further down ever got a chance to
+        // relabel it.
+        use crate::widget::Registry;
+
+        let mut cfg = Config::default();
+        cfg.instances.insert(
+            "clock_utc".to_string(),
+            toml::from_str::<toml::Value>("kind = \"datetime\"\ntimezone = \"UTC\"").unwrap(),
+        );
+        let registry = Registry::with_builtins(&cfg);
+        let out = widget_placements(&cfg, registry.descriptors(), &[]);
+        let e = out.iter().find(|p| p.name == "clock_utc").unwrap();
+        assert_eq!(
+            e.source,
+            WidgetSource::Instance {
+                kind: "datetime".into()
+            }
+        );
+    }
+
+    #[test]
     fn placements_skip_an_instance_that_collides_with_a_builtin() {
         // Built-in always wins (the W46 precedence guard); an [instances.cpu]
         // entry must never be offered as its own selectable widget.
@@ -3195,16 +3260,68 @@ mount = "/data"
 
     #[test]
     fn placements_are_deduped_and_sorted_builtins_then_instances_then_plugins() {
-        let cfg = Config::default();
-        let descriptors = vec![WidgetDescriptor {
-            name: "cpu".into(),
-            summary: "cpu usage".into(),
-            configurable: true,
-            source: WidgetSource::Builtin,
-        }];
-        // The same plugin stem listed twice must yield one entry.
-        let out = widget_placements(&cfg, &descriptors, &["w".to_string(), "w".to_string()]);
+        // Routed through a real `Registry::with_builtins(&cfg)`, the same as
+        // `placements_from_a_real_registry_label_instances_correctly` above —
+        // so this also pins the *second* defect: an instance's position in
+        // the output must not depend on where in `cfg.instances`'
+        // (unspecified) `HashMap` iteration order it landed inside
+        // `registry.descriptors()`.
+        use crate::widget::Registry;
+
+        let mut cfg = Config::default();
+        // Insertion order is deliberately the reverse of sorted order, so a
+        // passing assertion can't be accidentally riding iteration order
+        // instead of an actual sort.
+        cfg.instances.insert(
+            "zclock".to_string(),
+            toml::from_str::<toml::Value>("kind = \"datetime\"").unwrap(),
+        );
+        cfg.instances.insert(
+            "aclock".to_string(),
+            toml::from_str::<toml::Value>("kind = \"datetime\"").unwrap(),
+        );
+        let registry = Registry::with_builtins(&cfg);
+        // The same plugin stem listed twice must yield one entry; plugin
+        // names are likewise out of sorted order.
+        let out = widget_placements(
+            &cfg,
+            registry.descriptors(),
+            &[
+                "zplugin".to_string(),
+                "aplugin".to_string(),
+                "zplugin".to_string(),
+            ],
+        );
         let names: Vec<&str> = out.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["cpu", "w"]);
+        let expected: Vec<&str> = [
+            // All sixteen built-ins, in registration order.
+            "pane_id",
+            "hostname",
+            "windows",
+            "loadavg",
+            "datetime",
+            "cwd",
+            "lan_ip",
+            "tailscale_ip",
+            "battery",
+            "cpu",
+            "memory",
+            "git",
+            "disk",
+            "uptime",
+            "media",
+            "throughput",
+            // Instances, sorted by name.
+            "aclock",
+            "zclock",
+            // Plugin stems, sorted by name (deduped).
+            "aplugin",
+            "zplugin",
+        ]
+        .to_vec();
+        assert_eq!(
+            names, expected,
+            "built-ins (registration order), then instances (sorted), then plugins (sorted)"
+        );
     }
 }

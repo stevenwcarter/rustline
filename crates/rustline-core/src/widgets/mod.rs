@@ -61,6 +61,25 @@ fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDe
     }
 }
 
+/// Build a `WidgetDescriptor` for a named `[instances.<name>]` entry (W46),
+/// labeled with its declared `kind` rather than [`WidgetSource::Builtin`].
+///
+/// Always configurable — an instance table is nothing *but* that kind's
+/// options. Using this instead of [`builtin_descriptor`] in the
+/// instance-registration pass below is what makes `registry.descriptors()`
+/// truthful for every consumer (a prior bug reused `builtin_descriptor`
+/// there, hardcoding every instance's `source` to `Builtin`).
+fn instance_descriptor(name: &str, summary: &str, kind: &str) -> WidgetDescriptor {
+    WidgetDescriptor {
+        name: name.to_string(),
+        summary: summary.to_string(),
+        configurable: true,
+        source: WidgetSource::Instance {
+            kind: kind.to_string(),
+        },
+    }
+}
+
 // The twelve `build_<kind>` factories below each build one clickable/
 // format-bearing widget instance under a caller-supplied `name` (its range/
 // toggle identity, invariant #7) from that kind's current option values.
@@ -353,7 +372,11 @@ impl Registry {
         // with a `build_<kind>` helper above. Multi-instancing `cwd`/
         // `hostname`/`pane_id`/`windows` has no use case (YAGNI), so any
         // other `kind` (including those four) is simply an unsupported kind:
-        // warn and skip, never registered.
+        // warn and skip, never registered. Each arm below records its
+        // descriptor via `instance_descriptor`, not `builtin_descriptor` —
+        // its `source` must be `WidgetSource::Instance { kind }`, since
+        // `widget_placements` (crate::config) trusts `registry.descriptors()`
+        // to say where a widget actually came from.
         for (name, table) in &cfg.instances {
             let Some(kind) = Config::instance_kind(table) else {
                 tracing::warn!(instance = %name, "instance missing `kind`, skipping");
@@ -376,7 +399,7 @@ impl Registry {
                     let o: DateTimeOpts = t.try_into().unwrap_or_default();
                     let n = name.clone();
                     registry.register_described(
-                        builtin_descriptor(name, &summary, true),
+                        instance_descriptor(name, &summary, kind),
                         Box::new(move || build_datetime(&n, &o)),
                     );
                 }
@@ -384,7 +407,7 @@ impl Registry {
                     let o: LanIpOpts = t.try_into().unwrap_or_default();
                     let n = name.clone();
                     registry.register_described(
-                        builtin_descriptor(name, &summary, true),
+                        instance_descriptor(name, &summary, kind),
                         Box::new(move || build_lan_ip(&n, &o)),
                     );
                 }
@@ -392,7 +415,7 @@ impl Registry {
                     let o: TailscaleIpOpts = t.try_into().unwrap_or_default();
                     let n = name.clone();
                     registry.register_described(
-                        builtin_descriptor(name, &summary, true),
+                        instance_descriptor(name, &summary, kind),
                         Box::new(move || build_tailscale_ip(&n, &o)),
                     );
                 }
@@ -400,7 +423,7 @@ impl Registry {
                     let o: BatteryOpts = t.try_into().unwrap_or_default();
                     let n = name.clone();
                     registry.register_described(
-                        builtin_descriptor(name, &summary, true),
+                        instance_descriptor(name, &summary, kind),
                         Box::new(move || build_battery(&n, &o)),
                     );
                 }
@@ -408,7 +431,7 @@ impl Registry {
                     let o: CpuOpts = t.try_into().unwrap_or_default();
                     let n = name.clone();
                     registry.register_described(
-                        builtin_descriptor(name, &summary, true),
+                        instance_descriptor(name, &summary, kind),
                         Box::new(move || build_cpu(&n, &o)),
                     );
                 }
@@ -416,7 +439,7 @@ impl Registry {
                     let o: MemoryOpts = t.try_into().unwrap_or_default();
                     let n = name.clone();
                     registry.register_described(
-                        builtin_descriptor(name, &summary, true),
+                        instance_descriptor(name, &summary, kind),
                         Box::new(move || build_memory(&n, &o)),
                     );
                 }
@@ -424,7 +447,7 @@ impl Registry {
                     let o: LoadAvgOpts = t.try_into().unwrap_or_default();
                     let n = name.clone();
                     registry.register_described(
-                        builtin_descriptor(name, &summary, true),
+                        instance_descriptor(name, &summary, kind),
                         Box::new(move || build_loadavg(&n, &o)),
                     );
                 }
@@ -432,7 +455,7 @@ impl Registry {
                     let o: GitOpts = t.try_into().unwrap_or_default();
                     let n = name.clone();
                     registry.register_described(
-                        builtin_descriptor(name, &summary, true),
+                        instance_descriptor(name, &summary, kind),
                         Box::new(move || build_git(&n, &o)),
                     );
                 }
@@ -440,7 +463,7 @@ impl Registry {
                     let o: DiskOpts = t.try_into().unwrap_or_default();
                     let n = name.clone();
                     registry.register_described(
-                        builtin_descriptor(name, &summary, true),
+                        instance_descriptor(name, &summary, kind),
                         Box::new(move || build_disk(&n, &o)),
                     );
                 }
@@ -448,7 +471,7 @@ impl Registry {
                     let o: UptimeOpts = t.try_into().unwrap_or_default();
                     let n = name.clone();
                     registry.register_described(
-                        builtin_descriptor(name, &summary, true),
+                        instance_descriptor(name, &summary, kind),
                         Box::new(move || build_uptime(&n, &o)),
                     );
                 }
@@ -456,7 +479,7 @@ impl Registry {
                     let o: MediaOpts = t.try_into().unwrap_or_default();
                     let n = name.clone();
                     registry.register_described(
-                        builtin_descriptor(name, &summary, true),
+                        instance_descriptor(name, &summary, kind),
                         Box::new(move || build_media(&n, &o)),
                     );
                 }
@@ -464,7 +487,7 @@ impl Registry {
                     let o: ThroughputOpts = t.try_into().unwrap_or_default();
                     let n = name.clone();
                     registry.register_described(
-                        builtin_descriptor(name, &summary, true),
+                        instance_descriptor(name, &summary, kind),
                         Box::new(move || build_throughput(&n, &o)),
                     );
                 }
@@ -901,6 +924,36 @@ mod tests {
         assert_ne!(
             texts[0], texts[1],
             "UTC and America/New_York must format to different hours"
+        );
+    }
+
+    #[test]
+    fn instance_descriptor_reports_its_kind_not_builtin() {
+        // Regression test: `Registry::with_builtins`'s instance-registration
+        // pass used to reuse `builtin_descriptor`, which hardcodes
+        // `source: WidgetSource::Builtin` — so `registry.descriptors()`
+        // mislabeled every `[instances.<name>]` entry as a built-in. Assert
+        // directly on the registry's own descriptors (independent of
+        // `widget_placements`) so any future consumer of `descriptors()` is
+        // covered too.
+        use crate::widget::WidgetSource;
+
+        let mut cfg = Config::default();
+        cfg.instances.insert(
+            "clock_utc".into(),
+            toml::from_str("kind='datetime'\ntimezone='UTC'").unwrap(),
+        );
+        let reg = Registry::with_builtins(&cfg);
+        let desc = reg
+            .descriptors()
+            .iter()
+            .find(|d| d.name == "clock_utc")
+            .expect("clock_utc instance registered");
+        assert_eq!(
+            desc.source,
+            WidgetSource::Instance {
+                kind: "datetime".into()
+            }
         );
     }
 
