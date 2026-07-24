@@ -227,6 +227,55 @@ pub fn defaults() -> InitAnswers {
     }
 }
 
+/// Reverse-map a datetime `format` string to the wizard preset that produced
+/// it, or `None` if it matches no preset (so seeding keeps the default clock).
+// Not yet called outside tests: a follow-up task wires this and
+// `seed_answers` into the interactive prompt (W33).
+#[allow(dead_code)]
+fn clock_from_format(fmt: &str) -> Option<ClockStyle> {
+    [
+        ClockStyle::TwentyFour,
+        ClockStyle::TwentyFourSeconds,
+        ClockStyle::Twelve,
+        ClockStyle::TwelveSeconds,
+    ]
+    .into_iter()
+    .find(|c| c.formats().0 == fmt)
+}
+
+/// Pre-fill wizard answers from an existing config.toml. Recovers only what
+/// config stores (theme, optional-widget membership, clock); the tmux-only
+/// answers (mouse/two_line/interval) keep their recommended defaults.
+// Not yet called outside tests: see `clock_from_format`'s note above.
+#[allow(dead_code)]
+fn seed_answers(config_path: &Path) -> InitAnswers {
+    use rustline_core::Config;
+    if !config_path.exists() {
+        let mut a = defaults();
+        a.battery = crate::battery::read_battery().is_some();
+        return a;
+    }
+    let cfg = Config::load(config_path);
+    let in_layout = |name: &str| {
+        cfg.layout
+            .left
+            .iter()
+            .chain(&cfg.layout.center)
+            .chain(&cfg.layout.right)
+            .any(|w| w == name)
+    };
+    InitAnswers {
+        theme: cfg.theme.base.clone().unwrap_or_else(|| defaults().theme),
+        two_line: defaults().two_line,
+        mouse: defaults().mouse,
+        battery: in_layout("battery"),
+        tailscale: in_layout("tailscale_ip"),
+        lan_ip: in_layout("lan_ip"),
+        clock: clock_from_format(&cfg.widgets.datetime.format).unwrap_or_else(|| defaults().clock),
+        interval: defaults().interval,
+    }
+}
+
 /// Entry point for `rustline init`. `--print` wins (emit the legacy raw
 /// one-line block, write nothing) using the caller's already-resolved
 /// `current_theme` (`[theme].base` plus any inline `[theme]` overrides), so
@@ -927,5 +976,63 @@ format = "USER {percent}%"
             !diff.contains("fg"),
             "unchanged line must be omitted: {diff}"
         );
+    }
+
+    #[test]
+    fn clock_from_format_reverses_presets_else_none() {
+        assert_eq!(
+            clock_from_format("%a %Y-%m-%d %H:%M"),
+            Some(ClockStyle::TwentyFour)
+        );
+        assert_eq!(
+            clock_from_format("%a %Y-%m-%d %H:%M:%S"),
+            Some(ClockStyle::TwentyFourSeconds)
+        );
+        assert_eq!(
+            clock_from_format("%a %Y-%m-%d %I:%M %p"),
+            Some(ClockStyle::Twelve)
+        );
+        assert_eq!(
+            clock_from_format("%a %Y-%m-%d %I:%M:%S %p"),
+            Some(ClockStyle::TwelveSeconds)
+        );
+        // zero-config default and garbage do not match a preset:
+        assert_eq!(clock_from_format("%a < %Y-%m-%d < %H:%M"), None);
+        assert_eq!(clock_from_format("nonsense"), None);
+    }
+
+    #[test]
+    fn seed_answers_from_existing_config_recovers_config_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            concat!(
+                "[theme]\nbase = \"nord\"\n",
+                "[layout]\nleft = [\"pane_id\", \"hostname\", \"lan_ip\"]\n",
+                "right = [\"cwd\", \"cpu\", \"memory\", \"battery\", \"loadavg\", \"datetime\"]\n",
+                "[widgets.datetime]\nformat = \"%a %Y-%m-%d %I:%M %p\"\n",
+            ),
+        )
+        .unwrap();
+        let a = seed_answers(&path);
+        assert_eq!(a.theme, "nord");
+        assert!(a.lan_ip);
+        assert!(a.battery);
+        assert!(!a.tailscale);
+        assert_eq!(a.clock, ClockStyle::Twelve);
+        // tmux-only answers keep recommended defaults (config-only seed):
+        assert_eq!(a.mouse, defaults().mouse);
+        assert_eq!(a.interval, defaults().interval);
+        assert_eq!(a.two_line, defaults().two_line);
+    }
+
+    #[test]
+    fn seed_answers_missing_file_is_defaults_shaped() {
+        let a = seed_answers(std::path::Path::new("/no/such/config.toml"));
+        assert_eq!(a.theme, defaults().theme);
+        assert!(!a.lan_ip && !a.tailscale);
+        // battery may be true or false depending on the host probe; assert it does not panic
+        let _ = a.battery;
     }
 }
