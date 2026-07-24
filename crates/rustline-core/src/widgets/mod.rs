@@ -49,7 +49,7 @@ use crate::config::{
     MemoryOpts, TailscaleIpOpts, ThroughputOpts, UptimeOpts,
 };
 use crate::widget::{Registry, WidgetDescriptor, WidgetSource};
-use crate::{Config, Widget};
+use crate::{Config, RANGE_NAME_MAX_BYTES, Widget};
 
 /// Build a minimal-boilerplate `WidgetDescriptor` for a built-in widget.
 fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDescriptor {
@@ -201,7 +201,10 @@ impl Registry {
     /// configuring the ones that carry options (`pane_id`, `hostname`,
     /// `datetime`, `cwd`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`,
     /// `memory`, `loadavg`, `git`, `disk`, `uptime`, `media`, `throughput`)
-    /// from `cfg`.
+    /// from `cfg`, then registers each `[instances.<name>]` entry (W46) as an
+    /// additional named instance of one of the twelve clickable kinds under
+    /// its own instance name (an unknown `kind` or a name colliding with an
+    /// existing registration is skipped with a `warn!`).
     pub fn with_builtins(cfg: &Config) -> Registry {
         let mut registry = Registry::new();
         let pane_id = cfg.widgets.pane_id.clone();
@@ -343,6 +346,132 @@ impl Registry {
             ),
             Box::new(move || build_throughput("throughput", &throughput)),
         );
+
+        // Second pass: `[instances.<name>]` (W46) registers additional named
+        // instances of the twelve clickable/format-bearing kinds — the ones
+        // with a `build_<kind>` helper above. Multi-instancing `cwd`/
+        // `hostname`/`pane_id`/`windows` has no use case (YAGNI), so any
+        // other `kind` (including those four) is simply an unsupported kind:
+        // warn and skip, never registered.
+        for (name, table) in &cfg.instances {
+            let Some(kind) = Config::instance_kind(table) else {
+                tracing::warn!(instance = %name, "instance missing `kind`, skipping");
+                continue;
+            };
+            if registry.contains(name) {
+                tracing::warn!(
+                    instance = %name,
+                    "instance name collides with an existing widget, skipping"
+                );
+                continue;
+            }
+            if name.len() > RANGE_NAME_MAX_BYTES {
+                tracing::warn!(instance = %name, "instance name > 15 bytes; not click-toggleable");
+            }
+            let t = table.clone();
+            let summary = format!("{kind} instance");
+            match kind {
+                "datetime" => {
+                    let o: DateTimeOpts = t.try_into().unwrap_or_default();
+                    let n = name.clone();
+                    registry.register_described(
+                        builtin_descriptor(name, &summary, true),
+                        Box::new(move || build_datetime(&n, &o)),
+                    );
+                }
+                "lan_ip" => {
+                    let o: LanIpOpts = t.try_into().unwrap_or_default();
+                    let n = name.clone();
+                    registry.register_described(
+                        builtin_descriptor(name, &summary, true),
+                        Box::new(move || build_lan_ip(&n, &o)),
+                    );
+                }
+                "tailscale_ip" => {
+                    let o: TailscaleIpOpts = t.try_into().unwrap_or_default();
+                    let n = name.clone();
+                    registry.register_described(
+                        builtin_descriptor(name, &summary, true),
+                        Box::new(move || build_tailscale_ip(&n, &o)),
+                    );
+                }
+                "battery" => {
+                    let o: BatteryOpts = t.try_into().unwrap_or_default();
+                    let n = name.clone();
+                    registry.register_described(
+                        builtin_descriptor(name, &summary, true),
+                        Box::new(move || build_battery(&n, &o)),
+                    );
+                }
+                "cpu" => {
+                    let o: CpuOpts = t.try_into().unwrap_or_default();
+                    let n = name.clone();
+                    registry.register_described(
+                        builtin_descriptor(name, &summary, true),
+                        Box::new(move || build_cpu(&n, &o)),
+                    );
+                }
+                "memory" => {
+                    let o: MemoryOpts = t.try_into().unwrap_or_default();
+                    let n = name.clone();
+                    registry.register_described(
+                        builtin_descriptor(name, &summary, true),
+                        Box::new(move || build_memory(&n, &o)),
+                    );
+                }
+                "loadavg" => {
+                    let o: LoadAvgOpts = t.try_into().unwrap_or_default();
+                    let n = name.clone();
+                    registry.register_described(
+                        builtin_descriptor(name, &summary, true),
+                        Box::new(move || build_loadavg(&n, &o)),
+                    );
+                }
+                "git" => {
+                    let o: GitOpts = t.try_into().unwrap_or_default();
+                    let n = name.clone();
+                    registry.register_described(
+                        builtin_descriptor(name, &summary, true),
+                        Box::new(move || build_git(&n, &o)),
+                    );
+                }
+                "disk" => {
+                    let o: DiskOpts = t.try_into().unwrap_or_default();
+                    let n = name.clone();
+                    registry.register_described(
+                        builtin_descriptor(name, &summary, true),
+                        Box::new(move || build_disk(&n, &o)),
+                    );
+                }
+                "uptime" => {
+                    let o: UptimeOpts = t.try_into().unwrap_or_default();
+                    let n = name.clone();
+                    registry.register_described(
+                        builtin_descriptor(name, &summary, true),
+                        Box::new(move || build_uptime(&n, &o)),
+                    );
+                }
+                "media" => {
+                    let o: MediaOpts = t.try_into().unwrap_or_default();
+                    let n = name.clone();
+                    registry.register_described(
+                        builtin_descriptor(name, &summary, true),
+                        Box::new(move || build_media(&n, &o)),
+                    );
+                }
+                "throughput" => {
+                    let o: ThroughputOpts = t.try_into().unwrap_or_default();
+                    let n = name.clone();
+                    registry.register_described(
+                        builtin_descriptor(name, &summary, true),
+                        Box::new(move || build_throughput(&n, &o)),
+                    );
+                }
+                other => {
+                    tracing::warn!(instance = %name, kind = %other, "unknown instance kind, skipping");
+                }
+            }
+        }
 
         registry
     }
@@ -728,5 +857,50 @@ mod tests {
             },
         );
         assert_eq!(w.range_name(), Some("clock_utc"));
+    }
+
+    #[test]
+    fn two_datetime_instances_render_distinct_timezones() {
+        let mut cfg = Config::default();
+        cfg.instances.insert(
+            "clock_utc".into(),
+            toml::from_str("kind='datetime'\ntimezone='UTC'\nformat='%H'").unwrap(),
+        );
+        cfg.instances.insert(
+            "clock_ny".into(),
+            toml::from_str("kind='datetime'\ntimezone='America/New_York'\nformat='%H'").unwrap(),
+        );
+        let reg = Registry::with_builtins(&cfg);
+        assert!(reg.contains("clock_utc") && reg.contains("clock_ny"));
+        // Both resolve and render (values differ by tz; assert both non-empty).
+        let out = reg.resolve(&["clock_utc".into(), "clock_ny".into()]);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn unknown_kind_and_builtin_collision_are_skipped() {
+        let mut cfg = Config::default();
+        cfg.instances
+            .insert("bogus".into(), toml::from_str("kind='nope'").unwrap());
+        cfg.instances.insert(
+            "cpu".into(),
+            toml::from_str("kind='datetime'").unwrap(), // collides
+        );
+        let reg = Registry::with_builtins(&cfg);
+        assert!(!reg.contains("bogus"));
+        // "cpu" stays the built-in cpu widget, not the datetime instance:
+        assert!(reg.contains("cpu"));
+    }
+
+    #[test]
+    fn instance_range_name_and_toggle_use_instance_name() {
+        let mut cfg = Config::default();
+        cfg.instances.insert(
+            "clk".into(),
+            toml::from_str("kind='datetime'\nalt_format='%H:%M'").unwrap(),
+        );
+        let reg = Registry::with_builtins(&cfg);
+        let w = reg.build("clk").unwrap();
+        assert_eq!(w.range_name(), Some("clk"));
     }
 }
