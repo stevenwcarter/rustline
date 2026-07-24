@@ -1,26 +1,34 @@
 //! The interactive widget editor: a pure state machine ([`EditorState`]) plus
-//! a thin ratatui draw loop (Task 5). Everything interesting — focus, add and
-//! remove, reorder, dirty tracking, quit confirmation — lives in `on_key`,
-//! which takes a [`KeyKind`] and returns an [`EditorAction`]. No terminal is
-//! involved, so the behavior is unit-tested directly, the same split
-//! `theme_cmd.rs`'s reader/writer-generic `run_picker` uses.
+//! a thin ratatui draw loop wired up in [`run`]. Everything interesting —
+//! focus, add and remove, reorder, dirty tracking, quit confirmation — lives
+//! in `on_key`, which takes a [`KeyKind`] and returns an [`EditorAction`]. No
+//! terminal is involved there, so that behavior is unit-tested directly, the
+//! same split `theme_cmd.rs`'s reader/writer-generic `run_picker` uses.
 //!
-//! This module's public surface (`EditorState`'s accessors, `Column::title`,
-//! `KeyKind::{Help,Other}`, `EditorAction`, `mark_write_failed`, …) is the
-//! contract the not-yet-written ratatui draw loop consumes; today it's
-//! exercised only by the `#[cfg(test)]` module below, which reads as dead
-//! code to a plain (non-test) build of this bin crate. Allowed narrowly here
-//! rather than per-item because rustc collapses per-item dead-code
-//! diagnostics into a single "enum/struct is never used" once the whole type
-//! is unreachable from `main`, so per-item `#[expect(dead_code)]` bounces.
-//! Remove this allow once Task 5 wires `run` up to `EditorState`.
-#![allow(dead_code)]
+//! `run` is the terminal-owning shell: it requires a TTY (mirroring `theme
+//! pick`'s guard), builds the initial [`EditorState`] from the config file and
+//! the widget catalog, then drives a `ratatui`/crossterm draw loop until the
+//! user quits. [`TerminalGuard`] restores raw mode and the alternate screen on
+//! every exit path, including a panic unwinding through the loop.
 
+use std::io::{self, IsTerminal, Stdout};
 use std::path::Path;
 
-use rustline_core::{
-    Layout, Region, WidgetPlacement, WidgetSource, layout_disable, layout_enable, layout_nudge,
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ratatui::layout::{Constraint, Direction as LayoutDirection, Layout as UiLayout};
+use ratatui::style::{Modifier, Style as UiStyle};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::{Terminal, backend::CrosstermBackend};
+use rustline_core::{
+    Config, Layout, Region, Registry, WidgetPlacement, WidgetSource, layout_disable, layout_enable,
+    layout_nudge, render_named_region, tmux_to_ansi,
+};
+use toml_edit::DocumentMut;
 
 /// The four focusable columns: the three layout regions plus the pool of
 /// widgets that aren't currently placed.
@@ -346,13 +354,261 @@ impl EditorState {
     }
 }
 
-pub fn run(_config_path: &Path, _plugin_dir: &Path) -> i32 {
-    eprintln!("the widget editor is not implemented yet");
-    1
+/// Map a crossterm key event onto the editor's own [`KeyKind`]. Arrow keys and
+/// their vim equivalents are interchangeable; `J`/`K` (shifted, however the
+/// terminal reports it) reorder.
+fn map_key(key: KeyEvent) -> KeyKind {
+    match key.code {
+        KeyCode::Up => KeyKind::Up,
+        KeyCode::Down => KeyKind::Down,
+        KeyCode::Left => KeyKind::Left,
+        KeyCode::Right => KeyKind::Right,
+        KeyCode::Enter | KeyCode::Char(' ') => KeyKind::Space,
+        KeyCode::Esc => KeyKind::Quit,
+        KeyCode::Char('J') => KeyKind::NudgeDown,
+        KeyCode::Char('K') => KeyKind::NudgeUp,
+        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::SHIFT) => KeyKind::NudgeDown,
+        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::SHIFT) => KeyKind::NudgeUp,
+        KeyCode::Char('j') => KeyKind::Down,
+        KeyCode::Char('k') => KeyKind::Up,
+        KeyCode::Char('h') => KeyKind::Left,
+        KeyCode::Char('l') => KeyKind::Right,
+        KeyCode::Char('w') => KeyKind::Write,
+        KeyCode::Char('q') => KeyKind::Quit,
+        KeyCode::Char('?') => KeyKind::Help,
+        _ => KeyKind::Other,
+    }
+}
+
+/// The ANSI preview strip: the current (possibly unsaved) layout rendered
+/// through the real pipeline — `sample_context` + the resolved theme +
+/// `render_named_region` + `tmux_to_ansi`, exactly as `render left`/`render
+/// right` do (see `main.rs`).
+///
+/// **Plugins are drawn as a static `[name]` chip, never instantiated.**
+/// Instantiating a WASM guest on every keystroke would be slow and would run
+/// third-party code inside a config editor; the placeholder makes the widget's
+/// position visible without that cost. `Center` has no real
+/// `render_named_region` call site (the window list is rendered as pills via a
+/// dedicated path — see `assemble.rs`), so this preview treats it like `Left`
+/// purely for a stable, readable strip; it is not meant to match tmux's actual
+/// window-pill rendering.
+fn preview_line(state: &EditorState, cfg: &Config) -> String {
+    let theme = crate::resolve_theme(cfg);
+    let ctx = crate::sample_context::sample_context(false);
+    let registry = Registry::with_builtins(cfg);
+    let overrides = cfg.color_overrides();
+    let mut parts: Vec<String> = Vec::new();
+    for region in Region::ALL {
+        let all = state.layout().get(region);
+        // Only names the registry knows render for real; anything else (a
+        // plugin stem, an unresolvable instance) becomes a chip.
+        let names: Vec<String> = all
+            .iter()
+            .filter(|n| registry.contains(n.as_str()))
+            .cloned()
+            .collect();
+        let chips: Vec<String> = all
+            .iter()
+            .filter(|n| !registry.contains(n.as_str()))
+            .map(|n| format!("[{n}]"))
+            .collect();
+        let dir = match region {
+            Region::Right => rustline_core::Direction::Right,
+            Region::Left | Region::Center => rustline_core::Direction::Left,
+        };
+        let markup = render_named_region(dir, &names, &ctx, &registry, &theme, &overrides);
+        let mut rendered = tmux_to_ansi(&markup);
+        if !chips.is_empty() {
+            rendered.push(' ');
+            rendered.push_str(&chips.join(" "));
+        }
+        if !rendered.trim().is_empty() {
+            parts.push(rendered);
+        }
+    }
+    parts.join("   ")
+}
+
+/// Restores the terminal on every exit path — normal return, `?`, or a panic
+/// unwinding through the draw loop. Without this a panic inside ratatui leaves
+/// the user's shell in raw mode with no echo. The default panic strategy for
+/// this workspace is `unwind` (no crate sets `panic = "abort"`), so a panic
+/// anywhere in the loop below still drops this guard on its way up.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn enter() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        Terminal::new(CrosstermBackend::new(stdout))
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    }
+}
+
+/// The key-hint footer shown when there's no status message.
+const HELP_LINE: &str = "←→ region  ↑↓ select  space add/remove  J/K reorder  w write  q quit";
+
+/// The fuller hint shown while `?` help is toggled on, appended above the
+/// footer.
+const HELP_DETAIL: &str =
+    "vim keys: h j k l   Enter also adds/removes   Esc also quits   ? toggles this line";
+
+/// Render one frame. Pure with respect to `state`/`cfg` — it reads
+/// [`EditorState::columns`], [`EditorState::column`],
+/// [`EditorState::cursor_index`], [`EditorState::status`],
+/// [`EditorState::show_help`], [`EditorState::confirming_quit`], and
+/// [`EditorState::is_dirty`] (for the footer's `[modified]` marker), and
+/// never mutates anything.
+fn draw(frame: &mut ratatui::Frame, state: &EditorState, cfg: &Config) {
+    let help_height = u16::from(state.show_help());
+    let rows = UiLayout::default()
+        .direction(LayoutDirection::Vertical)
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(1), // preview strip
+            Constraint::Length(help_height),
+            Constraint::Length(1), // footer / status
+        ])
+        .split(frame.area());
+
+    let columns = UiLayout::default()
+        .direction(LayoutDirection::Horizontal)
+        .constraints([Constraint::Ratio(1, 4); 4])
+        .split(rows[0]);
+
+    for (area, (column, items)) in columns.iter().zip(state.columns()) {
+        let focused = column == state.column();
+        let border_style = if focused {
+            UiStyle::default().add_modifier(Modifier::BOLD)
+        } else {
+            UiStyle::default()
+        };
+        let list_items: Vec<ListItem> = items
+            .iter()
+            .map(|name| {
+                let tag = match state.source_of(name) {
+                    Some(WidgetSource::Plugin) => " (plugin)",
+                    Some(WidgetSource::Instance { .. }) => " (instance)",
+                    _ => "",
+                };
+                ListItem::new(Line::from(Span::raw(format!("{name}{tag}"))))
+            })
+            .collect();
+        let block = Block::default()
+            .title(column.title())
+            .borders(Borders::ALL)
+            .border_style(border_style);
+        let list = List::new(list_items)
+            .block(block)
+            .highlight_style(UiStyle::default().add_modifier(Modifier::REVERSED));
+        let mut list_state = ListState::default();
+        if focused && !items.is_empty() {
+            list_state.select(Some(state.cursor_index()));
+        }
+        frame.render_stateful_widget(list, *area, &mut list_state);
+    }
+
+    frame.render_widget(Paragraph::new(preview_line(state, cfg)), rows[1]);
+
+    if state.show_help() {
+        frame.render_widget(Paragraph::new(HELP_DETAIL), rows[2]);
+    }
+
+    let footer_style = if state.confirming_quit() {
+        UiStyle::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        UiStyle::default()
+    };
+    let footer_text = if !state.status().is_empty() {
+        state.status().to_string()
+    } else if state.is_dirty() {
+        format!("{HELP_LINE}   [modified]")
+    } else {
+        HELP_LINE.to_string()
+    };
+    frame.render_widget(Paragraph::new(footer_text).style(footer_style), rows[3]);
+}
+
+/// Open the interactive widget editor. Requires a TTY; a non-interactive
+/// invocation prints a hint toward the scriptable subcommands and exits
+/// non-zero without drawing anything (mirroring `theme pick`'s guard).
+pub fn run(config_path: &Path, plugin_dir: &Path) -> i32 {
+    if !io::stdin().is_terminal() {
+        eprintln!(
+            "`widget edit` needs a terminal; use `rustline widget list`, \
+             `widget enable <name>`, or `widget disable <name>` instead"
+        );
+        return 1;
+    }
+    let cfg = Config::load(config_path);
+    let text = std::fs::read_to_string(config_path).unwrap_or_default();
+    let mut doc = match text.parse::<DocumentMut>() {
+        Ok(doc) => doc,
+        Err(error) => {
+            eprintln!("config file is not valid TOML; refusing to edit it: {error}");
+            return 1;
+        }
+    };
+    let layout = crate::widget_cmd::read_layout(&doc);
+    let catalog = rustline_core::widget_placements(
+        &cfg,
+        Registry::with_builtins(&cfg).descriptors(),
+        &rustline_wasm::discover_plugin_names(plugin_dir),
+    );
+    let mut state = EditorState::new(layout, catalog);
+
+    // The guard must be constructed before raw mode is entered, and must
+    // outlive the loop, so a panic anywhere below still restores the
+    // terminal on unwind.
+    let _guard = TerminalGuard;
+    let mut terminal = match TerminalGuard::enter() {
+        Ok(t) => t,
+        Err(error) => {
+            eprintln!("failed to start the editor: {error}");
+            return 1;
+        }
+    };
+
+    loop {
+        if terminal.draw(|frame| draw(frame, &state, &cfg)).is_err() {
+            return 1;
+        }
+        let Ok(Event::Key(key)) = event::read() else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        match state.on_key(map_key(key)) {
+            EditorAction::Redraw | EditorAction::ConfirmQuit => {}
+            EditorAction::Write => {
+                match crate::widget_cmd::write_layout(&mut doc, state.layout()) {
+                    Ok(()) => match std::fs::write(config_path, doc.to_string()) {
+                        Ok(()) => state.mark_written(),
+                        Err(error) => state.mark_write_failed(&error.to_string()),
+                    },
+                    Err(error) => state.mark_write_failed(&error),
+                }
+            }
+            EditorAction::Quit => break,
+        }
+    }
+    0
 }
 
 #[cfg(test)]
 mod tests {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use rustline_core::Config;
+
     use super::*;
 
     fn placement(name: &str) -> WidgetPlacement {
@@ -524,5 +780,117 @@ mod tests {
         s.on_key(KeyKind::Down);
         // Still dirty, and quitting asks again rather than exiting.
         assert_eq!(s.on_key(KeyKind::Quit), EditorAction::ConfirmQuit);
+    }
+
+    #[test]
+    fn map_key_covers_both_arrow_and_vim_bindings() {
+        let ev = |code, mods| KeyEvent::new(code, mods);
+        assert_eq!(map_key(ev(KeyCode::Up, KeyModifiers::NONE)), KeyKind::Up);
+        assert_eq!(
+            map_key(ev(KeyCode::Char('k'), KeyModifiers::NONE)),
+            KeyKind::Up
+        );
+        assert_eq!(
+            map_key(ev(KeyCode::Down, KeyModifiers::NONE)),
+            KeyKind::Down
+        );
+        assert_eq!(
+            map_key(ev(KeyCode::Char('j'), KeyModifiers::NONE)),
+            KeyKind::Down
+        );
+        assert_eq!(
+            map_key(ev(KeyCode::Left, KeyModifiers::NONE)),
+            KeyKind::Left
+        );
+        assert_eq!(
+            map_key(ev(KeyCode::Char('h'), KeyModifiers::NONE)),
+            KeyKind::Left
+        );
+        assert_eq!(
+            map_key(ev(KeyCode::Right, KeyModifiers::NONE)),
+            KeyKind::Right
+        );
+        assert_eq!(
+            map_key(ev(KeyCode::Char('l'), KeyModifiers::NONE)),
+            KeyKind::Right
+        );
+    }
+
+    #[test]
+    fn map_key_distinguishes_shifted_nudges_from_plain_motion() {
+        // Terminals report Shift+j either as 'J' or as 'j' with the SHIFT modifier.
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT)),
+            KeyKind::NudgeDown
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT)),
+            KeyKind::NudgeUp
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE)),
+            KeyKind::NudgeDown
+        );
+    }
+
+    #[test]
+    fn map_key_maps_the_command_keys_and_ignores_the_rest() {
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)),
+            KeyKind::Write
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            KeyKind::Quit
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            KeyKind::Quit
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
+            KeyKind::Space
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            KeyKind::Space
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)),
+            KeyKind::Help
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)),
+            KeyKind::Other
+        );
+    }
+
+    #[test]
+    fn preview_renders_builtins_and_shows_plugins_as_a_static_chip() {
+        let layout = Layout {
+            left: vec!["hostname".into()],
+            center: vec![],
+            right: vec!["weather".into()],
+        };
+        let catalog = vec![
+            WidgetPlacement {
+                name: "hostname".into(),
+                summary: "host".into(),
+                source: WidgetSource::Builtin,
+                placement: None,
+            },
+            WidgetPlacement {
+                name: "weather".into(),
+                summary: "weather".into(),
+                source: WidgetSource::Plugin,
+                placement: None,
+            },
+        ];
+        let state = EditorState::new(layout, catalog);
+        let line = preview_line(&state, &Config::default());
+        // The built-in rendered its real text; the plugin is a placeholder chip and
+        // was never instantiated.
+        assert!(line.contains("[weather]"), "plugin chip present: {line}");
+        assert!(!line.is_empty());
     }
 }
