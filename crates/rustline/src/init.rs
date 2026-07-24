@@ -229,9 +229,6 @@ pub fn defaults() -> InitAnswers {
 
 /// Reverse-map a datetime `format` string to the wizard preset that produced
 /// it, or `None` if it matches no preset (so seeding keeps the default clock).
-// Not yet called outside tests: a follow-up task wires this and
-// `seed_answers` into the interactive prompt (W33).
-#[allow(dead_code)]
 fn clock_from_format(fmt: &str) -> Option<ClockStyle> {
     [
         ClockStyle::TwentyFour,
@@ -246,8 +243,6 @@ fn clock_from_format(fmt: &str) -> Option<ClockStyle> {
 /// Pre-fill wizard answers from an existing config.toml. Recovers only what
 /// config stores (theme, optional-widget membership, clock); the tmux-only
 /// answers (mouse/two_line/interval) keep their recommended defaults.
-// Not yet called outside tests: see `clock_from_format`'s note above.
-#[allow(dead_code)]
 fn seed_answers(config_path: &Path) -> InitAnswers {
     use rustline_core::Config;
     if !config_path.exists() {
@@ -276,6 +271,31 @@ fn seed_answers(config_path: &Path) -> InitAnswers {
     }
 }
 
+/// A human summary of the collected answers for the pre-write confirmation.
+fn summarize_answers(a: &InitAnswers) -> String {
+    let clock = match a.clock {
+        ClockStyle::TwentyFour => "24-hour",
+        ClockStyle::TwentyFourSeconds => "24-hour + seconds",
+        ClockStyle::Twelve => "12-hour",
+        ClockStyle::TwelveSeconds => "12-hour + seconds",
+    };
+    let on = |b: bool| if b { "on" } else { "off" };
+    let mut s = String::new();
+    let _ = writeln!(s, "  theme:        {}", a.theme);
+    let _ = writeln!(
+        s,
+        "  status lines: {}",
+        if a.two_line { "two-line" } else { "one-line" }
+    );
+    let _ = writeln!(s, "  mouse:        {}", on(a.mouse));
+    let _ = writeln!(s, "  battery:      {}", on(a.battery));
+    let _ = writeln!(s, "  Tailscale IP: {}", on(a.tailscale));
+    let _ = writeln!(s, "  LAN IP:       {}", on(a.lan_ip));
+    let _ = writeln!(s, "  clock:        {clock}");
+    let _ = writeln!(s, "  refresh:      {}s", a.interval);
+    s
+}
+
 /// Entry point for `rustline init`. `--print` wins (emit the legacy raw
 /// one-line block, write nothing) using the caller's already-resolved
 /// `current_theme` (`[theme].base` plus any inline `[theme]` overrides), so
@@ -285,12 +305,15 @@ fn seed_answers(config_path: &Path) -> InitAnswers {
 /// requires a TTY. `--dry-run` is honored here too — `--uninstall --dry-run`
 /// only *previews* the removal (see [`preview_uninstall`]) and writes
 /// nothing, while plain `--uninstall` performs the real removal (see
-/// [`uninstall`]). Otherwise, gather answers (`--defaults` or the interactive
-/// prompt) the same way a real run would. `--dry-run` then previews both
-/// artifacts and writes nothing (see [`preview`]); otherwise `apply` writes
-/// both files. A non-interactive invocation (stdin not a TTY) without
-/// `--defaults` errors rather than writing/previewing silently, whether or
-/// not `--dry-run` was also given.
+/// [`uninstall`]). Otherwise, gather answers (`--defaults`, or the interactive
+/// prompt seeded from any existing config via [`seed_answers`]) the same way a
+/// real run would. `--dry-run` then previews both artifacts and writes nothing
+/// (see [`preview`]); otherwise, for the interactive path only, a
+/// [`summarize_answers`] + [`preview`] confirm gate asks before writing
+/// (declining aborts with nothing written) — `--defaults` writes straight
+/// through with no confirm. A non-interactive invocation (stdin not a TTY)
+/// without `--defaults` errors rather than writing/previewing silently,
+/// whether or not `--dry-run` was also given.
 ///
 /// `binary` is the resolved absolute path substituted into the tmux block's
 /// `#(...)` calls in place of a bare `rustline` (see `crate::resolve_binary`);
@@ -327,10 +350,11 @@ pub fn run(
         }
         return;
     }
+    let interactive = !args.defaults;
     let answers = if args.defaults {
         defaults()
     } else if std::io::stdin().is_terminal() {
-        prompt_answers(themes_dir)
+        prompt_answers(themes_dir, &seed_answers(config_path))
     } else {
         eprintln!(
             "rustline init needs a terminal for the interactive wizard.\n\
@@ -342,6 +366,14 @@ pub fn run(
     if args.dry_run {
         preview(&answers, config_path, tmux_conf_path, binary);
         return;
+    }
+    if interactive {
+        eprintln!("\nAbout to write:\n{}", summarize_answers(&answers));
+        preview(&answers, config_path, tmux_conf_path, binary);
+        if !ask("Write these changes?", true) {
+            eprintln!("Aborted; nothing written.");
+            return;
+        }
     }
     apply(&answers, config_path, tmux_conf_path, binary);
 }
@@ -644,10 +676,13 @@ fn read_line() -> String {
 }
 
 /// Prompt on stderr; loop the theme menu until a valid pick, then ask the
-/// remaining questions. I/O-heavy; the parsing/defaulting it delegates to is
-/// unit-tested (`parse_menu_choice`/`parse_yes_no`).
-fn prompt_answers(themes_dir: &Path) -> InitAnswers {
-    let mut a = defaults();
+/// remaining questions. Every shown default comes from `seed` (typically
+/// [`seed_answers`]'s recovery from an existing config, or [`defaults`] for a
+/// fresh install), so re-running the wizard doesn't reset already-chosen
+/// settings. I/O-heavy; the parsing/defaulting it delegates to is unit-tested
+/// (`parse_menu_choice`/`parse_yes_no`).
+fn prompt_answers(themes_dir: &Path, seed: &InitAnswers) -> InitAnswers {
+    let mut a = seed.clone();
     let stderr = std::io::stderr();
 
     // Theme
@@ -660,16 +695,17 @@ fn prompt_answers(themes_dir: &Path) -> InitAnswers {
             themes.push(f);
         }
     }
+    let theme_default = themes.iter().position(|t| *t == seed.theme).unwrap_or(0);
     loop {
         let mut w = stderr.lock();
         let _ = writeln!(w, "\nChoose a theme:");
         for (i, name) in themes.iter().enumerate() {
             let _ = writeln!(w, "  {}) {name}", i + 1);
         }
-        let _ = write!(w, "Theme [1]: ");
+        let _ = write!(w, "Theme [{}]: ", theme_default + 1);
         let _ = w.flush();
         drop(w);
-        if let Some(idx) = parse_menu_choice(&read_line(), themes.len(), 0) {
+        if let Some(idx) = parse_menu_choice(&read_line(), themes.len(), theme_default) {
             a.theme = themes[idx].clone();
             if let Some(preview) = crate::theme_cmd::preview_named(&a.theme, themes_dir, true) {
                 eprintln!("\n{preview}\n");
@@ -682,14 +718,17 @@ fn prompt_answers(themes_dir: &Path) -> InitAnswers {
         }
     }
 
-    a.two_line = ask("Two-line status (window list on its own line)?", false);
-    a.mouse = ask("Enable mouse for click-to-toggle widgets?", true);
-    a.battery = ask(
-        "Laptop — show battery?",
-        crate::battery::read_battery().is_some(),
+    a.two_line = ask(
+        "Two-line status (window list on its own line)?",
+        seed.two_line,
     );
-    a.tailscale = ask("On a Tailscale network — show Tailscale IP?", false);
-    a.lan_ip = ask("Show LAN IP?", false);
+    a.mouse = ask("Enable mouse for click-to-toggle widgets?", seed.mouse);
+    a.battery = ask("Laptop — show battery?", seed.battery);
+    a.tailscale = ask(
+        "On a Tailscale network — show Tailscale IP?",
+        seed.tailscale,
+    );
+    a.lan_ip = ask("Show LAN IP?", seed.lan_ip);
 
     // Clock
     let clocks = [
@@ -704,23 +743,27 @@ fn prompt_answers(themes_dir: &Path) -> InitAnswers {
             ClockStyle::TwelveSeconds,
         ),
     ];
+    let clock_default = clocks
+        .iter()
+        .position(|(_, c)| *c == seed.clock)
+        .unwrap_or(0);
     loop {
         let mut w = stderr.lock();
         let _ = writeln!(w, "\nClock style:");
         for (i, (label, _)) in clocks.iter().enumerate() {
             let _ = writeln!(w, "  {}) {label}", i + 1);
         }
-        let _ = write!(w, "Clock [1]: ");
+        let _ = write!(w, "Clock [{}]: ", clock_default + 1);
         let _ = w.flush();
         drop(w);
-        if let Some(idx) = parse_menu_choice(&read_line(), clocks.len(), 0) {
+        if let Some(idx) = parse_menu_choice(&read_line(), clocks.len(), clock_default) {
             a.clock = clocks[idx].1;
             break;
         }
         eprintln!("Please enter a number from the list.");
     }
 
-    a.interval = if ask("Fast refresh (1s)? (No = 5s)", true) {
+    a.interval = if ask("Fast refresh (1s)? (No = 5s)", seed.interval == 1) {
         1
     } else {
         5
@@ -1034,5 +1077,25 @@ format = "USER {percent}%"
         assert!(!a.lan_ip && !a.tailscale);
         // battery may be true or false depending on the host probe; assert it does not panic
         let _ = a.battery;
+    }
+
+    #[test]
+    fn summarize_answers_lists_every_answer() {
+        let a = InitAnswers {
+            theme: "nord".into(),
+            two_line: true,
+            mouse: false,
+            battery: true,
+            tailscale: false,
+            lan_ip: true,
+            clock: ClockStyle::Twelve,
+            interval: 5,
+        };
+        let s = summarize_answers(&a);
+        for needle in [
+            "nord", "two-line", "mouse", "battery", "LAN", "12-hour", "5s",
+        ] {
+            assert!(s.contains(needle), "missing {needle:?} in:\n{s}");
+        }
     }
 }
