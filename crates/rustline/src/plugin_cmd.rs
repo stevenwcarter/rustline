@@ -47,7 +47,7 @@ impl Kind {
 /// `config_path`, discovering manifests under `plugin_dir`.
 pub fn run(cmd: PluginCmd, config_path: &Path, plugin_dir: &Path) {
     match cmd {
-        PluginCmd::List => list(config_path, plugin_dir),
+        PluginCmd::List { json } => list(config_path, plugin_dir, json),
         PluginCmd::Url(pc) => pattern_cmd(pc, Kind::Url, config_path),
         PluginCmd::Path(pc) => pattern_cmd(pc, Kind::Path, config_path),
         PluginCmd::Approve(args) => approve(args, config_path, plugin_dir),
@@ -62,15 +62,19 @@ pub fn run(cmd: PluginCmd, config_path: &Path, plugin_dir: &Path) {
             }
         }
         PluginCmd::Run(args) => run_plugin(&args, config_path, plugin_dir),
-        PluginCmd::Denials { name } => denials_cmd(&name),
+        PluginCmd::Denials { name, json } => denials_cmd(&name, json),
     }
 }
 
 /// `rustline plugin denials <name>`: list every capability denial the
 /// production `FileDenialObserver` has recorded for `name` (one line per
 /// distinct `(kind, target)` — see `rustline_wasm::denials`). Read-only.
-fn denials_cmd(name: &str) {
+fn denials_cmd(name: &str, json: bool) {
     let denials = rustline_wasm::read_denials(name);
+    if json {
+        println!("{}", denials_json(&denials));
+        return;
+    }
     if denials.is_empty() {
         println!("no recorded denials for {name}");
         return;
@@ -123,6 +127,67 @@ fn denial_kind_label(kind: DenialKind) -> &'static str {
         DenialKind::Url => "url",
         DenialKind::Path => "path",
     }
+}
+
+#[derive(serde::Serialize)]
+struct PluginEntryJson<'a> {
+    name: &'a str,
+    source: Option<String>,
+    tag: Option<&'a str>,
+    allowed_urls: &'a [String],
+    allowed_paths: &'a [String],
+    max_state_bytes: u64,
+    has_manifest: bool,
+}
+
+/// The `plugin list --json` payload — one entry per configured plugin, same
+/// fields the human `list` prints, plus `has_manifest` (whether a capability
+/// manifest resolves). An empty plugins map serializes to `[]`.
+fn plugin_list_json(cfg: &Config, plugin_dir: &Path) -> String {
+    let entries: Vec<PluginEntryJson> = cfg
+        .plugins
+        .iter()
+        .map(|(name, pc)| PluginEntryJson {
+            name,
+            source: pc.source.as_ref().map(|s| s.to_string()),
+            tag: pc.tag.as_deref(),
+            allowed_urls: &pc.allowed_urls,
+            allowed_paths: &pc.allowed_paths,
+            max_state_bytes: pc.max_state_bytes,
+            has_manifest: resolve_manifest(plugin_dir, name).is_some(),
+        })
+        .collect();
+    serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// The `plugin url|path list --json` payload: a JSON array of the allowlist
+/// strings. An absent plugin or empty list → `[]` (stdout stays valid JSON in a
+/// CI audit; the human path's "no such plugin" distinction is intentionally
+/// dropped in JSON mode — callers check `plugin list --json` for existence).
+fn pattern_list_json(patterns: Option<&Vec<String>>) -> String {
+    match patterns {
+        Some(list) => serde_json::to_string_pretty(list).unwrap_or_else(|_| "[]".to_string()),
+        None => "[]".to_string(),
+    }
+}
+
+#[derive(serde::Serialize)]
+struct DenialEntryJson {
+    kind: &'static str,
+    target: String,
+}
+
+/// The `plugin denials --json` payload: one entry per recorded denial, `kind`
+/// as the same lowercase label the human path prints.
+fn denials_json(denials: &[rustline_wasm::Denial]) -> String {
+    let entries: Vec<DenialEntryJson> = denials
+        .iter()
+        .map(|d| DenialEntryJson {
+            kind: denial_kind_label(d.kind),
+            target: d.target.clone(),
+        })
+        .collect();
+    serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Render a `plugin run` report: each rendered segment's text, then any
@@ -192,9 +257,13 @@ fn run_plugin(args: &RunArgs, config_path: &Path, plugin_dir: &Path) {
 }
 
 /// Print every configured plugin's source and allowlists/caps, noting any
-/// declared capability manifest.
-fn list(config_path: &Path, plugin_dir: &Path) {
+/// declared capability manifest. With `json`, emit `plugin_list_json` instead.
+fn list(config_path: &Path, plugin_dir: &Path, json: bool) {
     let cfg = Config::load(config_path);
+    if json {
+        println!("{}", plugin_list_json(&cfg, plugin_dir));
+        return;
+    }
     if cfg.plugins.is_empty() {
         println!("no plugins configured");
         return;
@@ -224,16 +293,20 @@ fn list(config_path: &Path, plugin_dir: &Path) {
 /// named plugin.
 fn pattern_cmd(cmd: PatternCmd, kind: Kind, config_path: &Path) {
     match cmd {
-        PatternCmd::List { plugin } => {
+        PatternCmd::List { plugin, json } => {
             let cfg = Config::load(config_path);
             let patterns = cfg.plugins.get(&plugin).map(|p| match kind {
                 Kind::Url => &p.allowed_urls,
                 Kind::Path => &p.allowed_paths,
             });
-            match patterns {
-                Some(list) if !list.is_empty() => list.iter().for_each(|p| println!("{p}")),
-                Some(_) => println!("(none)"),
-                None => println!("no such plugin: {plugin}"),
+            if json {
+                println!("{}", pattern_list_json(patterns));
+            } else {
+                match patterns {
+                    Some(list) if !list.is_empty() => list.iter().for_each(|p| println!("{p}")),
+                    Some(_) => println!("(none)"),
+                    None => println!("no such plugin: {plugin}"),
+                }
             }
         }
         PatternCmd::Add { plugin, pattern } => mutate(config_path, &plugin, kind, |arr| {
@@ -865,6 +938,61 @@ mod tests {
         let cargo_toml = dir.path().join("Cargo.toml");
         std::fs::write(&cargo_toml, "[dependencies]\n").unwrap();
         assert!(package_name(&cargo_toml).is_err());
+    }
+
+    #[test]
+    fn pattern_list_json_none_is_empty_array_some_is_array() {
+        // Absent/empty allowlist → valid empty JSON array (stdout stays
+        // parseable in CI), never a human "no such plugin" string.
+        assert_eq!(pattern_list_json(None), "[]");
+        let patterns = vec!["https://wttr.in/*".to_string()];
+        let json = pattern_list_json(Some(&patterns));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(v[0], "https://wttr.in/*");
+    }
+
+    #[test]
+    fn denials_json_shape() {
+        let denials = vec![
+            rustline_wasm::Denial {
+                plugin: "weather".into(),
+                kind: DenialKind::Url,
+                target: "https://evil.example/".into(),
+            },
+            rustline_wasm::Denial {
+                plugin: "weather".into(),
+                kind: DenialKind::Path,
+                target: "/etc/passwd".into(),
+            },
+        ];
+        let json = denials_json(&denials);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v[0]["kind"], "url");
+        assert_eq!(v[0]["target"], "https://evil.example/");
+        assert_eq!(v[1]["kind"], "path");
+    }
+
+    #[test]
+    fn plugin_list_json_has_expected_fields() {
+        let mut cfg = Config::default();
+        let pc = rustline_core::PluginConfig {
+            allowed_urls: vec!["https://wttr.in/*".to_string()],
+            ..Default::default()
+        };
+        cfg.plugins.insert("weather".to_string(), pc);
+        // A path with no manifest sidecar → has_manifest false.
+        let json = plugin_list_json(&cfg, std::path::Path::new("/nonexistent-plugin-dir"));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let w = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "weather")
+            .unwrap();
+        assert_eq!(w["allowed_urls"][0], "https://wttr.in/*");
+        assert_eq!(w["has_manifest"], false);
+        assert!(w.get("max_state_bytes").is_some());
     }
 
     #[test]

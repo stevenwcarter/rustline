@@ -156,7 +156,11 @@ pub enum ConfigCmd {
 #[derive(Subcommand)]
 pub enum PluginCmd {
     /// List configured plugins and their allowlists/caps.
-    List,
+    List {
+        /// Emit the list as a JSON array instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage a plugin's URL allowlist.
     #[command(subcommand)]
     Url(PatternCmd),
@@ -191,6 +195,9 @@ pub enum PluginCmd {
     Denials {
         /// The plugin name (its `.wasm` stem).
         name: String,
+        /// Emit the denials as a JSON array instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -289,7 +296,12 @@ pub struct ApproveArgs {
 #[derive(Subcommand)]
 pub enum PatternCmd {
     /// List the plugin's patterns.
-    List { plugin: String },
+    List {
+        plugin: String,
+        /// Emit the patterns as a JSON array of strings instead of one per line.
+        #[arg(long)]
+        json: bool,
+    },
     /// Append a pattern (idempotent).
     Add { plugin: String, pattern: String },
     /// Remove an exact-match pattern.
