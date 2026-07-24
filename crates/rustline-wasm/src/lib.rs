@@ -6,6 +6,7 @@
 
 pub mod abi;
 pub mod allow;
+pub mod argv;
 pub mod cache;
 pub mod capability;
 pub mod denials;
@@ -24,6 +25,7 @@ use rustline_core::{
     Config, PluginConfig, RANGE_NAME_MAX_BYTES, Registry, WidgetDescriptor, WidgetSource,
 };
 
+pub use argv::canonical_argv;
 pub use capability::{CapabilityCtx, DenialKind, DenialObserver};
 pub use denials::{Denial, FileDenialObserver, denials_path, read_denials};
 pub use host::{CompileCache, WasmWidget, build_plugin, build_plugin_with_cache};

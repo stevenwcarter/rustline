@@ -126,6 +126,7 @@ fn denial_kind_label(kind: DenialKind) -> &'static str {
     match kind {
         DenialKind::Url => "url",
         DenialKind::Path => "path",
+        DenialKind::Command => "command",
     }
 }
 

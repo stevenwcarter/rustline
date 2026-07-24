@@ -4,13 +4,16 @@
 use rustline_core::{Context, Segment};
 use serde::Serialize;
 
-/// The four host-effect wire-result types (`HttpResult`, `CachedHttpResult`,
-/// `ReadResult`, `WriteResult`) now live in `rustline-abi` (W51) — shared
-/// verbatim with `rustline-plugin-sdk`'s guest-side decode instead of each
-/// side declaring its own copy. Re-exported here so existing
+/// The host-effect wire-result types (`HttpResult`, `CachedHttpResult`,
+/// `ReadResult`, `WriteResult`, and — for the exec capability — `ExecResult`/
+/// `CachedExecResult`) now live in `rustline-abi` (W51) — shared verbatim with
+/// `rustline-plugin-sdk`'s guest-side decode instead of each side declaring
+/// its own copy. Re-exported here so existing
 /// `crate::abi::HttpResult`/`rustline_wasm::abi::…` paths keep resolving, the
 /// same precedent as `rustline_core::segment`'s re-export of `Segment`.
-pub use rustline_abi::{CachedHttpResult, HttpResult, ReadResult, WriteResult};
+pub use rustline_abi::{
+    CachedExecResult, CachedHttpResult, ExecResult, HttpResult, ReadResult, WriteResult,
+};
 
 /// What the host passes to a plugin's `render` export. `abi_version` carries
 /// the host's `rustline_abi::ABI_VERSION` on the wire; the primary version

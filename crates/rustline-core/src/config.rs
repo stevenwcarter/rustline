@@ -1341,9 +1341,9 @@ impl<'de> Deserialize<'de> for PluginSource {
 
 /// Per-plugin configuration, keyed by plugin name in [`Config::plugins`].
 ///
-/// Capability fields (`allowed_urls`, `allowed_paths`, `max_state_bytes`) are
-/// enforced by the WASM host, never by the guest. `options` is opaque to the
-/// host and forwarded to the plugin verbatim.
+/// Capability fields (`allowed_urls`, `allowed_paths`, `allowed_commands`,
+/// `max_state_bytes`) are enforced by the WASM host, never by the guest.
+/// `options` is opaque to the host and forwarded to the plugin verbatim.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PluginConfig {
     #[serde(default)]
@@ -1352,6 +1352,13 @@ pub struct PluginConfig {
     pub allowed_urls: Vec<String>,
     #[serde(default)]
     pub allowed_paths: Vec<String>,
+    /// Command allow-patterns for the exec capability. Each entry is a glob by
+    /// default, or a regex when prefixed `re:`, matched against the
+    /// **canonical argv string** (`rustline_wasm::canonical_argv`) — the whole
+    /// command line, not just the program. Empty (the default) matches
+    /// nothing: deny by default, like the other two allowlists.
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
     #[serde(default = "default_max_state_bytes")]
     pub max_state_bytes: u64,
     /// sha256 hex of the installed `.wasm`, recorded by `plugin install`/
@@ -1381,6 +1388,7 @@ impl Default for PluginConfig {
             source: None,
             allowed_urls: Vec::new(),
             allowed_paths: Vec::new(),
+            allowed_commands: Vec::new(),
             max_state_bytes: default_max_state_bytes(),
             checksum: None,
             tag: None,

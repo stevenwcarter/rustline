@@ -23,6 +23,8 @@ pub enum DenialKind {
     Url,
     /// A file read/write denied by `allowed_paths`.
     Path,
+    /// A subprocess run (cached or uncached) denied by `allowed_commands`.
+    Command,
 }
 
 /// Observes a plugin's denied capability requests. This is a pure
@@ -51,6 +53,7 @@ pub struct CapabilityCtx {
     pub name: String,
     pub allowed_urls: AllowSet,
     pub allowed_paths: AllowSet,
+    pub allowed_commands: AllowSet,
     pub state_root: PathBuf,
     pub max_state_bytes: u64,
     observer: Arc<dyn DenialObserver + Send + Sync>,
@@ -62,6 +65,7 @@ impl CapabilityCtx {
             name: name.to_string(),
             allowed_urls: AllowSet::compile(&pc.allowed_urls),
             allowed_paths: AllowSet::compile(&pc.allowed_paths),
+            allowed_commands: AllowSet::compile(&pc.allowed_commands),
             state_root,
             max_state_bytes: pc.max_state_bytes,
             observer: Arc::new(NoopObserver),
@@ -93,5 +97,37 @@ impl CapabilityCtx {
     #[cfg(test)]
     pub fn state_sub(&self, rel: &str) -> Result<PathBuf, String> {
         Ok(self.state_dir().join(state::sanitize_relpath(rel)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn denial_kind_command_serializes_as_snake_case() {
+        let json = serde_json::to_string(&DenialKind::Command).unwrap();
+        assert_eq!(json, "\"command\"");
+        let back: DenialKind = serde_json::from_str("\"command\"").unwrap();
+        assert_eq!(back, DenialKind::Command);
+    }
+
+    #[test]
+    fn capability_ctx_compiles_the_command_allowlist_and_denies_by_default() {
+        let pc = PluginConfig::default();
+        let ctx = CapabilityCtx::from_config("p", &pc, std::path::PathBuf::from("/tmp"));
+        assert!(
+            !ctx.allowed_commands.allows("anything"),
+            "an empty allowlist matches nothing (deny by default)"
+        );
+
+        let pc = PluginConfig {
+            allowed_commands: vec!["playerctl metadata*".to_string()],
+            ..PluginConfig::default()
+        };
+        let ctx = CapabilityCtx::from_config("p", &pc, std::path::PathBuf::from("/tmp"));
+        assert!(ctx.allowed_commands.allows("playerctl metadata"));
+        assert!(ctx.allowed_commands.allows("playerctl metadata --format x"));
+        assert!(!ctx.allowed_commands.allows("playerctl play"));
     }
 }

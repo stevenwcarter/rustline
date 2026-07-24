@@ -24,3 +24,9 @@ pub use render::{Direction, RANGE_NAME_MAX_BYTES, Theme, render_region};
 pub use segment::{Color, Segment, Style, ThemeColors};
 pub use themes::{builtin_theme, builtin_theme_names};
 pub use widget::{Registry, Widget, WidgetDescriptor, WidgetSource};
+
+/// The exec-capability wire-result types, re-exported from `rustline-abi` so
+/// callers that already depend on `rustline-core` (rather than the abi crate
+/// directly) can name them without an extra dependency — the same precedent
+/// as the `segment`/`context` re-exports above.
+pub use rustline_abi::{CachedExecResult, ExecResult};
