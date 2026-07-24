@@ -2418,3 +2418,78 @@ fn widget_move_region_center_still_writes_and_warns() {
         "warns that tmux owns the window list in center: {stderr}"
     );
 }
+
+/// Same warn-but-succeed contract for `widget disable` of a widget that was
+/// sitting in center — `widget disable` has no `--region` flag, so the
+/// warning must be keyed off the region `layout_disable` actually removed
+/// the widget from.
+#[test]
+fn widget_disable_from_center_still_writes_and_warns() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "[layout]\nleft = [\"pane_id\"]\ncenter = [\"windows\"]\nright = [\"cwd\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "disable", "windows"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "a center edit must still succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    let center_line = after
+        .lines()
+        .find(|l| l.trim_start().starts_with("center"))
+        .expect("center line present");
+    assert!(
+        !center_line.contains("windows"),
+        "windows removed from center: {after}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("center") && stderr.contains("window"),
+        "warns that tmux owns the window list in center: {stderr}"
+    );
+}
+
+/// A disable out of `left`/`right` must NOT print the center warning — guards
+/// against a version of the fix that warns unconditionally on every disable.
+#[test]
+fn widget_disable_from_non_center_region_prints_no_center_warning() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\", \"git\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "disable", "git"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    assert!(!after.contains("git"), "git removed: {after}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("center"),
+        "no center warning for a non-center disable: {stderr}"
+    );
+}

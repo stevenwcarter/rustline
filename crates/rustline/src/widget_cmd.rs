@@ -11,12 +11,15 @@
 //! `--region center` is the one case that's *legal but inert*: nothing in the
 //! render pipeline reads `[layout].center` (tmux's window list is rendered by
 //! a dedicated, hardcoded path — see `widget_tui.rs`'s module doc), so an
-//! `enable`/`move` there still writes and exits `0` (refusing it would break
-//! round-tripping the default `center = ["windows"]`), but `warn_if_center`
-//! prints a note so the user isn't left wondering why nothing changed on the
-//! rendered bar. The interactive TUI, by contrast, refuses a CENTER edit
-//! outright — it can put an explanation right in the column, where a "wrote
-//! but nothing happened" surprise is more costly at commit time.
+//! `enable`/`move`/`disable` touching that region still writes and exits `0`
+//! (refusing it would break round-tripping the default `center =
+//! ["windows"]`), but `warn_if_center` prints a note so the user isn't left
+//! wondering why nothing changed on the rendered bar. `disable` has no
+//! `--region` flag, so its `Disable` arm derives the region from the
+//! `LayoutChange` `layout_disable` returns rather than taking it as input.
+//! The interactive TUI, by contrast, refuses a CENTER edit outright — it can
+//! put an explanation right in the column, where a "wrote but nothing
+//! happened" surprise is more costly at commit time.
 
 use std::io::Write;
 use std::path::Path;
@@ -191,9 +194,20 @@ pub fn run(cmd: WidgetCmd, config_path: &Path, plugin_dir: &Path) -> i32 {
             }
             code
         }
-        WidgetCmd::Disable { name } => mutate(config_path, plugin_dir, &name, |layout| {
-            layout_disable(layout, &name)
-        }),
+        WidgetCmd::Disable { name } => {
+            let mut removed_from = None;
+            let code = mutate(config_path, plugin_dir, &name, |layout| {
+                let change = layout_disable(layout, &name)?;
+                removed_from = change.from.map(|(region, _)| region);
+                Ok(change)
+            });
+            if code == 0
+                && let Some(region) = removed_from
+            {
+                warn_if_center(region);
+            }
+            code
+        }
         WidgetCmd::Move {
             name,
             region,
