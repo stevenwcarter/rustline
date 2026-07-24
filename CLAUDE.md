@@ -618,14 +618,27 @@ mod guest`): three more worked examples, each covering a host capability
   (`parse_proc_stat` + `busy_percent`, sampling `CPU_SAMPLE_WINDOW` ~120 ms
   apart). Either way the current reading is persisted afterward
   (`store_snapshot`, a best-effort atomic temp-file + rename) so the *next*
-  call can take the fast path — this is no longer a stateless delta. macOS
-  shells out to `top -l 2 -n 0` and parses the last `CPU usage:` line
-  (`parse_top_cpu`), unchanged. All the pure helpers (`parse_proc_stat`/
-  `busy_percent`/`busy_from_snapshots`/`parse_snapshot`/`serialize_snapshot`/
-  `parse_top_cpu`) are `#[cfg(any(target_os = …, test))]`-compiled and
-  unit-tested on the Linux dev box, with the snapshot-cache tests injecting a
-  tempdir rather than touching the real state dir. Unsupported platform or
-  failed read → `None`. Also `read_cpu_history(state_dir, current_percent,
+  call can take the fast path — this is no longer a stateless delta. **macOS now
+  shares this exact snapshot-delta path**: `read_cpu_macos_in` reads cumulative
+  CPU ticks from the mach kernel via `read_mach_cpu_ticks`
+  (`host_statistics(HOST_CPU_LOAD_INFO)`, the file's only `unsafe`, a scoped
+  `#[allow(deprecated)]` over libc's mach bindings so the dep graph stays
+  minimal) into the same `(idle, total)` `CpuTimes` shape Linux derives from
+  `/proc/stat`, then takes the same zero-sleep cross-invocation delta (fast
+  path) or the `CPU_SAMPLE_WINDOW` ~120 ms two-sample fallback, persisting to
+  the same `<state_root>/cpu-sample` file — so the snapshot machinery
+  (`CpuSnapshot`/`busy_from_snapshots`/`serialize_snapshot`/`parse_snapshot`/
+  `load_snapshot`/`store_snapshot`/`busy_percent`) is now
+  `#[cfg(any(target_os = "linux", target_os = "macos", test))]`. This
+  **replaced the old `top -l 2 -n 0` shell-out** (`parse_top_cpu`, now gone),
+  which slept ~1.4 s internally on every read: under the render daemon's shared
+  render lock that pinned the whole refresh burst and dropped queued clients
+  with EPIPE (see `daemon.rs`'s benign-disconnect logging). All the pure
+  helpers (`parse_proc_stat`/`busy_percent`/`busy_from_snapshots`/
+  `parse_snapshot`/`serialize_snapshot`) are
+  `#[cfg(any(target_os = …, test))]`-compiled and unit-tested on the dev box,
+  with the snapshot-cache tests injecting a tempdir rather than touching the
+  real state dir. Unsupported platform or failed read → `None`. Also `read_cpu_history(state_dir, current_percent,
   spark_width) -> Vec<f32>` (W45): a SEPARATE persisted ring at
   `<state_root>/cpu-history` (distinct from the `cpu-sample` snapshot above) —
   load via `sample_store` + `history::parse_history`, push the current reading,
@@ -1780,11 +1793,14 @@ info|debug|trace` and is parsed leniently (a typo falls back to the default).
 (`crates/rustline/src/battery.rs`), `read_cpu()` (`crates/rustline/src/cpu.rs`),
 and `read_memory()` (`crates/rustline/src/memory.rs`) are the three
 `#[cfg(target_os)]` surfaces in the codebase; each OS arm (Linux sysfs/`/proc`,
-macOS `pmset`/`top`/`sysctl`+`vm_stat`) delegates to a pure parser
-(`parse_linux`/`parse_pmset`, `parse_proc_stat`/`parse_top_cpu`,
-`parse_meminfo`/`parse_macos_memory`) that is `#[cfg(any(target_os = …,
-test))]`-compiled, so all of them are unit-tested on the Linux dev box even
-though only one reader arm per module compiles per platform. Follow this
+macOS `pmset`/`sysctl`+`vm_stat`, and cpu's mach `host_statistics`) delegates to
+a pure parser where the source is text (`parse_linux`/`parse_pmset`,
+`parse_proc_stat`, `parse_meminfo`/`parse_macos_memory`) that is
+`#[cfg(any(target_os = …, test))]`-compiled, so those are unit-tested on the
+dev box even though only one reader arm per module compiles per platform. (The
+cpu reader is the one exception to the pure-text-parser shape: its macOS arm is
+a mach FFI call returning counters directly, so it feeds the *shared*
+snapshot-delta helpers rather than a bespoke parser — see `cpu.rs` above.) Follow this
 pattern for any future OS-specific signal. `Context.os`/`Context.arch` (from
 `std::env::consts::OS`/`ARCH`) are now available for WASM guests that want to
 branch on platform.
