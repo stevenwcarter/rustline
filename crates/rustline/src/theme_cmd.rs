@@ -891,6 +891,31 @@ mod tests {
     }
 
     #[test]
+    fn theme_list_json_shadowed_builtin_active_only_on_file() {
+        // A themes-dir file shadowing a same-named built-in that is the active
+        // base: the built-in entry must be active:false + shadowed:true, and
+        // the FILE entry active:true — exactly one active entry, file wins
+        // (mirrors list_lines' file-first precedence). Pins theme_list_json's
+        // shadow logic to list_lines with a real assertion, not a prose
+        // "same by construction" claim.
+        let files = vec!["nord".to_string()];
+        let json = theme_list_json("nord", &files);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let arr = v.as_array().unwrap();
+        let builtin_nord = arr
+            .iter()
+            .find(|e| e["name"] == "nord" && e["source"] == "builtin")
+            .unwrap();
+        assert_eq!(builtin_nord["active"], false);
+        assert_eq!(builtin_nord["shadowed"], true);
+        let file_nord = arr
+            .iter()
+            .find(|e| e["name"] == "nord" && e["source"] == "file")
+            .unwrap();
+        assert_eq!(file_nord["active"], true);
+    }
+
+    #[test]
     fn list_lines_mark_active_and_shadowed() {
         // built-ins: default active; a "nord" file shadows the built-in nord.
         let files = vec!["nord".to_string(), "mine".to_string()];
