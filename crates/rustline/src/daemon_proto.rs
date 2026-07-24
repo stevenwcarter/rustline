@@ -35,8 +35,10 @@ pub enum DaemonRequest {
 }
 
 /// Which status-line region (or window segment) a `DaemonRequest::Render`
-/// asks for — the wire equivalent of `cli::Render`'s three variants.
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+/// asks for — the wire equivalent of `cli::Render`'s three variants. `Copy`
+/// so a caller (e.g. the bench `daemon` pass) can capture one by value in a
+/// closure that's invoked repeatedly, without a per-call clone.
+#[derive(Serialize, Deserialize, PartialEq, Clone, Copy, Debug)]
 pub enum RegionKind {
     Left,
     Right,

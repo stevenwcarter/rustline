@@ -42,7 +42,15 @@ pub fn try_render(region: RegionKind, args: RenderArgsWire) -> Option<String> {
 /// the daemon replies with anything other than [`DaemonResponse::Markup`].
 /// Never panics and never propagates an error — this is the seam that keeps
 /// a dead/misbehaving daemon from ever breaking the bar.
-fn try_render_at(sock: &Path, region: RegionKind, args: RenderArgsWire) -> Option<String> {
+///
+/// `pub(crate)` (rather than private) so the bench `daemon` pass can time a
+/// round-trip against an explicit socket too — the same seam this module's
+/// own tests use to point at a fake in-thread daemon.
+pub(crate) fn try_render_at(
+    sock: &Path,
+    region: RegionKind,
+    args: RenderArgsWire,
+) -> Option<String> {
     // One `stat` before attempting to connect: near-zero overhead when the
     // daemon isn't running (the common case today), and avoids paying a
     // connect-timeout for a socket that was never bound.

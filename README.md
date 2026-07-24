@@ -679,6 +679,15 @@ plugin's cold `build_plugin` with the on-disk wasmtime compile cache off vs on
 — on a warm cache a cold spawn deserializes the precompiled module instead of
 re-running the compiler (measured ~13× faster per plugin).
 
+`just bench --only daemon` (included in the default `all` run) A/B's a
+plugin-heavy layout's `left`/`right` render in-process (cold — a fresh
+registry, re-instantiating every WASM plugin, same as a daemon-less render)
+against a real round-trip to a reachable [daemon](#daemon-optional). It never
+starts a daemon itself: with none reachable, it prints a note telling you to
+start one (`rustline daemon run`) instead of measuring nothing. The win is
+biggest on a layout with plugins in it — a layout with none may show little
+or even a slight loss (socket round-trip overhead) once you account for it.
+
 ## Daemon (optional)
 
 By default every `rustline render` invocation is a fresh, self-contained
@@ -751,7 +760,9 @@ normal in-process render on *any* failure — the socket doesn't exist, the
 daemon isn't listening, a request times out, whatever. There's no wizard
 question for this yet and no auto-spawn: it's entirely opt-in, and
 `rustline doctor` reports whether a daemon is currently reachable
-(advisory only — never a failing check). The daemon reloads its config
+(advisory only — never a failing check). Want numbers instead of a vibe? Start
+one and run `rustline bench --only daemon` (see [Benchmarking](#benchmarking))
+to A/B a render against it. The daemon reloads its config
 automatically when `config.toml`'s modification time changes, so editing
 your config doesn't require a restart. One thing it does *not* pick up
 live: a per-invocation `render --plugin-dir=X` is ignored while a daemon is

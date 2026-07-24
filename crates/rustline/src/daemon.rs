@@ -274,7 +274,10 @@ pub fn status() -> bool {
     status_at(&daemon_socket_path())
 }
 
-fn status_at(sock: &Path) -> bool {
+/// `pub(crate)` (rather than private) so the bench `daemon` pass can gate on
+/// reachability of an explicit (e.g. fake/nonexistent) socket in its tests,
+/// the same seam this module's own tests use.
+pub(crate) fn status_at(sock: &Path) -> bool {
     let Ok(mut stream) = UnixStream::connect(sock) else {
         return false;
     };

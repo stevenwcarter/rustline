@@ -1,5 +1,6 @@
 //! `rustline bench`: time the render pipeline and print tables. Feature-gated.
 
+mod daemon;
 mod fixture;
 mod harness;
 mod plugins;
@@ -69,6 +70,12 @@ pub fn run(args: &BenchArgs, cfg: &Config) {
             &plugin_dir,
             args.real_iters,
         ));
+    }
+
+    if want("daemon") {
+        // Small fixed warmup, same rationale as `bench_regions_real`: each
+        // in-process sample here also pays plugin instantiation.
+        groups.push(daemon::bench_daemon(cfg, &plugin_dir, args.real_iters, 2));
     }
 
     let markdown = args.format == "markdown";

@@ -424,7 +424,7 @@ pub struct DaemonInstallArgs {
 #[cfg(feature = "bench")]
 #[derive(Args, Debug)]
 pub struct BenchArgs {
-    /// Which group to bench: regions|widgets|sources|plugins|all.
+    /// Which group to bench: regions|widgets|sources|plugins|daemon|all.
     #[arg(long, default_value = "all")]
     pub only: String,
     /// Samples for the fast/pure passes.

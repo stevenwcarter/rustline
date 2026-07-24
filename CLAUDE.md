@@ -995,7 +995,16 @@ mod guest`): three more worked examples, each covering a host capability
   `bench_plugin_builds` (W43): a per-plugin `build_plugin` A/B — compile cache
   OFF (`with_cache_disabled`, a full Cranelift compile every build) vs ON (warm
   deserialize) — the cold-start compile cost the preserved-state pass doesn't
-  isolate; measured ~13× faster (~48→~3.7 ms, ~45 ms/plugin saved)), and
+  isolate; measured ~13× faster (~48→~3.7 ms, ~45 ms/plugin saved)), `daemon.rs`
+  (`bench_daemon`, gated on `crate::daemon::status_at`): a daemon-vs-in-process
+  A/B for `left`/`right`, quantifying the win a warm persistent daemon (W48)
+  gives by keeping WASM plugins instantiated — the in-process side rebuilds the
+  registry and re-runs `rustline_wasm::register_plugins` fresh every sample
+  (unlike `render_passes.rs`'s real pass, which never registers plugins at
+  all), while the daemon side is a real round-trip via
+  `daemon_client::try_render_at`; skips with an informational note (never
+  spawns a daemon) when none is reachable at the resolved socket, and reports
+  a per-region speedup line in the `Group`'s `note` (median-based). And
   `report.rs` (comfy-table pretty/markdown). Gated behind the `bench` cargo
   feature; the default binary is unchanged.
 
@@ -1162,13 +1171,17 @@ config-file path for every subcommand that reads or writes it (default:
   present, and reload the user daemon-reload cache; prints what it did,
   including a "nothing to remove" note if the unit was already gone. Safe to
   run more than once.
-- `rustline bench [--only regions|widgets|sources|plugins|all] [--iters N]
+- `rustline bench [--only regions|widgets|sources|plugins|daemon|all] [--iters N]
   [--real-iters N] [--warmup N] [--cold] [--format table|markdown]
   [--output FILE] [--plugin-dir DIR] [--state-dir DIR]` — feature-gated
   (`--features bench`) benchmark of the render pipeline: a pure pass
   (fabricated `Context`, no reads) vs a real-world pass (real reads + render),
   plus per-widget, per-read, and per-plugin timing. Plugin passes run against
-  real preserved state so cached fast-paths are measured honestly.
+  real preserved state so cached fast-paths are measured honestly. `--only
+  daemon` (included in `all`) benches `left`/`right` in-process (cold,
+  re-instantiating any WASM plugins) against a real round-trip to a reachable
+  `rustline daemon run` — skipped with a note (never spawning one) when no
+  daemon is reachable; see `bench/daemon.rs` above.
 
 `--plugin-dir` overrides plugin discovery for that invocation (see Config
 below for the full resolution order).
