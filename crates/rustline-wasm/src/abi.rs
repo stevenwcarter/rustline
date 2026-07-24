@@ -39,7 +39,7 @@ mod tests {
     use chrono::{DateTime, Local, TimeZone};
     use rustline_core::{
         Battery, BatteryState, Color, Context, CpuUsage, DiskInfo, GitInfo, MediaInfo, MemInfo,
-        NetIface, ThemeColors, WindowCtx,
+        NetIface, ThemeColors, Throughput, WindowCtx,
     };
 
     use super::*;
@@ -92,12 +92,13 @@ mod tests {
                 used_bytes: 200 * 1024 * 1024 * 1024,
                 available_bytes: 300 * 1024 * 1024 * 1024,
             }),
-            // Per-instance maps (W46) aren't mirrored on `WireContext` either
-            // — same pre-existing gap noted below for `throughput`/`uptime`/
-            // `media` — so this test leaves them empty rather than asserting
-            // on them.
+            // Per-instance maps (W46) are NOT mirrored on `WireContext` — a
+            // guest sees only the singular base reading (invariant #2).
             disks: BTreeMap::new(),
-            throughput: None,
+            throughput: Some(Throughput {
+                down_bytes_per_sec: 1_200_000,
+                up_bytes_per_sec: 64_000,
+            }),
             throughputs: BTreeMap::new(),
             os: "linux".into(),
             arch: "x86_64".into(),
@@ -107,11 +108,8 @@ mod tests {
                 title: "Karma Police".into(),
                 status: "Playing".into(),
             }),
-            // Not (yet) mirrored on `WireContext` -- same pre-existing gap as
-            // `throughput`/`uptime`/`media` not being asserted below; this
-            // test only pins the fields `WireContext` actually declares.
-            cpu_history: Vec::new(),
-            mem_history: Vec::new(),
+            cpu_history: vec![0.1, 0.5, 0.9],
+            mem_history: vec![0.2, 0.4, 0.6],
             toggled: BTreeSet::from(["weather".to_string()]),
             colors: ThemeColors {
                 error: Color::Rgb(1, 2, 3),
@@ -147,6 +145,11 @@ mod tests {
         assert_eq!(wire.memory, ctx.memory);
         assert_eq!(wire.git, ctx.git);
         assert_eq!(wire.disk, ctx.disk);
+        assert_eq!(wire.throughput, ctx.throughput);
+        assert_eq!(wire.uptime, ctx.uptime);
+        assert_eq!(wire.media, ctx.media);
+        assert_eq!(wire.cpu_history, ctx.cpu_history);
+        assert_eq!(wire.mem_history, ctx.mem_history);
         assert_eq!(wire.os, ctx.os);
         assert_eq!(wire.arch, ctx.arch);
         assert_eq!(wire.toggled, ctx.toggled);

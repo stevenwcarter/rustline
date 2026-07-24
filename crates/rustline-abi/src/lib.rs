@@ -229,9 +229,12 @@ pub struct WireWindowCtx {
 
 /// The guest-side, typed mirror of `rustline_core::Context` as it appears on
 /// the WASM wire. Field-for-field identical to `Context` except `now` is a
-/// plain RFC3339 `String` (the host's `DateTime<Local>` serializes to one) and
-/// `window` nests [`WireWindowCtx`], so this crate stays chrono-free. Guests
-/// deserialize this instead of walking an untyped `serde_json::Value`.
+/// plain RFC3339 `String` (the host's `DateTime<Local>` serializes to one),
+/// `window` nests [`WireWindowCtx`], so this crate stays chrono-free, and the
+/// W46 per-instance maps (`disks`/`throughputs`) are intentionally NOT
+/// mirrored — a guest only ever sees the singular base `disk`/`throughput`
+/// reading (invariant #2). Guests deserialize this instead of walking an
+/// untyped `serde_json::Value`.
 ///
 /// The field names and serde behavior must match `Context`'s exactly: the host
 /// serializes `Context` verbatim and this must parse those bytes unchanged (the
@@ -254,9 +257,19 @@ pub struct WireContext {
     pub interfaces: Vec<NetIface>,
     pub battery: Option<Battery>,
     pub cpu: Option<CpuUsage>,
+    #[serde(default)]
+    pub cpu_history: Vec<f32>,
     pub memory: Option<MemInfo>,
+    #[serde(default)]
+    pub mem_history: Vec<f32>,
     pub git: Option<GitInfo>,
     pub disk: Option<DiskInfo>,
+    #[serde(default)]
+    pub throughput: Option<Throughput>,
+    #[serde(default)]
+    pub uptime: Option<u64>,
+    #[serde(default)]
+    pub media: Option<MediaInfo>,
     pub os: String,
     pub arch: String,
     #[serde(default)]
