@@ -5,7 +5,7 @@ use rustline_core::{Config, Direction, Registry, render_named_region, render_win
 
 use super::fixture::fabricated_context;
 use super::harness::{Group, Row, measure, summarize};
-use crate::build_context::{build_region_context, build_window_context, spark_opts};
+use crate::build_context::{build_region_context, build_window_context};
 use crate::cli::{RegionArgs, WindowArgs};
 
 /// The built-in widget names, benched individually. Kept explicit so a missing
@@ -124,14 +124,7 @@ pub fn bench_regions_real(cfg: &Config, real_iters: usize, warmup: usize) -> Gro
     rows.push(Row {
         label: "left".into(),
         stats: summarize(&measure(warmup, real_iters, || {
-            let ctx = build_region_context(
-                &region_args,
-                &left,
-                &theme,
-                &cfg.widgets.disk.mount,
-                cfg.widgets.throughput.interface.as_deref(),
-                &spark_opts(cfg),
-            );
+            let ctx = build_region_context(&region_args, &left, &theme, cfg);
             let _ =
                 render_named_region(Direction::Left, &left, &ctx, &registry, &theme, &overrides);
         })),
@@ -139,14 +132,7 @@ pub fn bench_regions_real(cfg: &Config, real_iters: usize, warmup: usize) -> Gro
     rows.push(Row {
         label: "right".into(),
         stats: summarize(&measure(warmup, real_iters, || {
-            let ctx = build_region_context(
-                &region_args,
-                &right,
-                &theme,
-                &cfg.widgets.disk.mount,
-                cfg.widgets.throughput.interface.as_deref(),
-                &spark_opts(cfg),
-            );
+            let ctx = build_region_context(&region_args, &right, &theme, cfg);
             let _ = render_named_region(
                 Direction::Right,
                 &right,

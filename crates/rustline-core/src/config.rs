@@ -6,7 +6,7 @@
 //! panicking, so a bad or absent config file never takes down the status
 //! line.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
 use std::path::Path;
@@ -1305,6 +1305,79 @@ impl Config {
     pub fn instance_kind(v: &Value) -> Option<&str> {
         v.get("kind").and_then(Value::as_str)
     }
+
+    /// The set of widget *kinds* a `layout` (a region's name list) references —
+    /// the kind-aware basis for read-gating in the binary's
+    /// `build_region_context` (W46).
+    ///
+    /// Each layout entry maps to a kind: an `[instances.<name>]` entry maps to
+    /// its declared `kind` (an instance whose table has no `kind` string is
+    /// dropped, since there's nothing to gate on); any other name maps to
+    /// itself — a built-in/base widget name (`cpu`, `disk`, …) is already its
+    /// own kind, and a plugin/unknown name maps to itself harmlessly, since it
+    /// matches none of the OS-read gates.
+    pub fn layout_kinds(&self, layout: &[String]) -> BTreeSet<String> {
+        layout
+            .iter()
+            .filter_map(|name| match self.instances.get(name) {
+                Some(table) => Config::instance_kind(table).map(str::to_string),
+                None => Some(name.clone()),
+            })
+            .collect()
+    }
+
+    /// The distinct filesystem mounts a `layout` needs read: the base
+    /// `[widgets.disk].mount` when the built-in `disk` is referenced, plus each
+    /// `disk`-kind instance's own `mount`. The binary reads one `DiskInfo` per
+    /// mount into `Context.disks` (W46), so two `disk` instances on different
+    /// mounts each get a live reading instead of clobbering a single one.
+    pub fn disk_mounts(&self, layout: &[String]) -> BTreeSet<String> {
+        let mut mounts: BTreeSet<String> = self
+            .instances_of_kind(layout, "disk")
+            .map(|table| {
+                let opts: DiskOpts = table.clone().try_into().unwrap_or_default();
+                opts.mount
+            })
+            .collect();
+        if layout.iter().any(|name| name == "disk") {
+            mounts.insert(self.widgets.disk.mount.clone());
+        }
+        mounts
+    }
+
+    /// The distinct network interfaces a `layout` needs read: the base
+    /// `[widgets.throughput].interface` when the built-in `throughput` is
+    /// referenced, plus each `throughput`-kind instance's own `interface`.
+    /// `None` is the aggregate-every-interface selector (deduped with any other
+    /// aggregate request). The binary reads one `Throughput` per entry into
+    /// `Context.throughputs`, keyed by `interface.unwrap_or_default()` (W46).
+    pub fn throughput_interfaces(&self, layout: &[String]) -> BTreeSet<Option<String>> {
+        let mut ifaces: BTreeSet<Option<String>> = self
+            .instances_of_kind(layout, "throughput")
+            .map(|table| {
+                let opts: ThroughputOpts = table.clone().try_into().unwrap_or_default();
+                opts.interface
+            })
+            .collect();
+        if layout.iter().any(|name| name == "throughput") {
+            ifaces.insert(self.widgets.throughput.interface.clone());
+        }
+        ifaces
+    }
+
+    /// Iterate the `[instances.<name>]` tables a `layout` references that are of
+    /// a given `kind`, in layout order — the shared spine of [`Config::disk_mounts`]
+    /// and [`Config::throughput_interfaces`].
+    fn instances_of_kind<'a>(
+        &'a self,
+        layout: &'a [String],
+        kind: &'a str,
+    ) -> impl Iterator<Item = &'a Value> {
+        layout.iter().filter_map(move |name| {
+            let table = self.instances.get(name)?;
+            (Config::instance_kind(table) == Some(kind)).then_some(table)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -2237,5 +2310,70 @@ mount = "/data"
         assert!(c.instances.is_empty());
         let back: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
         assert!(back.instances.is_empty());
+    }
+
+    #[test]
+    fn layout_kinds_resolves_base_and_instances() {
+        let mut c = Config::default();
+        c.instances.insert(
+            "disk_data".into(),
+            toml::from_str("kind = 'disk'\nmount = '/data'").unwrap(),
+        );
+        // An instance name resolves to its kind; a base/built-in name to itself.
+        let kinds = c.layout_kinds(&["disk_data".into(), "cpu".into()]);
+        assert!(kinds.contains("disk"));
+        assert!(kinds.contains("cpu"));
+        // An instance whose table has no `kind` is dropped (nothing to gate on).
+        c.instances
+            .insert("bogus".into(), toml::from_str("mount = '/x'").unwrap());
+        assert!(!c.layout_kinds(&["bogus".into()]).contains("bogus"));
+    }
+
+    #[test]
+    fn disk_mounts_collects_base_and_instance_mounts() {
+        let mut c = Config::default();
+        c.instances.insert(
+            "disk_data".into(),
+            toml::from_str("kind = 'disk'\nmount = '/data'").unwrap(),
+        );
+        // Base `disk` in the layout -> its configured mount (default "/").
+        assert!(c.disk_mounts(&["disk".into()]).contains("/"));
+        // Instance only -> its own mount, and the base "/" is NOT included.
+        let m = c.disk_mounts(&["disk_data".into()]);
+        assert!(m.contains("/data"));
+        assert!(!m.contains("/"));
+        // Both referenced -> both mounts.
+        let both = c.disk_mounts(&["disk".into(), "disk_data".into()]);
+        assert!(both.contains("/") && both.contains("/data"));
+        // A disk-kind instance the layout never references contributes nothing.
+        assert!(c.disk_mounts(&[]).is_empty());
+    }
+
+    #[test]
+    fn throughput_interfaces_collects_base_and_instances() {
+        let mut c = Config::default();
+        c.widgets.throughput.interface = Some("eth0".into());
+        c.instances.insert(
+            "net_wlan".into(),
+            toml::from_str("kind = 'throughput'\ninterface = 'wlan0'").unwrap(),
+        );
+        c.instances.insert(
+            "net_all".into(),
+            toml::from_str("kind = 'throughput'").unwrap(),
+        );
+        // Base throughput in the layout -> its configured interface.
+        assert!(
+            c.throughput_interfaces(&["throughput".into()])
+                .contains(&Some("eth0".into()))
+        );
+        // Instances -> their own interfaces; an interface-less instance -> the
+        // `None` aggregate selector.
+        let ifaces = c.throughput_interfaces(&["net_wlan".into(), "net_all".into()]);
+        assert!(ifaces.contains(&Some("wlan0".into())));
+        assert!(ifaces.contains(&None));
+        // The base interface is absent when the base widget isn't referenced.
+        assert!(!ifaces.contains(&Some("eth0".into())));
+        // Nothing referenced -> empty.
+        assert!(c.throughput_interfaces(&[]).is_empty());
     }
 }

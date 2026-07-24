@@ -16,9 +16,31 @@ use std::path::Path;
 use rustline_core::Throughput;
 
 /// State-file name under the state dir the prior `(rx, tx, ts)` sample is
-/// persisted at, via `sample_store`.
-#[cfg(target_os = "linux")]
-const SAMPLE_NAME: &str = "throughput-sample";
+/// persisted at, via `sample_store` — keyed by interface so a multi-interface
+/// layout (W46) never clobbers one interface's prior sample with another's:
+/// `throughput-sample` for the aggregate read (`None`), or
+/// `throughput-sample-<iface>` for a named interface, with any character
+/// outside `[A-Za-z0-9_-]` replaced by `_` so the result is always a single
+/// safe path component.
+#[cfg(any(target_os = "linux", test))]
+fn sample_name(interface: Option<&str>) -> String {
+    match interface {
+        None => "throughput-sample".to_string(),
+        Some(iface) => {
+            let sanitized: String = iface
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            format!("throughput-sample-{sanitized}")
+        }
+    }
+}
 
 /// Read network throughput, or `None` on the first invocation (nothing yet to
 /// diff against), an unsupported platform, or a read failure — never a
@@ -32,12 +54,13 @@ pub fn read_throughput(state_dir: &Path, interface: Option<&str>) -> Option<Thro
     let (rx, tx) = aggregate(&parse_proc_net_dev(&text), interface)?;
     let now = crate::sample_store::now_unix_secs();
 
-    let prev = crate::sample_store::read_sample(state_dir, SAMPLE_NAME)
+    let name = sample_name(interface);
+    let prev = crate::sample_store::read_sample(state_dir, &name)
         .as_deref()
         .and_then(parse_sample);
     // Always persist the current reading so the next invocation has a prior
     // sample to diff against, mirroring `cpu.rs`'s `store_snapshot`.
-    crate::sample_store::write_sample(state_dir, SAMPLE_NAME, &serialize_sample(rx, tx, now));
+    crate::sample_store::write_sample(state_dir, &name, &serialize_sample(rx, tx, now));
 
     let (prev_rx, prev_tx, prev_ts) = prev?;
     let dt_secs = now as i64 - prev_ts as i64;
@@ -238,6 +261,50 @@ mod tests {
             parse_sample("1000 800 42 leftover\n"),
             Some((1000, 800, 42))
         );
+    }
+
+    #[test]
+    fn sample_name_is_per_interface_and_sanitized() {
+        // Aggregate keeps the original single name; a named interface gets its
+        // own suffixed file, so two interfaces never share one sample.
+        assert_eq!(sample_name(None), "throughput-sample");
+        assert_eq!(sample_name(Some("eth0")), "throughput-sample-eth0");
+        assert_eq!(sample_name(Some("wlan0")), "throughput-sample-wlan0");
+        assert_ne!(sample_name(None), sample_name(Some("eth0")));
+        // Any character outside [A-Za-z0-9_-] becomes '_', so the name stays a
+        // single safe path component even for exotic interface names.
+        assert_eq!(
+            sample_name(Some("en p0/1:2")),
+            "throughput-sample-en_p0_1_2"
+        );
+    }
+
+    // Two distinct interfaces persist to distinct sample files, so neither
+    // clobbers the other's prior sample — the whole point of keying the
+    // filename by interface (W46). Before this change both shared
+    // `throughput-sample`, so the second read overwrote the first's sample and
+    // `read_sample` for a named interface would find nothing.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn distinct_interfaces_persist_to_distinct_sample_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // Discover a real non-loopback interface from the live system; a
+        // loopback-only host has nothing to compare, so skip.
+        let text = std::fs::read_to_string("/proc/net/dev").unwrap();
+        let entries = parse_proc_net_dev(&text);
+        let Some((iface, _, _)) = entries.first() else {
+            return;
+        };
+        // Interleave the aggregate (None) and the named-interface reads.
+        let _ = read_throughput(dir.path(), None);
+        let _ = read_throughput(dir.path(), Some(iface));
+        // Each read wrote its OWN sample file — both survive.
+        assert!(crate::sample_store::read_sample(dir.path(), &sample_name(None)).is_some());
+        assert!(crate::sample_store::read_sample(dir.path(), &sample_name(Some(iface))).is_some());
+        // And each diffs against its own surviving sample, so both return Some
+        // on their second read despite the interleaving.
+        assert!(read_throughput(dir.path(), None).is_some());
+        assert!(read_throughput(dir.path(), Some(iface)).is_some());
     }
 
     // Linux takes the state-dir-injecting path so this never touches the real

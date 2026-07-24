@@ -48,156 +48,111 @@ pub(crate) fn read_interfaces() -> Vec<NetIface> {
         .collect()
 }
 
-/// Whether `layout` (a region's widget-name list) references `name`.
-///
-/// The one predicate behind every "only pay for a read the region actually
-/// renders" gate below (cpu/memory/git/disk/throughput/battery/uptime/media/
-/// interfaces) — factored out so each gate is the same one-line check
-/// instead of its own `.iter().any(...)`.
-fn layout_needs(layout: &[String], name: &str) -> bool {
-    layout.iter().any(|w| w == name)
-}
-
-/// The cpu/memory `format` + `spark_width` config needed to decide whether to
-/// do the `{spark}`-gated history read ([`crate::cpu::read_cpu_history`]/
-/// [`crate::memory::read_memory_history`]) and how long a ring to keep.
-/// Bundled into one struct — like `disk_mount`/`throughput_interface` above,
-/// neither is otherwise available inside this module — to keep
-/// [`build_region_context`] under clippy's too-many-arguments threshold.
-/// `Default` (empty formats, `0` widths) never contains the literal
-/// `{spark}`, so it's the right zero-I/O value for callers/tests that don't
-/// care about sparklines.
-#[derive(Default)]
-pub struct SparkOpts<'a> {
-    pub cpu_format: &'a str,
-    pub cpu_spark_width: usize,
-    pub mem_format: &'a str,
-    pub mem_spark_width: usize,
-}
-
-/// Build [`SparkOpts`] from the resolved config's `[widgets.cpu]`/
-/// `[widgets.memory]` tables. The one place this projection happens, so
-/// `main.rs`'s `render left`/`render right` and the `bench` feature's
-/// real-region pass (both need it to call [`build_region_context`]) can't
-/// drift apart.
-pub fn spark_opts(cfg: &Config) -> SparkOpts<'_> {
-    SparkOpts {
-        cpu_format: &cfg.widgets.cpu.format,
-        cpu_spark_width: cfg.widgets.cpu.spark_width,
-        mem_format: &cfg.widgets.memory.format,
-        mem_spark_width: cfg.widgets.memory.spark_width,
-    }
-}
-
 /// Build the [`Context`] for rendering a left/right region from the tmux
 /// format-variable values passed on the command line, plus live host state.
 ///
-/// `layout` is the region's widget-name list; the expensive cpu/memory/git/
-/// disk/throughput/battery/uptime/media/interfaces reads (`read_cpu` sleeps
-/// ~120ms on Linux; `read_memory` on macOS spawns `vm_stat`; `read_git`
-/// shells out to `git`; `read_disk` calls `statvfs(2)`; `read_throughput`
-/// reads `/proc/net/dev` (Linux only); `read_battery` scans sysfs;
-/// `read_uptime` reads `/proc/uptime` (Linux) or shells out to `sysctl`
-/// (macOS); `read_media` shells out to `playerctl` (Linux only);
-/// `read_interfaces` calls `getifaddrs(3)`) are taken ONLY when that region
-/// actually renders them — the same "pay only for what the region
-/// references" gating `register_plugins` uses. `disk_mount` is the configured
-/// `[widgets.disk].mount` (unused unless `layout` names `disk`);
-/// `throughput_interface` is the configured `[widgets.throughput].interface`
-/// (unused unless `layout` names `throughput`) — neither is otherwise
-/// available inside this module, unlike `git`, which reuses
-/// `pane_current_path` already on hand. `spark` is the cpu/memory `{spark}`
-/// history config (see [`SparkOpts`]): the cpu%/mem% history is read+
-/// persisted (via `crate::cpu`/`crate::memory`'s `read_*_history`, backed by
-/// `sample_store`) only when the corresponding widget both is in `layout` AND
-/// its configured `format` contains the literal `{spark}` — with either
-/// condition false, `Context.cpu_history`/`mem_history` stay empty and no
-/// history I/O happens at all, keeping `{spark}`-absent output byte-identical
-/// (W45).
+/// Every expensive OS read (`read_cpu` sleeps ~120ms on Linux; `read_memory`
+/// on macOS spawns `vm_stat`; `read_git` shells out to `git`; `read_disk`
+/// calls `statvfs(2)`; `read_throughput` reads `/proc/net/dev` (Linux only);
+/// `read_battery` scans sysfs; `read_uptime` reads `/proc/uptime`;
+/// `read_media` shells out to `playerctl`; `read_interfaces` calls
+/// `getifaddrs(3)`) is taken ONLY when the region actually renders a widget of
+/// that kind — the same "pay only for what the region references" gating
+/// `register_plugins` uses, made **kind-aware** by [`Config::layout_kinds`] so
+/// a `[instances.<name>]` widget (W46) drives its kind's read just like the
+/// built-in of that name.
+///
+/// Disk and throughput fan out to one read per distinct target the layout
+/// references ([`Config::disk_mounts`]/[`Config::throughput_interfaces`]):
+/// `Context.disks`/`throughputs` get every instance's mount/interface, while
+/// the singular `Context.disk`/`throughput` stay the *base* widget's entry so
+/// the built-in `disk`/`throughput` widget resolves unchanged. The cpu/memory
+/// `{spark}` history is read+persisted only when the base widget both is in
+/// the layout AND its configured `format` contains the literal `{spark}` —
+/// otherwise `Context.cpu_history`/`mem_history` stay empty with no history
+/// I/O, keeping `{spark}`-absent output byte-identical (W45).
 pub fn build_region_context(
     args: &RegionArgs,
     layout: &[String],
     theme: &Theme,
-    disk_mount: &str,
-    throughput_interface: Option<&str>,
-    spark: &SparkOpts<'_>,
+    cfg: &Config,
 ) -> Context {
+    let kinds = cfg.layout_kinds(layout);
     let pane_current_path = args.pane_path.clone().unwrap_or_default();
-    let git = if layout_needs(layout, "git") {
+    let git = if kinds.contains("git") {
         crate::git::read_git(&pane_current_path)
     } else {
         None
     };
-    let disk = if layout_needs(layout, "disk") {
-        crate::disk::read_disk(disk_mount)
-    } else {
-        None
-    };
-    // Mirrored into `disks` (W46) keyed by the same mount the base `disk`
-    // widget reads (`cfg.widgets.disk.mount`), so it resolves via
-    // `ctx.disks.get(&self.mount)` like any other instance. Per-instance
-    // reads for additional `[instances.*]` disk widgets configured with a
-    // *different* mount are a later task's job (W46 continuation) — this is
-    // just the base reading already computed above, reused rather than
-    // re-read.
-    let disks = match disk {
-        Some(d) => BTreeMap::from([(disk_mount.to_string(), d)]),
-        None => BTreeMap::new(),
-    };
-    let throughput = if layout_needs(layout, "throughput") {
-        crate::throughput::read_throughput(&rustline_wasm::state_root(), throughput_interface)
-    } else {
-        None
-    };
-    // Mirrored into `throughputs` (W46) keyed the same way `ThroughputWidget`
-    // computes its own `iface_key` (`interface.unwrap_or_default()`), same
-    // base-reading-reuse rationale as `disks` above.
-    let iface_key = throughput_interface.unwrap_or_default().to_string();
-    let throughputs = match &throughput {
-        Some(t) => BTreeMap::from([(iface_key, t.clone())]),
-        None => BTreeMap::new(),
-    };
-    // Interfaces feed both IP widgets, so either one names the read.
-    let interfaces = if layout_needs(layout, "lan_ip") || layout_needs(layout, "tailscale_ip") {
+    // One `read_disk` per distinct mount the layout references (the base
+    // `[widgets.disk]` plus every `disk`-kind instance, W46); `Context.disk`
+    // stays the base mount's entry so the built-in `disk` widget still
+    // resolves via `ctx.disks.get(&self.mount)`.
+    let mut disks = BTreeMap::new();
+    for mount in cfg.disk_mounts(layout) {
+        if let Some(info) = crate::disk::read_disk(&mount) {
+            disks.insert(mount, info);
+        }
+    }
+    let disk = disks.get(&cfg.widgets.disk.mount).cloned();
+    // One `read_throughput` per distinct interface the layout references,
+    // keyed the same way `ThroughputWidget` computes its `iface_key`
+    // (`interface.unwrap_or_default()`, `""` = aggregate). `read_throughput`
+    // persists a per-interface sample file, so distinct interfaces don't
+    // clobber. `Context.throughput` stays the base interface's entry.
+    let mut throughputs = BTreeMap::new();
+    let throughput_ifaces = cfg.throughput_interfaces(layout);
+    if !throughput_ifaces.is_empty() {
+        let state_root = rustline_wasm::state_root();
+        for iface in throughput_ifaces {
+            if let Some(rate) = crate::throughput::read_throughput(&state_root, iface.as_deref()) {
+                throughputs.insert(iface.unwrap_or_default(), rate);
+            }
+        }
+    }
+    let base_iface_key = cfg.widgets.throughput.interface.clone().unwrap_or_default();
+    let throughput = throughputs.get(&base_iface_key).cloned();
+    // Interfaces feed both IP widgets, so either kind names the read.
+    let interfaces = if kinds.contains("lan_ip") || kinds.contains("tailscale_ip") {
         read_interfaces()
     } else {
         Vec::new()
     };
-    let battery = if layout_needs(layout, "battery") {
+    let battery = if kinds.contains("battery") {
         crate::battery::read_battery()
     } else {
         None
     };
-    let uptime = if layout_needs(layout, "uptime") {
+    let uptime = if kinds.contains("uptime") {
         crate::uptime::read_uptime()
     } else {
         None
     };
-    let media = if layout_needs(layout, "media") {
+    let media = if kinds.contains("media") {
         crate::media::read_media()
     } else {
         None
     };
-    let cpu = if layout_needs(layout, "cpu") {
+    let cpu = if kinds.contains("cpu") {
         crate::cpu::read_cpu()
     } else {
         None
     };
     let cpu_history = match cpu {
-        Some(c) if spark.cpu_format.contains("{spark}") => crate::cpu::read_cpu_history(
+        Some(c) if cfg.widgets.cpu.format.contains("{spark}") => crate::cpu::read_cpu_history(
             &rustline_wasm::state_root(),
             c.percent,
-            spark.cpu_spark_width,
+            cfg.widgets.cpu.spark_width,
         ),
         _ => Vec::new(),
     };
-    let memory = if layout_needs(layout, "memory") {
+    let memory = if kinds.contains("memory") {
         crate::memory::read_memory()
     } else {
         None
     };
     let mem_history = match memory {
-        Some(m) if spark.mem_format.contains("{spark}") => {
+        Some(m) if cfg.widgets.memory.format.contains("{spark}") => {
             let percent = if m.total_bytes == 0 {
                 0.0
             } else {
@@ -206,7 +161,7 @@ pub fn build_region_context(
             crate::memory::read_memory_history(
                 &rustline_wasm::state_root(),
                 percent,
-                spark.mem_spark_width,
+                cfg.widgets.memory.spark_width,
             )
         }
         _ => Vec::new(),
@@ -271,9 +226,9 @@ mod tests {
 
     use super::*;
 
-    /// Guards the three tests below that mutate the process-global
-    /// `XDG_DATA_HOME` env var: cargo's test harness runs tests in the same
-    /// process concurrently, and each test's assertions depend on the value
+    /// Guards the tests below that mutate the process-global `XDG_DATA_HOME`
+    /// env var: cargo's test harness runs tests in the same process
+    /// concurrently, and each test's assertions depend on the value
     /// `read_toggles()`/`read_throughput()` (via `rustline_wasm::state_root()`)
     /// sees during its own critical section, so an unguarded interleaving of
     /// one test's `set_var`/`remove_var` with another's read would be a real
@@ -287,9 +242,7 @@ mod tests {
             &RegionArgs::default(),
             &[],
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         assert!(!ctx.home.is_empty() || std::env::var("HOME").is_err());
     }
@@ -310,24 +263,13 @@ mod tests {
             &RegionArgs::default(),
             &["lan_ip".to_string()],
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         assert!(
             ctx.interfaces
                 .iter()
                 .all(|i| i.ipv4 != std::net::Ipv4Addr::LOCALHOST)
         );
-    }
-
-    #[test]
-    fn layout_needs_true_when_present_false_when_absent() {
-        let layout = ["cpu".to_string(), "battery".to_string()];
-        assert!(layout_needs(&layout, "cpu"));
-        assert!(layout_needs(&layout, "battery"));
-        assert!(!layout_needs(&layout, "memory"));
-        assert!(!layout_needs(&[], "cpu"));
     }
 
     #[test]
@@ -338,9 +280,7 @@ mod tests {
             &RegionArgs::default(),
             &[],
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         assert!(ctx.interfaces.is_empty());
 
@@ -351,9 +291,7 @@ mod tests {
                 &RegionArgs::default(),
                 &[name.to_string()],
                 &Theme::default(),
-                "",
-                None,
-                &SparkOpts::default(),
+                &Config::default(),
             );
             assert_eq!(ctx.interfaces, read_interfaces());
         }
@@ -366,9 +304,7 @@ mod tests {
             &RegionArgs::default(),
             &[],
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         assert!(ctx.battery.is_none());
 
@@ -378,9 +314,7 @@ mod tests {
             &RegionArgs::default(),
             &["battery".to_string()],
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         assert_eq!(ctx.battery, crate::battery::read_battery());
     }
@@ -393,9 +327,7 @@ mod tests {
             &RegionArgs::default(),
             &[],
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         assert!(ctx.uptime.is_none());
 
@@ -405,9 +337,7 @@ mod tests {
             &RegionArgs::default(),
             &["uptime".to_string()],
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         assert_eq!(ctx.uptime, crate::uptime::read_uptime());
     }
@@ -421,9 +351,7 @@ mod tests {
             &RegionArgs::default(),
             &[],
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         assert!(ctx.media.is_none());
 
@@ -433,9 +361,7 @@ mod tests {
             &RegionArgs::default(),
             &["media".to_string()],
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         assert_eq!(ctx.media, crate::media::read_media());
     }
@@ -469,9 +395,7 @@ mod tests {
             &RegionArgs::default(),
             &[],
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         // SAFETY: matches the set above; restores the process env for other tests.
         unsafe {
@@ -489,9 +413,7 @@ mod tests {
             &RegionArgs::default(),
             &[],
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         assert!(ctx.cpu.is_none() && ctx.memory.is_none());
         // The window path never samples cpu/memory at all.
@@ -509,21 +431,15 @@ mod tests {
     fn cpu_mem_history_empty_when_spark_absent_from_format() {
         // cpu/memory are in the layout (so they're read at all), but neither
         // configured format references {spark} -> no history I/O, both
-        // histories stay empty. This is the byte-identical-by-default case
-        // (W45): a plain `{percent}%` format never touches the history ring.
+        // histories stay empty. The default config's formats
+        // (`{icon} {percent}%` / `{icon} {used}/{total}`) never touch the
+        // history ring — the byte-identical-by-default case (W45).
         let layout = ["cpu".to_string(), "memory".to_string()];
         let ctx = build_region_context(
             &RegionArgs::default(),
             &layout,
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts {
-                cpu_format: "{percent}%",
-                cpu_spark_width: 8,
-                mem_format: "{percent}%",
-                mem_spark_width: 8,
-            },
+            &Config::default(),
         );
         assert!(ctx.cpu_history.is_empty());
         assert!(ctx.mem_history.is_empty());
@@ -531,10 +447,13 @@ mod tests {
 
     #[test]
     fn cpu_mem_history_populated_only_when_format_references_spark() {
-        // Named in the layout AND the format references {spark}: the history
-        // read/persist actually runs, so the just-read percent lands in the
-        // returned history.
+        // cpu/memory in the layout AND their configured format references
+        // {spark}: the history read/persist actually runs, so the just-read
+        // percent lands in the returned history.
         let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.widgets.cpu.format = "{icon} {spark} {percent}%".into();
+        cfg.widgets.memory.format = "{icon} {spark} {percent}%".into();
         let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: serialized by `ENV_LOCK` against the other tests in this
         // module that also mutate this var (history I/O routes through
@@ -543,19 +462,7 @@ mod tests {
             std::env::set_var("XDG_DATA_HOME", tmp.path());
         }
         let layout = ["cpu".to_string(), "memory".to_string()];
-        let ctx = build_region_context(
-            &RegionArgs::default(),
-            &layout,
-            &Theme::default(),
-            "",
-            None,
-            &SparkOpts {
-                cpu_format: "{icon} {spark} {percent}%",
-                cpu_spark_width: 8,
-                mem_format: "{icon} {spark} {percent}%",
-                mem_spark_width: 8,
-            },
-        );
+        let ctx = build_region_context(&RegionArgs::default(), &layout, &Theme::default(), &cfg);
         // SAFETY: matches the set above; restores the process env for other tests.
         unsafe {
             std::env::remove_var("XDG_DATA_HOME");
@@ -573,9 +480,7 @@ mod tests {
             &RegionArgs::default(),
             &[],
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         assert!(ctx.git.is_none());
     }
@@ -588,25 +493,48 @@ mod tests {
             &RegionArgs::default(),
             &[],
             &Theme::default(),
-            "/",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         assert!(ctx.disk.is_none());
+        assert!(ctx.disks.is_empty());
     }
 
     #[test]
     fn disk_read_when_region_names_it_uses_configured_mount() {
-        // Named in the layout: the configured mount is actually read.
+        // Named in the layout: the configured base mount ("/") is read into
+        // both the singular `disk` and the `disks` map.
         let ctx = build_region_context(
             &RegionArgs::default(),
             &["disk".to_string()],
             &Theme::default(),
-            "/",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         assert!(ctx.disk.is_some());
+        assert!(ctx.disks.contains_key("/"));
+    }
+
+    #[test]
+    fn two_disk_instances_populate_disks_map_with_both_mounts() {
+        // A base `disk` (mount "/") plus a `disk`-kind instance on a distinct
+        // mount both drive their own `read_disk`, so `Context.disks` carries an
+        // entry per mount (W46) rather than one clobbering the other. The
+        // instance mount is a real, statvfs-able directory (a fresh tempdir) so
+        // the read genuinely succeeds and proves the instance path fired — not
+        // just the base "/" the pre-W46 bridge already read.
+        let tmp = tempfile::tempdir().unwrap();
+        let mount2 = tmp.path().to_str().unwrap().to_string();
+        let mut table = toml::value::Table::new();
+        table.insert("kind".into(), "disk".into());
+        table.insert("mount".into(), mount2.clone().into());
+        let mut cfg = Config::default();
+        cfg.instances
+            .insert("disk_data".into(), toml::Value::Table(table));
+        let layout = ["disk".to_string(), "disk_data".to_string()];
+        let ctx = build_region_context(&RegionArgs::default(), &layout, &Theme::default(), &cfg);
+        assert!(ctx.disks.contains_key("/"), "base mount read fired");
+        assert!(ctx.disks.contains_key(&mount2), "instance mount read fired");
+        // The singular `disk` remains the base mount's entry.
+        assert_eq!(ctx.disk, ctx.disks.get("/").copied());
     }
 
     #[test]
@@ -676,18 +604,17 @@ mod tests {
     fn throughput_sampled_only_when_region_names_it() {
         // Empty layout: the /proc/net/dev read never runs, so it stays None —
         // same "pay only for what the region references" gating as
-        // cpu/memory/git/disk. `layout_needs` short-circuits this before
-        // `crate::throughput::read_throughput` (and thus `state_root()`) is
-        // ever touched, so this half needs no env isolation.
+        // cpu/memory/git/disk. `layout_kinds` yields no "throughput" kind, so
+        // `read_throughput` (and thus `state_root()`) is never touched and this
+        // half needs no env isolation.
         let ctx = build_region_context(
             &RegionArgs::default(),
             &[],
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         assert!(ctx.throughput.is_none());
+        assert!(ctx.throughputs.is_empty());
 
         // Named in the layout: the real read fires. `read_throughput` is
         // stateful (persists a sample it diffs the *next* call against), so
@@ -710,17 +637,13 @@ mod tests {
             &RegionArgs::default(),
             &layout,
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         let second = build_region_context(
             &RegionArgs::default(),
             &layout,
             &Theme::default(),
-            "",
-            None,
-            &SparkOpts::default(),
+            &Config::default(),
         );
         // SAFETY: matches the set above; restores the process env for other tests.
         unsafe {

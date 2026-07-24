@@ -27,7 +27,7 @@ mod uptime;
 use std::env;
 use std::path::PathBuf;
 
-use build_context::{build_region_context, build_window_context, spark_opts};
+use build_context::{build_region_context, build_window_context};
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Command, PluginCmd, Render};
 use rustline_core::{
@@ -178,14 +178,7 @@ fn main() {
             let plugin_dir = resolve_plugin_dir(args.plugin_dir.as_deref(), &cfg);
             let mut registry = Registry::with_builtins(&cfg);
             rustline_wasm::register_plugins(&mut registry, &cfg, &plugin_dir, &cfg.layout.left);
-            let ctx = build_region_context(
-                &args,
-                &cfg.layout.left,
-                &theme,
-                &cfg.widgets.disk.mount,
-                cfg.widgets.throughput.interface.as_deref(),
-                &spark_opts(&cfg),
-            );
+            let ctx = build_region_context(&args, &cfg.layout.left, &theme, &cfg);
             let overrides = cfg.color_overrides();
             let out = render_named_region(
                 Direction::Left,
@@ -201,14 +194,7 @@ fn main() {
             let plugin_dir = resolve_plugin_dir(args.plugin_dir.as_deref(), &cfg);
             let mut registry = Registry::with_builtins(&cfg);
             rustline_wasm::register_plugins(&mut registry, &cfg, &plugin_dir, &cfg.layout.right);
-            let ctx = build_region_context(
-                &args,
-                &cfg.layout.right,
-                &theme,
-                &cfg.widgets.disk.mount,
-                cfg.widgets.throughput.interface.as_deref(),
-                &spark_opts(&cfg),
-            );
+            let ctx = build_region_context(&args, &cfg.layout.right, &theme, &cfg);
             let overrides = cfg.color_overrides();
             let out = render_named_region(
                 Direction::Right,
