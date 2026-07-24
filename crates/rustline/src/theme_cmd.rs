@@ -64,8 +64,8 @@ pub(crate) fn set_base(doc: &mut DocumentMut, name: &str) {
 fn use_theme(name: &str, config_path: &Path, themes_dir: &Path) {
     if !resolvable(name, themes_dir) {
         eprintln!(
-            "unknown theme: {name}\navailable built-ins: {}",
-            builtin_theme_names().join(", ")
+            "unknown theme: {name}\navailable: {}",
+            available_themes_line(themes_dir)
         );
         std::process::exit(1);
     }
@@ -113,6 +113,20 @@ pub(crate) fn theme_files(themes_dir: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+/// The comma-joined list of every theme a user can name: built-ins plus the
+/// themes-dir `*.toml` stems. Used by `theme use`/`theme show`'s "unknown theme"
+/// error so a user's own scaffolded custom themes are shown, not just built-ins
+/// (W18). A custom stem that shadows a built-in may appear twice — acceptable
+/// for an error hint, matching what `theme list` shows.
+fn available_themes_line(themes_dir: &Path) -> String {
+    let mut names: Vec<String> = builtin_theme_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    names.extend(theme_files(themes_dir));
+    names.join(", ")
 }
 
 /// Build the `list` output lines. `active` is the current base (or "default").
@@ -262,7 +276,7 @@ fn show(name: &str, themes_dir: &Path) {
         None => {
             eprintln!(
                 "unknown theme: {name}\navailable: {}",
-                builtin_theme_names().join(", ")
+                available_themes_line(themes_dir)
             );
             std::process::exit(1);
         }
@@ -1025,6 +1039,19 @@ mod tests {
         super::set_base(&mut doc, "gruvbox");
         assert!(doc.to_string().contains("base = \"gruvbox\""));
         assert!(!doc.to_string().contains("nord"));
+    }
+
+    #[test]
+    fn available_themes_line_lists_builtins_and_custom_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("my-nord.toml"), "").unwrap();
+        let line = available_themes_line(dir.path());
+        assert!(line.contains("nord"), "lists a built-in: {line}");
+        assert!(line.contains("default"), "lists a built-in: {line}");
+        assert!(
+            line.contains("my-nord"),
+            "lists the custom themes-dir stem: {line}"
+        );
     }
 
     #[test]
