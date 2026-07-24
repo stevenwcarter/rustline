@@ -13,14 +13,12 @@ use crate::{Context, Segment, Widget};
 /// mirroring `DiskWidget`/`MemoryWidget`/`BatteryWidget`/`GitWidget`'s
 /// suffix over their own same-named `*Info` data types.
 pub struct ThroughputWidget {
+    /// Registry/layout name; the toggle key threaded through render + click,
+    /// and this instance's range name (invariant #7).
+    pub name: String,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
-}
-
-impl ThroughputWidget {
-    /// Registry/layout name; the toggle key threaded through render + click.
-    pub const NAME: &'static str = "throughput";
 }
 
 impl Widget for ThroughputWidget {
@@ -28,7 +26,7 @@ impl Widget for ThroughputWidget {
         match &ctx.throughput {
             Some(t) => {
                 let fmt =
-                    crate::widgets::active_format(ctx, Self::NAME, &self.format, &self.alt_format);
+                    crate::widgets::active_format(ctx, &self.name, &self.format, &self.alt_format);
                 let text = fmt
                     .replace(
                         "{down}",
@@ -50,7 +48,7 @@ impl Widget for ThroughputWidget {
     }
 
     fn range_name(&self) -> Option<&str> {
-        crate::widgets::clickable_range(Self::NAME, &self.alt_format)
+        crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
 
@@ -101,6 +99,7 @@ mod tests {
 
     fn w(format: &str, down: &str) -> ThroughputWidget {
         ThroughputWidget {
+            name: "throughput".into(),
             format: format.into(),
             alt_format: String::new(),
             down_format: down.into(),
@@ -136,6 +135,7 @@ mod tests {
         let mut c = ctx(rate(1024, 2048));
         c.toggled.insert("throughput".to_string());
         let out = ThroughputWidget {
+            name: "throughput".into(),
             format: "{down}".into(),
             alt_format: "{down}/{up}".into(),
             down_format: String::new(),

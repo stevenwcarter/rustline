@@ -3,26 +3,24 @@ use crate::{Context, Segment, Widget};
 
 /// Renders the machine's LAN IPv4, selected from `Context.interfaces`.
 pub struct LanIp {
+    /// Registry/layout name; the toggle key threaded through render + click,
+    /// and this instance's range name (invariant #7).
+    pub name: String,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
     pub interface: Option<String>,
 }
 
-impl LanIp {
-    /// Registry/layout name; the toggle key threaded through render + click.
-    pub const NAME: &'static str = "lan_ip";
-}
-
 impl Widget for LanIp {
     fn render(&self, ctx: &Context) -> Vec<Segment> {
         let ip = net::pick_lan(&ctx.interfaces, self.interface.as_deref());
-        let fmt = crate::widgets::active_format(ctx, Self::NAME, &self.format, &self.alt_format);
+        let fmt = crate::widgets::active_format(ctx, &self.name, &self.format, &self.alt_format);
         net::render_ip(fmt, ip, &self.down_format)
     }
 
     fn range_name(&self) -> Option<&str> {
-        crate::widgets::clickable_range(Self::NAME, &self.alt_format)
+        crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
 
@@ -74,6 +72,7 @@ mod tests {
     #[test]
     fn renders_lan_ip_with_label() {
         let w = LanIp {
+            name: "lan_ip".into(),
             format: "LAN {ip}".into(),
             alt_format: String::new(),
             down_format: String::new(),
@@ -86,6 +85,7 @@ mod tests {
     #[test]
     fn no_lan_ip_and_empty_down_format_renders_nothing() {
         let w = LanIp {
+            name: "lan_ip".into(),
             format: "{ip}".into(),
             alt_format: String::new(),
             down_format: String::new(),
@@ -97,6 +97,7 @@ mod tests {
     #[test]
     fn no_lan_ip_with_down_format_renders_it() {
         let w = LanIp {
+            name: "lan_ip".into(),
             format: "{ip}".into(),
             alt_format: String::new(),
             down_format: "no-lan".into(),
@@ -108,6 +109,7 @@ mod tests {
     #[test]
     fn interface_override_honored() {
         let w = LanIp {
+            name: "lan_ip".into(),
             format: "{ip}".into(),
             alt_format: String::new(),
             down_format: String::new(),
@@ -125,6 +127,7 @@ mod tests {
         let mut c = ctx(vec![ifc("eth0", "192.168.1.20")]);
         c.toggled.insert("lan_ip".to_string());
         let w = LanIp {
+            name: "lan_ip".into(),
             format: "{ip}".into(),
             alt_format: "LAN {ip}".into(),
             down_format: String::new(),

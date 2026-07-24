@@ -127,6 +127,7 @@ mod tests {
     /// the test doesn't depend on `Config::default()`'s wider surface.
     fn cpu_widget() -> CpuWidget {
         CpuWidget {
+            name: "cpu".into(),
             format: "{percent}".into(),
             alt_format: String::new(),
             down_format: String::new(),
@@ -139,6 +140,7 @@ mod tests {
 
     fn memory_widget() -> MemoryWidget {
         MemoryWidget {
+            name: "memory".into(),
             format: "{percent}".into(),
             alt_format: String::new(),
             down_format: String::new(),
@@ -151,6 +153,7 @@ mod tests {
 
     fn battery_widget() -> BatteryWidget {
         BatteryWidget {
+            name: "battery".into(),
             format: "{percent}".into(),
             alt_format: String::new(),
             down_format: String::new(),
@@ -162,6 +165,7 @@ mod tests {
 
     fn disk_widget() -> DiskWidget {
         DiskWidget {
+            name: "disk".into(),
             format: "{percent}".into(),
             alt_format: String::new(),
             down_format: String::new(),

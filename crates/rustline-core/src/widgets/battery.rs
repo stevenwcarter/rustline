@@ -3,6 +3,9 @@ use crate::{Battery, BatteryState, Context, Segment, Widget};
 /// Renders battery percentage, charge state, and a level-bucketed,
 /// charging-aware Nerd-Font icon. Pure — reads only `Context::battery`.
 pub struct BatteryWidget {
+    /// Registry/layout name; the toggle key threaded through render + click,
+    /// and this instance's range name (invariant #7).
+    pub name: String,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
@@ -12,11 +15,6 @@ pub struct BatteryWidget {
     /// charging-aware computed icon ([`battery_icon`]) entirely. `None`
     /// keeps the computed glyph.
     pub icon: Option<String>,
-}
-
-impl BatteryWidget {
-    /// Registry/layout name; the toggle key threaded through render + click.
-    pub const NAME: &'static str = "battery";
 }
 
 /// A Nerd-Font (nf-md battery ramp) glyph for the given battery. Charging →
@@ -54,7 +52,7 @@ impl Widget for BatteryWidget {
         match ctx.battery {
             Some(b) => {
                 let fmt =
-                    crate::widgets::active_format(ctx, Self::NAME, &self.format, &self.alt_format);
+                    crate::widgets::active_format(ctx, &self.name, &self.format, &self.alt_format);
                 let icon = self.icon.as_deref().unwrap_or_else(|| battery_icon(&b));
                 let text = fmt
                     .replace("{icon}", icon)
@@ -91,7 +89,7 @@ impl Widget for BatteryWidget {
     }
 
     fn range_name(&self) -> Option<&str> {
-        crate::widgets::clickable_range(Self::NAME, &self.alt_format)
+        crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
 
@@ -138,6 +136,7 @@ mod tests {
 
     fn w() -> BatteryWidget {
         BatteryWidget {
+            name: "battery".into(),
             format: "{icon} {percent}%".into(),
             alt_format: String::new(),
             down_format: String::new(),
@@ -150,6 +149,7 @@ mod tests {
     #[test]
     fn renders_icon_percent_state() {
         let widget = BatteryWidget {
+            name: "battery".into(),
             format: "{icon} {percent}% {state}".into(),
             alt_format: String::new(),
             down_format: String::new(),
@@ -251,6 +251,7 @@ mod tests {
     #[test]
     fn none_with_down_format_renders_and_collapses_placeholders() {
         let widget = BatteryWidget {
+            name: "battery".into(),
             format: "{icon} {percent}%".into(),
             alt_format: String::new(),
             down_format: "no-batt {percent}{icon}{state}".into(),
@@ -267,6 +268,7 @@ mod tests {
         let mut c = ctx(bat(73, BatteryState::Discharging));
         c.toggled.insert("battery".to_string());
         let out = BatteryWidget {
+            name: "battery".into(),
             format: "{percent}%".into(),
             alt_format: "{icon} {percent}% {state}".into(),
             down_format: String::new(),
@@ -282,6 +284,7 @@ mod tests {
     fn battery_range_name_tracks_alt() {
         assert_eq!(
             BatteryWidget {
+                name: "battery".into(),
                 format: "x".into(),
                 alt_format: String::new(),
                 down_format: String::new(),
@@ -294,6 +297,7 @@ mod tests {
         );
         assert_eq!(
             BatteryWidget {
+                name: "battery".into(),
                 format: "x".into(),
                 alt_format: "{state}".into(),
                 down_format: String::new(),

@@ -2,6 +2,9 @@ use crate::{Context, Segment, Widget};
 
 /// Renders the current time, formatted with a `chrono` strftime string.
 pub struct DateTime {
+    /// Registry/layout name; the toggle key threaded through render + click,
+    /// and this instance's range name (invariant #7).
+    pub name: String,
     pub format: String,
     pub alt_format: String,
     /// An IANA zone name to render in instead of `ctx.now`'s local zone;
@@ -9,14 +12,10 @@ pub struct DateTime {
     pub timezone: Option<String>,
 }
 
-impl DateTime {
-    /// Registry/layout name; the toggle key threaded through render + click.
-    pub const NAME: &'static str = "datetime";
-}
-
 impl Default for DateTime {
     fn default() -> Self {
         Self {
+            name: "datetime".into(),
             format: "%a < %Y-%m-%d < %H:%M".into(),
             alt_format: String::new(),
             timezone: None,
@@ -26,7 +25,7 @@ impl Default for DateTime {
 
 impl Widget for DateTime {
     fn render(&self, ctx: &Context) -> Vec<Segment> {
-        let fmt = crate::widgets::active_format(ctx, Self::NAME, &self.format, &self.alt_format);
+        let fmt = crate::widgets::active_format(ctx, &self.name, &self.format, &self.alt_format);
         let zone = self.timezone.as_deref();
         let formatted = match zone.and_then(|z| z.parse::<chrono_tz::Tz>().ok()) {
             Some(tz) => ctx.now.with_timezone(&tz).format(fmt).to_string(),
@@ -41,7 +40,7 @@ impl Widget for DateTime {
     }
 
     fn range_name(&self) -> Option<&str> {
-        crate::widgets::clickable_range(Self::NAME, &self.alt_format)
+        crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
 
@@ -92,6 +91,7 @@ mod tests {
     #[test]
     fn custom_format_honored() {
         let w = DateTime {
+            name: "datetime".into(),
             format: "%H:%M".into(),
             alt_format: String::new(),
             timezone: None,
@@ -104,6 +104,7 @@ mod tests {
         let mut c = ctx_at();
         c.toggled.insert("datetime".to_string());
         let w = DateTime {
+            name: "datetime".into(),
             format: "%H:%M".into(),
             alt_format: "%Y-%m-%d %H:%M".into(),
             timezone: None,
@@ -111,6 +112,7 @@ mod tests {
         assert_eq!(w.render(&c)[0].text, "2026-07-20 17:49");
         // untoggled
         let w = DateTime {
+            name: "datetime".into(),
             format: "%H:%M".into(),
             alt_format: "%Y-%m-%d %H:%M".into(),
             timezone: None,
@@ -125,6 +127,7 @@ mod tests {
         let ctx = Context { now, ..ctx_at() };
 
         let utc = DateTime {
+            name: "datetime".into(),
             format: "%H".into(),
             alt_format: String::new(),
             timezone: Some("UTC".into()),
@@ -138,6 +141,7 @@ mod tests {
         let ctx = Context { now, ..ctx_at() };
 
         let bad = DateTime {
+            name: "datetime".into(),
             format: "%H".into(),
             alt_format: String::new(),
             timezone: Some("Not/AZone".into()),
@@ -151,6 +155,7 @@ mod tests {
         let ctx = Context { now, ..ctx_at() };
 
         let local = DateTime {
+            name: "datetime".into(),
             format: "%H".into(),
             alt_format: String::new(),
             timezone: None,
@@ -162,6 +167,7 @@ mod tests {
     fn datetime_range_name_tracks_alt() {
         assert_eq!(
             DateTime {
+                name: "datetime".into(),
                 format: "%H:%M".into(),
                 alt_format: String::new(),
                 timezone: None,
@@ -171,6 +177,7 @@ mod tests {
         );
         assert_eq!(
             DateTime {
+                name: "datetime".into(),
                 format: "%H:%M".into(),
                 alt_format: "%c".into(),
                 timezone: None,

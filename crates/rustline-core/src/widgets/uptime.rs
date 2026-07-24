@@ -7,14 +7,12 @@ use crate::{Context, Segment, Widget};
 /// faking a reading (invariant #6). Part of the format-bearing widget family:
 /// a non-empty `alt_format` makes it click-toggleable.
 pub struct Uptime {
+    /// Registry/layout name; the toggle key threaded through render + click,
+    /// and this instance's range name (invariant #7).
+    pub name: String,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
-}
-
-impl Uptime {
-    /// Registry/layout name; the toggle key threaded through render + click.
-    pub const NAME: &'static str = "uptime";
 }
 
 impl Widget for Uptime {
@@ -22,7 +20,7 @@ impl Widget for Uptime {
         match ctx.uptime {
             Some(secs) => {
                 let fmt =
-                    crate::widgets::active_format(ctx, Self::NAME, &self.format, &self.alt_format);
+                    crate::widgets::active_format(ctx, &self.name, &self.format, &self.alt_format);
                 let text = fmt.replace("{uptime}", &humanize_uptime(secs));
                 vec![Segment::new(text)]
             }
@@ -38,7 +36,7 @@ impl Widget for Uptime {
     }
 
     fn range_name(&self) -> Option<&str> {
-        crate::widgets::clickable_range(Self::NAME, &self.alt_format)
+        crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
 
@@ -99,6 +97,7 @@ mod tests {
 
     fn w(format: &str, alt: &str, down: &str) -> Uptime {
         Uptime {
+            name: "uptime".into(),
             format: format.into(),
             alt_format: alt.into(),
             down_format: down.into(),

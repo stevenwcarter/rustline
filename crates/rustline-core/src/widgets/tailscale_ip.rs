@@ -3,25 +3,23 @@ use crate::{Context, Segment, Widget};
 
 /// Renders the machine's Tailscale IPv4 (the `100.64.0.0/10` address).
 pub struct TailscaleIp {
+    /// Registry/layout name; the toggle key threaded through render + click,
+    /// and this instance's range name (invariant #7).
+    pub name: String,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
 }
 
-impl TailscaleIp {
-    /// Registry/layout name; the toggle key threaded through render + click.
-    pub const NAME: &'static str = "tailscale_ip";
-}
-
 impl Widget for TailscaleIp {
     fn render(&self, ctx: &Context) -> Vec<Segment> {
         let ip = net::pick_tailscale(&ctx.interfaces);
-        let fmt = crate::widgets::active_format(ctx, Self::NAME, &self.format, &self.alt_format);
+        let fmt = crate::widgets::active_format(ctx, &self.name, &self.format, &self.alt_format);
         net::render_ip(fmt, ip, &self.down_format)
     }
 
     fn range_name(&self) -> Option<&str> {
-        crate::widgets::clickable_range(Self::NAME, &self.alt_format)
+        crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
 
@@ -73,6 +71,7 @@ mod tests {
     #[test]
     fn renders_tailscale_ip() {
         let w = TailscaleIp {
+            name: "tailscale_ip".into(),
             format: "TS {ip}".into(),
             alt_format: String::new(),
             down_format: "TS off".into(),
@@ -84,6 +83,7 @@ mod tests {
     #[test]
     fn down_format_when_tailscale_absent() {
         let w = TailscaleIp {
+            name: "tailscale_ip".into(),
             format: "TS {ip}".into(),
             alt_format: String::new(),
             down_format: "TS off".into(),
@@ -97,6 +97,7 @@ mod tests {
     #[test]
     fn empty_down_format_renders_nothing() {
         let w = TailscaleIp {
+            name: "tailscale_ip".into(),
             format: "TS {ip}".into(),
             alt_format: String::new(),
             down_format: String::new(),
@@ -109,6 +110,7 @@ mod tests {
         let mut c = ctx(vec![ifc("tailscale0", "100.101.4.7")]);
         c.toggled.insert("tailscale_ip".to_string());
         let w = TailscaleIp {
+            name: "tailscale_ip".into(),
             format: "{ip}".into(),
             alt_format: "TS {ip}".into(),
             down_format: String::new(),

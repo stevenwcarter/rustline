@@ -7,6 +7,9 @@ use crate::{Context, Segment, Widget};
 /// faking zeros. Part of the format-bearing widget family: a non-empty
 /// `alt_format` makes it click-toggleable.
 pub struct LoadAvg {
+    /// Registry/layout name; the toggle key threaded through render + click,
+    /// and this instance's range name (invariant #7).
+    pub name: String,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
@@ -14,17 +17,12 @@ pub struct LoadAvg {
     pub crit_load: f64,
 }
 
-impl LoadAvg {
-    /// Registry/layout name; the toggle key threaded through render + click.
-    pub const NAME: &'static str = "loadavg";
-}
-
 impl Widget for LoadAvg {
     fn render(&self, ctx: &Context) -> Vec<Segment> {
         match ctx.loadavg {
             Some(vals) => {
                 let fmt =
-                    crate::widgets::active_format(ctx, Self::NAME, &self.format, &self.alt_format);
+                    crate::widgets::active_format(ctx, &self.name, &self.format, &self.alt_format);
                 let text = substitute(fmt, Some(vals));
                 let kind = crate::widgets::alert_over(vals[0], self.warn_load, self.crit_load);
                 match crate::widgets::alert_style(kind, &ctx.colors) {
@@ -42,7 +40,7 @@ impl Widget for LoadAvg {
     }
 
     fn range_name(&self) -> Option<&str> {
-        crate::widgets::clickable_range(Self::NAME, &self.alt_format)
+        crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
 
@@ -148,6 +146,7 @@ mod tests {
 
     fn w(format: &str, alt: &str, down: &str) -> LoadAvg {
         LoadAvg {
+            name: "loadavg".into(),
             format: format.into(),
             alt_format: alt.into(),
             down_format: down.into(),

@@ -9,14 +9,12 @@ use crate::{Context, Segment, Widget};
 /// Part of the format-bearing widget family: a non-empty `alt_format` makes
 /// it click-toggleable.
 pub struct Media {
+    /// Registry/layout name; the toggle key threaded through render + click,
+    /// and this instance's range name (invariant #7).
+    pub name: String,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
-}
-
-impl Media {
-    /// Registry/layout name; the toggle key threaded through render + click.
-    pub const NAME: &'static str = "media";
 }
 
 impl Widget for Media {
@@ -24,7 +22,7 @@ impl Widget for Media {
         match &ctx.media {
             Some(info) => {
                 let fmt =
-                    crate::widgets::active_format(ctx, Self::NAME, &self.format, &self.alt_format);
+                    crate::widgets::active_format(ctx, &self.name, &self.format, &self.alt_format);
                 let text = fmt
                     .replace("{artist}", &info.artist)
                     .replace("{title}", &info.title)
@@ -48,7 +46,7 @@ impl Widget for Media {
     }
 
     fn range_name(&self) -> Option<&str> {
-        crate::widgets::clickable_range(Self::NAME, &self.alt_format)
+        crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
 
@@ -100,6 +98,7 @@ mod tests {
 
     fn w(format: &str, alt: &str, down: &str) -> Media {
         Media {
+            name: "media".into(),
             format: format.into(),
             alt_format: alt.into(),
             down_format: down.into(),

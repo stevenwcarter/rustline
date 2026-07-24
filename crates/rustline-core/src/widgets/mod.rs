@@ -44,8 +44,12 @@ pub use windows::Windows;
 // 7-10) to render a threshold-alert badge.
 pub(crate) use alert::{AlertKind, alert_over, alert_style, alert_under};
 
-use crate::Config;
+use crate::config::{
+    BatteryOpts, CpuOpts, DateTimeOpts, DiskOpts, GitOpts, LanIpOpts, LoadAvgOpts, MediaOpts,
+    MemoryOpts, TailscaleIpOpts, ThroughputOpts, UptimeOpts,
+};
 use crate::widget::{Registry, WidgetDescriptor, WidgetSource};
+use crate::{Config, Widget};
 
 /// Build a minimal-boilerplate `WidgetDescriptor` for a built-in widget.
 fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDescriptor {
@@ -55,6 +59,141 @@ fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDe
         configurable,
         source: WidgetSource::Builtin,
     }
+}
+
+// The twelve `build_<kind>` factories below each build one clickable/
+// format-bearing widget instance under a caller-supplied `name` (its range/
+// toggle identity, invariant #7) from that kind's current option values.
+// Base registration below calls each with the kind name itself (so base
+// output stays byte-identical); a later task (named `[instances]`
+// registration, W46) reuses them to build additional instances under other
+// names.
+
+pub(crate) fn build_loadavg(name: &str, o: &LoadAvgOpts) -> Box<dyn Widget> {
+    Box::new(LoadAvg {
+        name: name.to_string(),
+        format: o.format.clone(),
+        alt_format: o.alt_format.clone(),
+        down_format: o.down_format.clone(),
+        warn_load: o.warn_load,
+        crit_load: o.crit_load,
+    })
+}
+
+pub(crate) fn build_datetime(name: &str, o: &DateTimeOpts) -> Box<dyn Widget> {
+    Box::new(DateTime {
+        name: name.to_string(),
+        format: o.format.clone(),
+        alt_format: o.alt_format.clone(),
+        timezone: o.timezone.clone(),
+    })
+}
+
+pub(crate) fn build_lan_ip(name: &str, o: &LanIpOpts) -> Box<dyn Widget> {
+    Box::new(LanIp {
+        name: name.to_string(),
+        format: o.format.clone(),
+        alt_format: o.alt_format.clone(),
+        down_format: o.down_format.clone(),
+        interface: o.interface.clone(),
+    })
+}
+
+pub(crate) fn build_tailscale_ip(name: &str, o: &TailscaleIpOpts) -> Box<dyn Widget> {
+    Box::new(TailscaleIp {
+        name: name.to_string(),
+        format: o.format.clone(),
+        alt_format: o.alt_format.clone(),
+        down_format: o.down_format.clone(),
+    })
+}
+
+pub(crate) fn build_battery(name: &str, o: &BatteryOpts) -> Box<dyn Widget> {
+    Box::new(BatteryWidget {
+        name: name.to_string(),
+        format: o.format.clone(),
+        alt_format: o.alt_format.clone(),
+        down_format: o.down_format.clone(),
+        warn_percent: o.warn_percent,
+        crit_percent: o.crit_percent,
+        icon: o.icon.clone(),
+    })
+}
+
+pub(crate) fn build_cpu(name: &str, o: &CpuOpts) -> Box<dyn Widget> {
+    Box::new(CpuWidget {
+        name: name.to_string(),
+        format: o.format.clone(),
+        alt_format: o.alt_format.clone(),
+        down_format: o.down_format.clone(),
+        bar_width: o.bar_width,
+        warn_percent: o.warn_percent,
+        crit_percent: o.crit_percent,
+        icon: o.icon.clone(),
+    })
+}
+
+pub(crate) fn build_memory(name: &str, o: &MemoryOpts) -> Box<dyn Widget> {
+    Box::new(MemoryWidget {
+        name: name.to_string(),
+        format: o.format.clone(),
+        alt_format: o.alt_format.clone(),
+        down_format: o.down_format.clone(),
+        bar_width: o.bar_width,
+        warn_percent: o.warn_percent,
+        crit_percent: o.crit_percent,
+        icon: o.icon.clone(),
+    })
+}
+
+pub(crate) fn build_git(name: &str, o: &GitOpts) -> Box<dyn Widget> {
+    Box::new(GitWidget {
+        name: name.to_string(),
+        format: o.format.clone(),
+        alt_format: o.alt_format.clone(),
+        down_format: o.down_format.clone(),
+        dirty_glyph: o.dirty_glyph.clone(),
+    })
+}
+
+pub(crate) fn build_disk(name: &str, o: &DiskOpts) -> Box<dyn Widget> {
+    Box::new(DiskWidget {
+        name: name.to_string(),
+        format: o.format.clone(),
+        alt_format: o.alt_format.clone(),
+        down_format: o.down_format.clone(),
+        mount: o.mount.clone(),
+        bar_width: o.bar_width,
+        warn_percent: o.warn_percent,
+        crit_percent: o.crit_percent,
+    })
+}
+
+pub(crate) fn build_uptime(name: &str, o: &UptimeOpts) -> Box<dyn Widget> {
+    Box::new(Uptime {
+        name: name.to_string(),
+        format: o.format.clone(),
+        alt_format: o.alt_format.clone(),
+        down_format: o.down_format.clone(),
+    })
+}
+
+pub(crate) fn build_media(name: &str, o: &MediaOpts) -> Box<dyn Widget> {
+    Box::new(Media {
+        name: name.to_string(),
+        format: o.format.clone(),
+        alt_format: o.alt_format.clone(),
+        down_format: o.down_format.clone(),
+    })
+}
+
+pub(crate) fn build_throughput(name: &str, o: &ThroughputOpts) -> Box<dyn Widget> {
+    Box::new(ThroughputWidget {
+        name: name.to_string(),
+        format: o.format.clone(),
+        alt_format: o.alt_format.clone(),
+        down_format: o.down_format.clone(),
+    })
 }
 
 impl Registry {
@@ -102,15 +241,7 @@ impl Registry {
         let loadavg = cfg.widgets.loadavg.clone();
         registry.register_described(
             builtin_descriptor("loadavg", "1/5/15-minute load average", true),
-            Box::new(move || {
-                Box::new(LoadAvg {
-                    format: loadavg.format.clone(),
-                    alt_format: loadavg.alt_format.clone(),
-                    down_format: loadavg.down_format.clone(),
-                    warn_load: loadavg.warn_load,
-                    crit_load: loadavg.crit_load,
-                })
-            }),
+            Box::new(move || build_loadavg("loadavg", &loadavg)),
         );
 
         let datetime = cfg.widgets.datetime.clone();
@@ -120,13 +251,7 @@ impl Registry {
                 "The current time, `chrono` strftime-formatted",
                 true,
             ),
-            Box::new(move || {
-                Box::new(DateTime {
-                    format: datetime.format.clone(),
-                    alt_format: datetime.alt_format.clone(),
-                    timezone: datetime.timezone.clone(),
-                })
-            }),
+            Box::new(move || build_datetime("datetime", &datetime)),
         );
 
         let cwd = cfg.widgets.cwd.clone();
@@ -146,26 +271,13 @@ impl Registry {
         let lan = cfg.widgets.lan_ip.clone();
         registry.register_described(
             builtin_descriptor("lan_ip", "The machine's LAN IPv4 address", true),
-            Box::new(move || {
-                Box::new(LanIp {
-                    format: lan.format.clone(),
-                    alt_format: lan.alt_format.clone(),
-                    down_format: lan.down_format.clone(),
-                    interface: lan.interface.clone(),
-                })
-            }),
+            Box::new(move || build_lan_ip("lan_ip", &lan)),
         );
 
         let ts = cfg.widgets.tailscale_ip.clone();
         registry.register_described(
             builtin_descriptor("tailscale_ip", "The machine's Tailscale IPv4 address", true),
-            Box::new(move || {
-                Box::new(TailscaleIp {
-                    format: ts.format.clone(),
-                    alt_format: ts.alt_format.clone(),
-                    down_format: ts.down_format.clone(),
-                })
-            }),
+            Box::new(move || build_tailscale_ip("tailscale_ip", &ts)),
         );
 
         let battery = cfg.widgets.battery.clone();
@@ -175,48 +287,19 @@ impl Registry {
                 "Battery percentage, charge state, and level icon",
                 true,
             ),
-            Box::new(move || {
-                Box::new(BatteryWidget {
-                    format: battery.format.clone(),
-                    alt_format: battery.alt_format.clone(),
-                    down_format: battery.down_format.clone(),
-                    warn_percent: battery.warn_percent,
-                    crit_percent: battery.crit_percent,
-                    icon: battery.icon.clone(),
-                })
-            }),
+            Box::new(move || build_battery("battery", &battery)),
         );
 
         let cpu = cfg.widgets.cpu.clone();
         registry.register_described(
             builtin_descriptor("cpu", "CPU utilization, with an optional gauge bar", true),
-            Box::new(move || {
-                Box::new(CpuWidget {
-                    format: cpu.format.clone(),
-                    alt_format: cpu.alt_format.clone(),
-                    down_format: cpu.down_format.clone(),
-                    bar_width: cpu.bar_width,
-                    warn_percent: cpu.warn_percent,
-                    crit_percent: cpu.crit_percent,
-                    icon: cpu.icon.clone(),
-                })
-            }),
+            Box::new(move || build_cpu("cpu", &cpu)),
         );
 
         let memory = cfg.widgets.memory.clone();
         registry.register_described(
             builtin_descriptor("memory", "Memory usage, with an optional gauge bar", true),
-            Box::new(move || {
-                Box::new(MemoryWidget {
-                    format: memory.format.clone(),
-                    alt_format: memory.alt_format.clone(),
-                    down_format: memory.down_format.clone(),
-                    bar_width: memory.bar_width,
-                    warn_percent: memory.warn_percent,
-                    crit_percent: memory.crit_percent,
-                    icon: memory.icon.clone(),
-                })
-            }),
+            Box::new(move || build_memory("memory", &memory)),
         );
 
         let git = cfg.widgets.git.clone();
@@ -226,42 +309,19 @@ impl Registry {
                 "Current git branch, dirty marker, and ahead/behind counts",
                 true,
             ),
-            Box::new(move || {
-                Box::new(GitWidget {
-                    format: git.format.clone(),
-                    alt_format: git.alt_format.clone(),
-                    down_format: git.down_format.clone(),
-                    dirty_glyph: git.dirty_glyph.clone(),
-                })
-            }),
+            Box::new(move || build_git("git", &git)),
         );
 
         let disk = cfg.widgets.disk.clone();
         registry.register_described(
             builtin_descriptor("disk", "Filesystem usage for a configured mount", true),
-            Box::new(move || {
-                Box::new(DiskWidget {
-                    format: disk.format.clone(),
-                    alt_format: disk.alt_format.clone(),
-                    down_format: disk.down_format.clone(),
-                    mount: disk.mount.clone(),
-                    bar_width: disk.bar_width,
-                    warn_percent: disk.warn_percent,
-                    crit_percent: disk.crit_percent,
-                })
-            }),
+            Box::new(move || build_disk("disk", &disk)),
         );
 
         let uptime = cfg.widgets.uptime.clone();
         registry.register_described(
             builtin_descriptor("uptime", "System uptime, humanized", true),
-            Box::new(move || {
-                Box::new(Uptime {
-                    format: uptime.format.clone(),
-                    alt_format: uptime.alt_format.clone(),
-                    down_format: uptime.down_format.clone(),
-                })
-            }),
+            Box::new(move || build_uptime("uptime", &uptime)),
         );
 
         let media = cfg.widgets.media.clone();
@@ -271,13 +331,7 @@ impl Registry {
                 "Now-playing artist/title/status via playerctl",
                 true,
             ),
-            Box::new(move || {
-                Box::new(Media {
-                    format: media.format.clone(),
-                    alt_format: media.alt_format.clone(),
-                    down_format: media.down_format.clone(),
-                })
-            }),
+            Box::new(move || build_media("media", &media)),
         );
 
         let throughput = cfg.widgets.throughput.clone();
@@ -287,13 +341,7 @@ impl Registry {
                 "Network download/upload throughput (bytes-per-second)",
                 true,
             ),
-            Box::new(move || {
-                Box::new(ThroughputWidget {
-                    format: throughput.format.clone(),
-                    alt_format: throughput.alt_format.clone(),
-                    down_format: throughput.down_format.clone(),
-                })
-            }),
+            Box::new(move || build_throughput("throughput", &throughput)),
         );
 
         registry
@@ -666,5 +714,19 @@ mod tests {
             .map(|s| s.text)
             .collect();
         assert!(texts.is_empty());
+    }
+
+    #[test]
+    fn datetime_instance_uses_its_own_name_for_range_and_toggle() {
+        // Build a datetime widget under a non-kind name and confirm its range
+        // name and toggle key are that name, not "datetime".
+        let w = super::build_datetime(
+            "clock_utc",
+            &crate::config::DateTimeOpts {
+                alt_format: "%H:%M".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(w.range_name(), Some("clock_utc"));
     }
 }
