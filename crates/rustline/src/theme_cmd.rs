@@ -17,7 +17,7 @@ use crate::cli::ThemeCmd;
 /// Dispatch a `rustline theme …` invocation.
 pub fn run(cmd: ThemeCmd, config_path: &Path, themes_dir: &Path) {
     match cmd {
-        ThemeCmd::List => list(config_path, themes_dir),
+        ThemeCmd::List { json } => list(config_path, themes_dir, json),
         ThemeCmd::Show { name } => show(&name, themes_dir),
         ThemeCmd::Use { name } => use_theme(&name, config_path, themes_dir),
         ThemeCmd::Pick => pick(config_path, themes_dir),
@@ -154,11 +154,49 @@ fn list_lines(active: &str, files: &[String]) -> Vec<String> {
     lines
 }
 
-fn list(config_path: &Path, themes_dir: &Path) {
+#[derive(serde::Serialize)]
+struct ThemeEntryJson {
+    name: String,
+    active: bool,
+    source: &'static str, // "builtin" | "file"
+    shadowed: bool,
+}
+
+/// The `theme list --json` payload: one entry per built-in (in registration
+/// order) then per themes-dir file. Shares the active/shadowed logic with
+/// `list_lines` so the human and JSON views can't drift.
+pub(crate) fn theme_list_json(active: &str, files: &[String]) -> String {
+    let mut entries = Vec::new();
+    for name in builtin_theme_names() {
+        let shadowed = files.iter().any(|f| f == name);
+        entries.push(ThemeEntryJson {
+            name: (*name).to_string(),
+            active: *name == active && !shadowed,
+            source: "builtin",
+            shadowed,
+        });
+    }
+    for f in files {
+        entries.push(ThemeEntryJson {
+            name: f.clone(),
+            active: f == active,
+            source: "file",
+            shadowed: false,
+        });
+    }
+    serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn list(config_path: &Path, themes_dir: &Path, json: bool) {
     let cfg = Config::load(config_path);
     let active = cfg.theme.base.as_deref().unwrap_or("default");
-    for line in list_lines(active, &theme_files(themes_dir)) {
-        println!("{line}");
+    let files = theme_files(themes_dir);
+    if json {
+        println!("{}", theme_list_json(active, &files));
+    } else {
+        for line in list_lines(active, &files) {
+            println!("{line}");
+        }
     }
 }
 
@@ -833,6 +871,23 @@ mod tests {
     fn redact_datetime_segment_leaves_non_matching_text_untouched() {
         let text = "no datetime segment here";
         assert_eq!(redact_datetime_segment(text), text);
+    }
+
+    #[test]
+    fn theme_list_json_shape_marks_active_and_source() {
+        let files = vec!["my-nord".to_string()];
+        let json = theme_list_json("nord", &files);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let arr = v.as_array().unwrap();
+        // built-ins first, then the file stem
+        let nord = arr.iter().find(|e| e["name"] == "nord").unwrap();
+        assert_eq!(nord["active"], true);
+        assert_eq!(nord["source"], "builtin");
+        let deflt = arr.iter().find(|e| e["name"] == "default").unwrap();
+        assert_eq!(deflt["active"], false);
+        let custom = arr.iter().find(|e| e["name"] == "my-nord").unwrap();
+        assert_eq!(custom["source"], "file");
+        assert_eq!(custom["shadowed"], false);
     }
 
     #[test]

@@ -111,7 +111,11 @@ pub struct InitArgs {
 #[derive(Subcommand)]
 pub enum ThemeCmd {
     /// List built-in and themes-dir themes (marks the active one).
-    List,
+    List {
+        /// Emit the list as a JSON array instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print an ANSI colour preview of a theme.
     Show { name: String },
     /// Select a theme by writing `[theme].base` into the config file.
