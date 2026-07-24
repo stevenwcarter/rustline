@@ -28,6 +28,17 @@ pub struct InitBlockOpts<'a> {
 /// carries a `#()`, unlike before).
 const STATUS_FORMAT_0: &str = r##"set -g status-format[0] "#[list=on align=#{status-justify}]#[list=left-marker]<#[list=right-marker]>#[list=on]#(@BINARY@ render windows --session=#{q:session_name})""##;
 
+/// The widget-manager popup binding. Emitted unconditionally, like the three
+/// `MouseDown*Status` bindings — the `mouse` answer only controls
+/// `set -g mouse on`, not whether bindings exist. No tmux format variable is
+/// interpolated here, so there is nothing to `#{q:}`-escape; `@BINARY@` is
+/// substituted with the shell-quoted absolute path by `init_block`'s blanket
+/// replace (invariant #4). Needs tmux >= 3.2 for `display-popup`.
+const WIDGET_POPUP_BINDING: &str = r##"
+# rustline widget manager (prefix + W)
+bind-key W display-popup -E -w 80% -h 80% "@BINARY@ widget edit"
+"##;
+
 /// Verbatim two-line `status-format[1]` (status-left/right), copied from the
 /// author's proven `~/.tmux.conf`. Unlike [`STATUS_FORMAT_0`], this one still
 /// has no `#(...)` shell call of its own — only `#{...}` refs into the
@@ -128,6 +139,7 @@ bind -T root MouseDown3Status {
 }
 "##,
     );
+    block.push_str(WIDGET_POPUP_BINDING);
     if opts.two_line {
         block.push_str("set -g status 2\n");
         block.push_str(STATUS_FORMAT_0);
@@ -582,5 +594,50 @@ mod tests {
         let first = upsert_tmux_block("user before\n", "OLD");
         let second = upsert_tmux_block(&first, "NEW");
         assert_eq!(remove_tmux_block(&second), remove_tmux_block(&first));
+    }
+
+    #[test]
+    fn block_binds_the_widget_manager_popup_to_prefix_w() {
+        let block = init_block(&InitBlockOpts {
+            bar_bg: "colour234",
+            fg: "colour252",
+            two_line: false,
+            mouse: false,
+            interval: 5,
+            binary: "/opt/bin/rustline",
+        });
+        // Like every other `@BINARY@` site in this block (`render left/right`,
+        // `click`), the binary is shell-quoted via the same blanket replace —
+        // a path containing a space must still reach `/bin/sh -c` as one word.
+        assert!(
+            block.contains(
+                r#"bind-key W display-popup -E -w 80% -h 80% "'/opt/bin/rustline' widget edit""#
+            ),
+            "prefix+W binding present with the resolved binary: {block}"
+        );
+        // No tmux format variable is interpolated into it (nothing to `#{q:}`).
+        let line = block
+            .lines()
+            .find(|l| l.starts_with("bind-key W"))
+            .expect("binding line");
+        assert!(
+            !line.contains("#{"),
+            "no format var in the popup binding: {line}"
+        );
+    }
+
+    #[test]
+    fn the_popup_binding_is_emitted_regardless_of_the_mouse_answer() {
+        for mouse in [false, true] {
+            let block = init_block(&InitBlockOpts {
+                bar_bg: "colour234",
+                fg: "colour252",
+                two_line: false,
+                mouse,
+                interval: 5,
+                binary: "rl",
+            });
+            assert!(block.contains("bind-key W display-popup"), "mouse={mouse}");
+        }
     }
 }
