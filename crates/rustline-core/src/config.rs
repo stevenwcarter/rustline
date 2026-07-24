@@ -23,7 +23,7 @@ use crate::render::Theme;
 ///
 /// Names are resolved against a [`crate::widget::Registry`] at render time;
 /// an unknown name is skipped there, not a config error.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     #[serde(default = "default_left")]
     pub left: Vec<String>,
@@ -59,6 +59,189 @@ impl Default for Layout {
             right: default_right(),
         }
     }
+}
+
+/// Which of the three layout arrays a widget sits in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Region {
+    Left,
+    Center,
+    Right,
+}
+
+impl Region {
+    /// Every region, in visual left-to-right order.
+    pub const ALL: [Region; 3] = [Region::Left, Region::Center, Region::Right];
+
+    /// The config-key spelling, and what `--region` accepts.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Region::Left => "left",
+            Region::Center => "center",
+            Region::Right => "right",
+        }
+    }
+
+    /// Parse a `--region` value, case-insensitively. `None` if unrecognized.
+    pub fn parse(s: &str) -> Option<Region> {
+        match s.to_ascii_lowercase().as_str() {
+            "left" => Some(Region::Left),
+            "center" => Some(Region::Center),
+            "right" => Some(Region::Right),
+            _ => None,
+        }
+    }
+}
+
+/// Why a layout edit was refused. Every variant means **nothing was mutated**.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayoutEditError {
+    /// The name is already placed, at this region/index. A widget may appear
+    /// at most once across all three regions: two copies would share one
+    /// click-toggle/range identity (invariant #7).
+    AlreadyPresent { region: Region, index: usize },
+    /// The name is not in any region.
+    NotPresent,
+    /// The edit would leave the layout exactly as it is.
+    NoOp,
+}
+
+impl std::fmt::Display for LayoutEditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LayoutEditError::AlreadyPresent { region, index } => {
+                write!(
+                    f,
+                    "already in the {} region at position {index}",
+                    region.as_str()
+                )
+            }
+            LayoutEditError::NotPresent => write!(f, "not in any layout region"),
+            LayoutEditError::NoOp => write!(f, "already in that position; nothing to do"),
+        }
+    }
+}
+
+/// A completed layout edit, described so a caller can report it without
+/// diffing. `from`/`to` are `None` for an add/remove respectively.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutChange {
+    pub name: String,
+    pub from: Option<(Region, usize)>,
+    pub to: Option<(Region, usize)>,
+}
+
+impl Layout {
+    /// This region's widget names, in visual left-to-right order (invariant #5).
+    pub fn get(&self, r: Region) -> &[String] {
+        match r {
+            Region::Left => &self.left,
+            Region::Center => &self.center,
+            Region::Right => &self.right,
+        }
+    }
+
+    pub fn get_mut(&mut self, r: Region) -> &mut Vec<String> {
+        match r {
+            Region::Left => &mut self.left,
+            Region::Center => &mut self.center,
+            Region::Right => &mut self.right,
+        }
+    }
+
+    /// Where `name` currently sits, if anywhere. A name appears at most once.
+    pub fn find(&self, name: &str) -> Option<(Region, usize)> {
+        Region::ALL.into_iter().find_map(|r| {
+            self.get(r)
+                .iter()
+                .position(|n| n == name)
+                .map(|idx| (r, idx))
+        })
+    }
+}
+
+/// Place `name` in `region`, at `at` (clamped to the region's length) or
+/// appended when `at` is `None`.
+pub fn layout_enable(
+    layout: &mut Layout,
+    name: &str,
+    region: Region,
+    at: Option<usize>,
+) -> Result<LayoutChange, LayoutEditError> {
+    if let Some((region, index)) = layout.find(name) {
+        return Err(LayoutEditError::AlreadyPresent { region, index });
+    }
+    let target = layout.get_mut(region);
+    let index = at.unwrap_or(target.len()).min(target.len());
+    target.insert(index, name.to_string());
+    Ok(LayoutChange {
+        name: name.to_string(),
+        from: None,
+        to: Some((region, index)),
+    })
+}
+
+/// Remove `name` from whichever region holds it.
+pub fn layout_disable(layout: &mut Layout, name: &str) -> Result<LayoutChange, LayoutEditError> {
+    let (region, index) = layout.find(name).ok_or(LayoutEditError::NotPresent)?;
+    layout.get_mut(region).remove(index);
+    Ok(LayoutChange {
+        name: name.to_string(),
+        from: Some((region, index)),
+        to: None,
+    })
+}
+
+/// Move `name` to `to`/`to_index` (index clamped to the destination length,
+/// so a large index means "append").
+pub fn layout_move(
+    layout: &mut Layout,
+    name: &str,
+    to: Region,
+    to_index: usize,
+) -> Result<LayoutChange, LayoutEditError> {
+    let from = layout.find(name).ok_or(LayoutEditError::NotPresent)?;
+    layout.get_mut(from.0).remove(from.1);
+    // Clamp against the length *after* removal, so a same-region move to the
+    // end lands at the last slot rather than out of bounds.
+    let dest = layout.get_mut(to);
+    let index = to_index.min(dest.len());
+    if from == (to, index) {
+        // Restore and refuse: nothing would change.
+        layout.get_mut(from.0).insert(from.1, name.to_string());
+        return Err(LayoutEditError::NoOp);
+    }
+    layout.get_mut(to).insert(index, name.to_string());
+    Ok(LayoutChange {
+        name: name.to_string(),
+        from: Some(from),
+        to: Some((to, index)),
+    })
+}
+
+/// Shift `name` by `delta` positions inside its current region. A step past
+/// either end is [`LayoutEditError::NoOp`] — never a wrap-around.
+pub fn layout_nudge(
+    layout: &mut Layout,
+    name: &str,
+    delta: i32,
+) -> Result<LayoutChange, LayoutEditError> {
+    let (region, index) = layout.find(name).ok_or(LayoutEditError::NotPresent)?;
+    let len = layout.get(region).len();
+    let target = i64::from(delta) + index as i64;
+    if target < 0 || target >= len as i64 {
+        return Err(LayoutEditError::NoOp);
+    }
+    let target = target as usize;
+    let arr = layout.get_mut(region);
+    let name_owned = arr.remove(index);
+    arr.insert(target, name_owned);
+    Ok(LayoutChange {
+        name: name.to_string(),
+        from: Some((region, index)),
+        to: Some((region, target)),
+    })
 }
 
 /// Options for the `datetime` widget.
@@ -2700,5 +2883,156 @@ mount = "/data"
         );
         let mounts = c.disk_mounts(&["cpu".into()]);
         assert!(!mounts.contains("/hijack"));
+    }
+
+    fn sample_layout() -> Layout {
+        Layout {
+            left: vec!["pane_id".into(), "hostname".into()],
+            center: vec!["windows".into()],
+            right: vec!["cwd".into(), "cpu".into(), "datetime".into()],
+        }
+    }
+
+    #[test]
+    fn region_parse_is_case_insensitive_and_round_trips() {
+        assert_eq!(Region::parse("LEFT"), Some(Region::Left));
+        assert_eq!(Region::parse("Center"), Some(Region::Center));
+        assert_eq!(Region::parse("right"), Some(Region::Right));
+        assert_eq!(Region::parse("middle"), None);
+        for r in Region::ALL {
+            assert_eq!(Region::parse(r.as_str()), Some(r));
+        }
+    }
+
+    #[test]
+    fn find_locates_a_widget_in_any_region() {
+        let l = sample_layout();
+        assert_eq!(l.find("hostname"), Some((Region::Left, 1)));
+        assert_eq!(l.find("windows"), Some((Region::Center, 0)));
+        assert_eq!(l.find("datetime"), Some((Region::Right, 2)));
+        assert_eq!(l.find("git"), None);
+    }
+
+    #[test]
+    fn enable_appends_when_index_is_none() {
+        let mut l = sample_layout();
+        let change = layout_enable(&mut l, "git", Region::Right, None).unwrap();
+        assert_eq!(l.right, ["cwd", "cpu", "datetime", "git"]);
+        assert_eq!(change.from, None);
+        assert_eq!(change.to, Some((Region::Right, 3)));
+    }
+
+    #[test]
+    fn enable_inserts_at_a_clamped_index() {
+        let mut l = sample_layout();
+        layout_enable(&mut l, "git", Region::Right, Some(1)).unwrap();
+        assert_eq!(l.right, ["cwd", "git", "cpu", "datetime"]);
+
+        let mut l2 = sample_layout();
+        layout_enable(&mut l2, "git", Region::Right, Some(99)).unwrap();
+        assert_eq!(l2.right, ["cwd", "cpu", "datetime", "git"]);
+    }
+
+    #[test]
+    fn enable_rejects_a_name_already_present_in_another_region_and_does_not_mutate() {
+        let mut l = sample_layout();
+        let before = l.clone();
+        let err = layout_enable(&mut l, "hostname", Region::Right, None).unwrap_err();
+        assert_eq!(
+            err,
+            LayoutEditError::AlreadyPresent {
+                region: Region::Left,
+                index: 1
+            }
+        );
+        assert_eq!(l, before, "error path must not mutate");
+    }
+
+    #[test]
+    fn disable_removes_and_reports_where_it_was() {
+        let mut l = sample_layout();
+        let change = layout_disable(&mut l, "cpu").unwrap();
+        assert_eq!(l.right, ["cwd", "datetime"]);
+        assert_eq!(change.from, Some((Region::Right, 1)));
+        assert_eq!(change.to, None);
+    }
+
+    #[test]
+    fn disable_of_an_absent_name_errors_without_mutating() {
+        let mut l = sample_layout();
+        let before = l.clone();
+        assert_eq!(
+            layout_disable(&mut l, "git").unwrap_err(),
+            LayoutEditError::NotPresent
+        );
+        assert_eq!(l, before);
+    }
+
+    #[test]
+    fn move_across_regions_removes_from_the_old_one() {
+        let mut l = sample_layout();
+        let change = layout_move(&mut l, "hostname", Region::Right, 0).unwrap();
+        assert_eq!(l.left, ["pane_id"]);
+        assert_eq!(l.right, ["hostname", "cwd", "cpu", "datetime"]);
+        assert_eq!(change.from, Some((Region::Left, 1)));
+        assert_eq!(change.to, Some((Region::Right, 0)));
+    }
+
+    #[test]
+    fn move_within_a_region_reindexes_correctly() {
+        let mut l = sample_layout();
+        layout_move(&mut l, "cwd", Region::Right, 2).unwrap();
+        assert_eq!(l.right, ["cpu", "datetime", "cwd"]);
+    }
+
+    #[test]
+    fn move_clamps_an_out_of_range_index_instead_of_erroring() {
+        let mut l = sample_layout();
+        layout_move(&mut l, "cwd", Region::Right, 99).unwrap();
+        assert_eq!(l.right, ["cpu", "datetime", "cwd"]);
+    }
+
+    #[test]
+    fn move_to_where_it_already_is_is_a_noop_error() {
+        let mut l = sample_layout();
+        let before = l.clone();
+        assert_eq!(
+            layout_move(&mut l, "cpu", Region::Right, 1).unwrap_err(),
+            LayoutEditError::NoOp
+        );
+        assert_eq!(l, before);
+    }
+
+    #[test]
+    fn nudge_moves_one_step_inside_its_own_region() {
+        let mut l = sample_layout();
+        layout_nudge(&mut l, "cpu", -1).unwrap();
+        assert_eq!(l.right, ["cpu", "cwd", "datetime"]);
+        layout_nudge(&mut l, "cpu", 1).unwrap();
+        assert_eq!(l.right, ["cwd", "cpu", "datetime"]);
+    }
+
+    #[test]
+    fn nudge_at_a_region_boundary_is_a_noop_not_a_wraparound() {
+        let mut l = sample_layout();
+        let before = l.clone();
+        assert_eq!(
+            layout_nudge(&mut l, "cwd", -1).unwrap_err(),
+            LayoutEditError::NoOp
+        );
+        assert_eq!(
+            layout_nudge(&mut l, "datetime", 1).unwrap_err(),
+            LayoutEditError::NoOp
+        );
+        assert_eq!(l, before);
+    }
+
+    #[test]
+    fn nudge_of_an_absent_name_errors() {
+        let mut l = sample_layout();
+        assert_eq!(
+            layout_nudge(&mut l, "git", 1).unwrap_err(),
+            LayoutEditError::NotPresent
+        );
     }
 }
