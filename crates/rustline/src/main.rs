@@ -339,18 +339,10 @@ fn main() {
                 },
                 DaemonCmd::Install(a) => {
                     let binary = resolve_binary(a.binary.as_deref());
-                    daemon_service::install(
-                        &daemon_service::service_unit_path(),
-                        &binary,
-                        a.write_only,
-                        &daemon_service::RealSystemctl,
-                    );
+                    daemon_service::install(&binary, a.write_only);
                 }
                 DaemonCmd::Uninstall => {
-                    daemon_service::uninstall(
-                        &daemon_service::service_unit_path(),
-                        &daemon_service::RealSystemctl,
-                    );
+                    daemon_service::uninstall();
                 }
             }
         }
