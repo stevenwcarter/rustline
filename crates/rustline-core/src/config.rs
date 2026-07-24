@@ -1194,7 +1194,10 @@ impl Config {
     /// to pin a widget's segment colors ahead of `assign_palette` (W29). Only
     /// widgets that actually set `fg` and/or `bg` are included, so an
     /// unconfigured widget's entry is simply absent (keeping the empty-map,
-    /// byte-identical case cheap and the common case).
+    /// byte-identical case cheap and the common case). Also projects
+    /// `[instances.<name>]` entries with a resolvable `kind` the same way
+    /// (via [`Config::instance_meta`], W46), so a named instance's color
+    /// override is included under its own instance name.
     pub fn color_overrides(&self) -> HashMap<String, ColorOverride> {
         let candidates: [(&str, &ColorOverride); 15] = [
             ("hostname", &self.widgets.hostname.color),
@@ -1213,11 +1216,23 @@ impl Config {
             ("media", &self.widgets.media.color),
             ("throughput", &self.widgets.throughput.color),
         ];
-        candidates
+        let mut overrides: HashMap<String, ColorOverride> = candidates
             .into_iter()
             .filter(|(_, color)| color.fg.is_some() || color.bg.is_some())
             .map(|(name, color)| (name.to_string(), color.clone()))
-            .collect()
+            .collect();
+        for (name, table) in &self.instances {
+            let Some(kind) = Config::instance_kind(table) else {
+                continue;
+            };
+            let Some((color, _, _)) = Config::instance_meta(kind, table) else {
+                continue;
+            };
+            if color.fg.is_some() || color.bg.is_some() {
+                overrides.insert(name.clone(), color);
+            }
+        }
+        overrides
     }
 
     /// Project the clickable built-in widgets into a name→[`WidgetClick`] map,
@@ -1231,7 +1246,10 @@ impl Config {
     /// configured under `[plugins.*]` not `[widgets.*]`, or an unknown range),
     /// which it treats as toggleable to preserve the pre-W36 flip behavior
     /// (invariant #7). Mirrors [`Config::color_overrides`]'s candidate-table
-    /// projector.
+    /// projector. Also projects `[instances.<name>]` entries with a
+    /// resolvable `kind` the same way (via [`Config::instance_meta`], W46),
+    /// so a named instance's toggleability/bindings are included under its
+    /// own instance name.
     pub fn click_map(&self) -> HashMap<String, WidgetClick> {
         let candidates: [(&str, &str, &ClickBindings); 12] = [
             (
@@ -1287,7 +1305,7 @@ impl Config {
                 &self.widgets.throughput.click,
             ),
         ];
-        candidates
+        let mut map: HashMap<String, WidgetClick> = candidates
             .into_iter()
             .map(|(name, alt_format, bindings)| {
                 (
@@ -1298,12 +1316,93 @@ impl Config {
                     },
                 )
             })
-            .collect()
+            .collect();
+        for (name, table) in &self.instances {
+            let Some(kind) = Config::instance_kind(table) else {
+                continue;
+            };
+            let Some((_, alt_format, click)) = Config::instance_meta(kind, table) else {
+                continue;
+            };
+            map.insert(
+                name.clone(),
+                WidgetClick {
+                    toggleable: !alt_format.is_empty(),
+                    bindings: click,
+                },
+            );
+        }
+        map
     }
 
     /// The `kind` of a `[instances.<name>]` table, if present and a string.
     pub fn instance_kind(v: &Value) -> Option<&str> {
         v.get("kind").and_then(Value::as_str)
+    }
+
+    /// Projects a `[instances.<name>]` table's color override, `alt_format`,
+    /// and click bindings, dispatching on `kind` the same way the instance-
+    /// registration pass in `widgets::mod` does — the shared per-kind lookup
+    /// backing both [`Config::color_overrides`] and [`Config::click_map`] so
+    /// a named instance participates in each projection exactly like a base
+    /// widget. `kind` outside the twelve clickable/format-bearing kinds
+    /// Task 5 registers instances for yields `None` (nothing to project); a
+    /// malformed `v` for its kind's Opts falls back to that kind's defaults,
+    /// matching the total, never-panicking parse the registration pass uses.
+    pub fn instance_meta(kind: &str, v: &Value) -> Option<(ColorOverride, String, ClickBindings)> {
+        let t = v.clone();
+        let (color, alt_format, click) = match kind {
+            "datetime" => {
+                let o: DateTimeOpts = t.try_into().unwrap_or_default();
+                (o.color, o.alt_format, o.click)
+            }
+            "lan_ip" => {
+                let o: LanIpOpts = t.try_into().unwrap_or_default();
+                (o.color, o.alt_format, o.click)
+            }
+            "tailscale_ip" => {
+                let o: TailscaleIpOpts = t.try_into().unwrap_or_default();
+                (o.color, o.alt_format, o.click)
+            }
+            "battery" => {
+                let o: BatteryOpts = t.try_into().unwrap_or_default();
+                (o.color, o.alt_format, o.click)
+            }
+            "cpu" => {
+                let o: CpuOpts = t.try_into().unwrap_or_default();
+                (o.color, o.alt_format, o.click)
+            }
+            "memory" => {
+                let o: MemoryOpts = t.try_into().unwrap_or_default();
+                (o.color, o.alt_format, o.click)
+            }
+            "loadavg" => {
+                let o: LoadAvgOpts = t.try_into().unwrap_or_default();
+                (o.color, o.alt_format, o.click)
+            }
+            "git" => {
+                let o: GitOpts = t.try_into().unwrap_or_default();
+                (o.color, o.alt_format, o.click)
+            }
+            "disk" => {
+                let o: DiskOpts = t.try_into().unwrap_or_default();
+                (o.color, o.alt_format, o.click)
+            }
+            "uptime" => {
+                let o: UptimeOpts = t.try_into().unwrap_or_default();
+                (o.color, o.alt_format, o.click)
+            }
+            "media" => {
+                let o: MediaOpts = t.try_into().unwrap_or_default();
+                (o.color, o.alt_format, o.click)
+            }
+            "throughput" => {
+                let o: ThroughputOpts = t.try_into().unwrap_or_default();
+                (o.color, o.alt_format, o.click)
+            }
+            _ => return None,
+        };
+        Some((color, alt_format, click))
     }
 
     /// The set of widget *kinds* a `layout` (a region's name list) references —
@@ -2282,6 +2381,32 @@ middle_click = { open_url = "https://example.com" }
             assert!(!wc.toggleable, "{name} not toggleable by default");
             assert_eq!(wc.bindings, ClickBindings::default());
         }
+    }
+
+    #[test]
+    fn color_overrides_and_click_map_include_instances() {
+        let mut c = Config::default();
+        c.instances.insert(
+            "clk".into(),
+            toml::from_str("kind='datetime'\nalt_format='%H:%M'\nfg={ Indexed = 5 }").unwrap(),
+        );
+        assert!(c.color_overrides().contains_key("clk"));
+        let cm = c.click_map();
+        assert!(cm.get("clk").map(|w| w.toggleable).unwrap_or(false));
+    }
+
+    #[test]
+    fn color_overrides_excludes_instance_without_color() {
+        let mut c = Config::default();
+        c.instances.insert(
+            "clk".into(),
+            toml::from_str("kind='datetime'\nalt_format='%H:%M'").unwrap(),
+        );
+        // No fg/bg set on the instance -> absent from color_overrides, matching
+        // the built-in candidates' "only configured widgets" behavior.
+        assert!(!c.color_overrides().contains_key("clk"));
+        // It's still toggleable in click_map, independent of color.
+        assert!(c.click_map().get("clk").unwrap().toggleable);
     }
 
     #[test]
