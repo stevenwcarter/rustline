@@ -6,6 +6,7 @@ mod cli;
 mod click;
 mod config_cmd;
 mod cpu;
+mod daemon_proto;
 mod disk;
 mod doctor;
 mod git;

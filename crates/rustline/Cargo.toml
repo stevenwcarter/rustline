@@ -22,6 +22,10 @@ tracing-subscriber = { version = "0.3", features = ["registry", "fmt", "ansi"] }
 anyhow = "1"
 toml = "0.9"
 toml_edit = "0.25"
+# Already the workspace's serde (used by rustline-core/rustline-abi/
+# rustline-wasm) — adds no new node to the dep graph. Needed directly here for
+# the daemon wire protocol's Serialize/Deserialize derives (W48).
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # GitHub release download for `plugin install` (W38): rustls only (the `tls`
 # feature = rustls in ureq 2.x — never native-tls/openssl), `json` for the

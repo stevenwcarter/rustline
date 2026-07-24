@@ -1884,6 +1884,7 @@ dependencies = [
  "libc",
  "rustline-core",
  "rustline-wasm",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
