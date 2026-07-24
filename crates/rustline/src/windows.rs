@@ -9,7 +9,6 @@ use rustline_core::WindowCtx;
 /// session lists the server's current session. Empty Vec on ANY failure (tmux
 /// missing, bad session, non-zero exit) — never a panic, never a fabricated
 /// window (invariant: never break the bar).
-#[allow(dead_code)] // wired in Task 2
 pub fn read_windows(session: Option<&str>) -> Vec<WindowCtx> {
     let mut cmd = Command::new("tmux");
     cmd.arg("list-windows");

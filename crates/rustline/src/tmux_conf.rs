@@ -20,17 +20,19 @@ pub struct InitBlockOpts<'a> {
     pub binary: &'a str,
 }
 
-/// Verbatim two-line `status-format[0]` (centered per-window list), copied
-/// from the author's proven `~/.tmux.conf`. Contains no `#(...)` shell calls
-/// — only `#{...}` format refs into the already-`#{q:}`-escaped
-/// `window-status-format`/`window-status-current-format` options the shared
-/// block sets, so injection-safety (invariant #4) holds.
-const STATUS_FORMAT_0: &str = r##"set -g status-format[0] "#[list=on align=#{status-justify}]#[list=left-marker]<#[list=right-marker]>#[list=on]#{W:#[range=window|#{window_index} #{E:window-status-style}#{?#{&&:#{window_last_flag},#{!=:#{E:window-status-last-style},default}}, #{E:window-status-last-style},}#{?#{&&:#{window_bell_flag},#{!=:#{E:window-status-bell-style},default}}, #{E:window-status-bell-style},#{?#{&&:#{||:#{window_activity_flag},#{window_silence_flag}},#{!=:#{E:window-status-activity-style},default}}, #{E:window-status-activity-style},}}]#[push-default]#{T:window-status-format}#[pop-default]#[norange default]#{?loop_last_flag,,#{E:window-status-separator}},#[range=window|#{window_index} list=focus #{?#{!=:#{E:window-status-current-style},default},#{E:window-status-current-style},#{E:window-status-style}}#{?#{&&:#{window_last_flag},#{!=:#{E:window-status-last-style},default}}, #{E:window-status-last-style},}#{?#{&&:#{window_bell_flag},#{!=:#{E:window-status-bell-style},default}}, #{E:window-status-bell-style},#{?#{&&:#{||:#{window_activity_flag},#{window_silence_flag}},#{!=:#{E:window-status-activity-style},default}}, #{E:window-status-activity-style},}}]#[push-default]#{T:window-status-current-format}#[pop-default]#[norange list=on default]#{?loop_last_flag,,#{E:window-status-separator}}}""##;
+/// Two-line `status-format[0]`: the window list, now rendered by ONE batched
+/// `rustline render windows` call instead of a per-window `#{W:}` loop (W42).
+/// The list-marker prefix (`#[list=…]`) still marks the scrollable window
+/// region. Injection-safe: the only tmux var is `--session=#{q:session_name}`;
+/// `@BINARY@` is substituted by `init_block`'s blanket replace (this const now
+/// carries a `#()`, unlike before).
+const STATUS_FORMAT_0: &str = r##"set -g status-format[0] "#[list=on align=#{status-justify}]#[list=left-marker]<#[list=right-marker]>#[list=on]#(@BINARY@ render windows --session=#{q:session_name})""##;
 
 /// Verbatim two-line `status-format[1]` (status-left/right), copied from the
-/// author's proven `~/.tmux.conf`. Same injection-safety note as
-/// [`STATUS_FORMAT_0`]: no `#(...)` shell calls, only `#{...}` refs into the
-/// already-`#{q:}`-escaped `status-left`/`status-right` options.
+/// author's proven `~/.tmux.conf`. Unlike [`STATUS_FORMAT_0`], this one still
+/// has no `#(...)` shell call of its own — only `#{...}` refs into the
+/// already-`#{q:}`-escaped `status-left`/`status-right` options (which
+/// themselves carry the actual `#(...)` calls; see `init_block`).
 const STATUS_FORMAT_1: &str = r##"set -g status-format[1] "#[align=left range=left #{E:status-left-style}]#[push-default]#{T;=/#{status-left-length}:status-left}#[pop-default]#[norange default]#[nolist align=right range=right #{E:status-right-style}]#[push-default]#{T;=/#{status-right-length}:status-right}#[pop-default]#[norange default]""##;
 
 /// The tmux config snippet that wires `rustline` into `status-left`,
@@ -353,25 +355,51 @@ mod tests {
         assert!(b.contains("set -g status 2\n"), "two-line count: {b}");
         assert!(b.contains("set -g status-format[0]"), "top format: {b}");
         assert!(b.contains("set -g status-format[1]"), "bottom format: {b}");
-        // both formats reference the shared status-left/right and window list
-        assert!(b.contains("#{T:window-status-format}"));
+        // format[0] batches the window list via one `render windows` call
+        // (W42); format[1] still references the shared status-right option.
+        assert!(b.contains("render windows --session=#{q:session_name}"));
         assert!(b.contains(":status-right}"));
         // shared wiring still present
         assert!(b.contains("#('/usr/bin/rustline' render left"));
     }
 
     #[test]
-    fn two_line_formats_contain_no_shell_calls() {
-        // invariant #4 in two-line mode: the status-format strings are pure tmux
-        // format refs (#{...}/#[...]) into already-#{q:}-escaped options — never a
-        // #(...) shell call. A later edit that sneaks one in must fail here.
+    fn two_line_status_format_0_batches_window_render() {
+        let mut o = one_line("colour234", "colour255");
+        o.two_line = true;
+        let b = init_block(&o);
+        // The two-line window line is now ONE batched call, injection-safe.
         assert!(
-            !STATUS_FORMAT_0.contains("#("),
-            "STATUS_FORMAT_0 has no shell call"
+            b.contains("#('/usr/bin/rustline' render windows --session=#{q:session_name})"),
+            "batched window render wired: {b}"
         );
+        // No per-window shell call remains inside the window line (the old #{W:} loop
+        // called #{T:window-status-format} = #(rustline render window …) per window).
+        assert!(
+            !b.contains("#{W:"),
+            "the #{{W:}} per-window loop is gone from STATUS_FORMAT_0: {b}"
+        );
+        // Injection safety: session is q-escaped, no bare window vars in a shell call.
+        assert!(
+            b.contains("--session=#{q:session_name}"),
+            "session q-escaped: {b}"
+        );
+    }
+
+    #[test]
+    fn two_line_formats_shell_calls_are_injection_safe() {
+        // STATUS_FORMAT_1 (status-left/right line) still has no shell call.
         assert!(
             !STATUS_FORMAT_1.contains("#("),
             "STATUS_FORMAT_1 has no shell call"
+        );
+        // STATUS_FORMAT_0 now has exactly one: the batched window render, and its
+        // only interpolated tmux var is q-escaped (invariant #4).
+        assert_eq!(STATUS_FORMAT_0.matches("#(").count(), 1, "one batched call");
+        assert!(STATUS_FORMAT_0.contains("render windows --session=#{q:session_name}"));
+        assert!(
+            !STATUS_FORMAT_0.contains("#{window_name}"),
+            "no bare untrusted var"
         );
     }
 

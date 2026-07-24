@@ -38,8 +38,9 @@ use cli::{Cli, Command, DaemonCmd, DaemonRunArgs, PluginCmd, Render};
 use daemon_proto::{RegionKind, RenderArgsWire};
 use rustline_core::{
     Config, Direction, Registry, Theme, ThemeConfig, builtin_theme, render_named_region,
-    render_window, tmux_to_ansi,
+    render_window, render_windows, tmux_to_ansi,
 };
+use windows::read_windows;
 
 /// Print a rendered region to stdout: as ANSI-coloured text (with a trailing
 /// reset and newline, for terminal preview) when `preview` is set, otherwise as
@@ -266,6 +267,15 @@ fn main() {
                     emit(&render_window(&ctx, &registry, &theme), args.preview);
                 }
             }
+        }
+        Command::Render(Render::Windows(args)) => {
+            // In-process, NOT daemon-routed: a systemd/launchd daemon has no
+            // $TMUX to run `tmux list-windows`, and the batched path is
+            // already cheap (lean WindowCtxs, builtins only, no plugins).
+            let registry = Registry::with_builtins(&cfg);
+            let windows = read_windows(args.session.as_deref());
+            let markup = render_windows(&windows, &registry, &theme);
+            emit(&markup, args.preview);
         }
         Command::Init(args) => {
             let binary = resolve_binary(args.binary.as_deref());

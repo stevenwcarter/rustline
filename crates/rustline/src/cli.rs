@@ -317,6 +317,9 @@ pub enum Render {
     Right(RegionArgs),
     /// Render a single window's segment (for `window-status-format`).
     Window(WindowArgs),
+    /// Render a whole session's window list in one call (batched; for the
+    /// two-line status-format[0]). Shells out to `tmux list-windows`.
+    Windows(WindowsArgs),
 }
 
 /// Arguments for rendering a left/right region, sourced from tmux format
@@ -367,6 +370,18 @@ pub struct WindowArgs {
     pub flags: String,
     /// Print the rendered segment in ANSI colour (for manual terminal preview)
     /// instead of raw tmux markup.
+    #[arg(long)]
+    pub preview: bool,
+}
+
+/// Arguments for `rustline render windows` (the batched window-list render).
+#[derive(Args, Default)]
+pub struct WindowsArgs {
+    /// tmux session to list windows for (tmux `#{session_name}`); omitted =
+    /// the server's current session.
+    #[arg(long)]
+    pub session: Option<String>,
+    /// Print the rendered list in ANSI colour instead of raw tmux markup.
     #[arg(long)]
     pub preview: bool,
 }
