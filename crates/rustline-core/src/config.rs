@@ -1125,6 +1125,12 @@ pub struct Config {
     /// File + stderr logging configuration.
     #[serde(default)]
     pub log: LogConfig,
+    /// Extra named widget instances (W46), keyed by instance name. Each value
+    /// is the raw `[instances.<name>]` table; `kind` selects the widget type
+    /// and the remaining keys are that kind's options (re-parsed per kind at
+    /// registration).
+    #[serde(default)]
+    pub instances: HashMap<String, Value>,
 }
 
 impl Config {
@@ -1293,6 +1299,11 @@ impl Config {
                 )
             })
             .collect()
+    }
+
+    /// The `kind` of a `[instances.<name>]` table, if present and a string.
+    pub fn instance_kind(v: &Value) -> Option<&str> {
+        v.get("kind").and_then(Value::as_str)
     }
 }
 
@@ -2198,5 +2209,33 @@ middle_click = { open_url = "https://example.com" }
             assert!(!wc.toggleable, "{name} not toggleable by default");
             assert_eq!(wc.bindings, ClickBindings::default());
         }
+    }
+
+    #[test]
+    fn parses_instances_table_and_kind() {
+        let toml = r#"
+[layout]
+right = ["clock_utc", "disk_data"]
+[instances.clock_utc]
+kind = "datetime"
+timezone = "UTC"
+format = "%H:%MZ"
+[instances.disk_data]
+kind = "disk"
+mount = "/data"
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.instances.len(), 2);
+        let utc = &c.instances["clock_utc"];
+        assert_eq!(Config::instance_kind(utc), Some("datetime"));
+        assert_eq!(utc.get("timezone").and_then(|v| v.as_str()), Some("UTC"));
+    }
+
+    #[test]
+    fn absent_instances_is_empty_and_roundtrips() {
+        let c: Config = toml::from_str("").unwrap();
+        assert!(c.instances.is_empty());
+        let back: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        assert!(back.instances.is_empty());
     }
 }
