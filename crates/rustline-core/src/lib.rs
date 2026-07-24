@@ -10,7 +10,7 @@ pub mod widget;
 pub mod widgets;
 
 pub use ansi::tmux_to_ansi;
-pub use assemble::{assign_palette, render_named_region, render_window};
+pub use assemble::{assign_palette, render_named_region, render_window, render_windows};
 pub use config::{
     ClickBinding, ClickBindings, ColorOverride, Config, LogConfig, PluginConfig, PluginSource,
     ThemeConfig, WidgetClick,

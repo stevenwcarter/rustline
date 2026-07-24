@@ -27,6 +27,7 @@ mod throughput;
 mod tmux_conf;
 mod toggles;
 mod uptime;
+mod windows;
 
 use std::env;
 use std::path::PathBuf;

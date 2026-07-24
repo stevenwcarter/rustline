@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use crate::render::{Direction, RangeGroup, Theme, render_region_ranged, render_window_pill};
-use crate::{ColorOverride, Context, Registry, Segment, Widget};
+use crate::{ColorOverride, Context, Registry, Segment, Widget, WindowCtx};
 
 /// Fill in each segment's background from `theme.palette`, cycling through
 /// it in order, but only where a segment doesn't already carry an explicit
@@ -118,13 +118,9 @@ pub fn render_named_region(
     render_region_ranged(dir, &groups, theme)
 }
 
-/// Render the single `windows` segment as a rounded pill. Unlike
-/// [`render_named_region`], this does not go through
-/// [`render_region`](crate::render::render_region)'s pointed
-/// separators or `assign_palette`: the window list owns a dedicated rounded-cap
-/// pill ([`render_window_pill`]), colored by the theme from the window's
-/// current/inactive state. A panicking or absent window degrades to `""`.
-pub fn render_window(ctx: &Context, registry: &Registry, theme: &Theme) -> String {
+/// One window's rounded pill (no range wrapping). Shared by the single-window
+/// (`render window`) and batched (`render windows`) paths.
+fn window_pill(ctx: &Context, registry: &Registry, theme: &Theme) -> String {
     let widgets = registry.resolve(&["windows".to_string()]);
     let segments: Vec<Segment> = widgets
         .iter()
@@ -137,10 +133,43 @@ pub fn render_window(ctx: &Context, registry: &Registry, theme: &Theme) -> Strin
     render_window_pill(&seg.text, is_current, theme)
 }
 
+/// Render the single `windows` segment as a rounded pill. Unlike
+/// [`render_named_region`], this does not go through
+/// [`render_region`](crate::render::render_region)'s pointed
+/// separators or `assign_palette`: the window list owns a dedicated rounded-cap
+/// pill ([`render_window_pill`]), colored by the theme from the window's
+/// current/inactive state. A panicking or absent window degrades to `""`.
+pub fn render_window(ctx: &Context, registry: &Registry, theme: &Theme) -> String {
+    window_pill(ctx, registry, theme)
+}
+
+/// Render every window's pill in one pass, each wrapped in
+/// `#[range=window|<index>]…#[norange]` so tmux's built-in window-select click
+/// keeps working (the batched output re-emits the same `range=window|IDX`
+/// markers tmux's own `#{W:}` loop used to). Joined with no separator (pills are
+/// self-contained rounded pills, matching `window-status-separator ""`).
+pub fn render_windows(windows: &[WindowCtx], registry: &Registry, theme: &Theme) -> String {
+    windows
+        .iter()
+        .map(|wc| {
+            let ctx = Context {
+                window: Some(wc.clone()),
+                ..Context::default()
+            };
+            let pill = window_pill(&ctx, registry, theme);
+            if pill.is_empty() {
+                String::new()
+            } else {
+                format!("#[range=window|{}]{}#[norange]", wc.index, pill)
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Config, Context, Direction};
+    use crate::{Config, Context, Direction, WindowCtx};
     use chrono::{Local, TimeZone};
 
     fn ctx() -> Context {
@@ -449,6 +478,50 @@ mod tests {
              #[fg=colour31,bg=colour238]\u{e0b0}#[range=user|datetime]#[fg=colour255,bg=colour238] \
              Mon < 2026-07-20 < 17:49 #[norange]#[fg=colour238,bg=colour234]\u{e0b0}#[default]"
         );
+    }
+
+    #[test]
+    fn render_windows_wraps_each_pill_in_window_range() {
+        let reg = Registry::with_builtins(&Config::default());
+        let theme = Theme::default();
+        let windows = vec![
+            WindowCtx {
+                index: "0".into(),
+                name: "shell".into(),
+                flags: "*".into(),
+                is_current: true,
+            },
+            WindowCtx {
+                index: "1".into(),
+                name: "edit".into(),
+                flags: "-".into(),
+                is_current: false,
+            },
+        ];
+        let out = render_windows(&windows, &reg, &theme);
+        // Each window is wrapped in its own window-range group closed by #[norange].
+        assert!(
+            out.contains("#[range=window|0]"),
+            "range for window 0: {out}"
+        );
+        assert!(
+            out.contains("#[range=window|1]"),
+            "range for window 1: {out}"
+        );
+        assert_eq!(
+            out.matches("#[norange]").count(),
+            2,
+            "one norange per pill: {out}"
+        );
+        // The active window's pill differs from the inactive one (accent vs gray).
+        let single_active = render_windows(&windows[..1], &reg, &theme);
+        let single_inactive = render_windows(&windows[1..], &reg, &theme);
+        assert_ne!(
+            single_active, single_inactive,
+            "active vs inactive pill differ"
+        );
+        // Empty slice → empty string.
+        assert_eq!(render_windows(&[], &reg, &theme), "");
     }
 
     #[test]
