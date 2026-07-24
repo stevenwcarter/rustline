@@ -6,6 +6,7 @@ mod cli;
 mod click;
 mod config_cmd;
 mod cpu;
+mod daemon;
 mod daemon_client;
 mod daemon_proto;
 mod disk;
@@ -135,7 +136,7 @@ pub(crate) fn resolve_base_theme(name: &str) -> Option<Theme> {
 
 /// Resolve the effective theme: default → base (file-first, then built-in) →
 /// inline `[theme]` overrides. An unresolvable base warns and falls back.
-fn resolve_theme(cfg: &Config) -> Theme {
+pub(crate) fn resolve_theme(cfg: &Config) -> Theme {
     let base = match cfg.theme.base.as_deref() {
         Some(name) => resolve_base_theme(name).unwrap_or_else(|| {
             tracing::warn!("unknown theme base {name:?}; using default");
