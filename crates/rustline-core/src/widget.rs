@@ -20,12 +20,15 @@ pub trait Widget {
 /// of them keyed by name.
 type Factory = Box<dyn Fn() -> Box<dyn Widget> + Send + Sync>;
 
-/// Where a registered widget came from: compiled into the binary, or
-/// discovered from a WASM plugin at runtime.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Where a registered widget came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WidgetSource {
+    /// Compiled into rustline.
     Builtin,
+    /// Discovered as a `.wasm` plugin.
     Plugin,
+    /// A named `[instances.<name>]` entry of the given built-in `kind` (W46).
+    Instance { kind: String },
 }
 
 /// A description of a registered widget, independent of building an

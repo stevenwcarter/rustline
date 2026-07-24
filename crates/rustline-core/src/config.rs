@@ -18,6 +18,7 @@ use toml::Value;
 
 use crate::Color;
 use crate::render::Theme;
+use crate::widget::{WidgetDescriptor, WidgetSource};
 
 /// Which widgets render in each region of the status bar, by name.
 ///
@@ -242,6 +243,76 @@ pub fn layout_nudge(
         from: Some((region, index)),
         to: Some((region, target)),
     })
+}
+
+/// One row of `widget list` / one entry in the TUI: a selectable widget, what
+/// it is, and where (if anywhere) it currently sits in the layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WidgetPlacement {
+    pub name: String,
+    pub summary: String,
+    pub source: WidgetSource,
+    /// `None` means "available but not currently in any region".
+    pub placement: Option<(Region, usize)>,
+}
+
+/// Every widget a user could put in a layout, with its current placement.
+///
+/// Ordering is built-ins (in registration order) → instances (sorted) →
+/// plugin stems (sorted), which is also the order `widget list` prints and the
+/// TUI's AVAILABLE column shows. An `[instances.<name>]` entry whose name
+/// collides with a built-in is skipped — built-in always wins, the same
+/// precedence `Registry::with_builtins` and `is_builtin_widget_name` enforce.
+pub fn widget_placements(
+    cfg: &Config,
+    descriptors: &[WidgetDescriptor],
+    plugin_names: &[String],
+) -> Vec<WidgetPlacement> {
+    let mut out: Vec<WidgetPlacement> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+
+    let mut push = |name: String, summary: String, source: WidgetSource| {
+        if seen.insert(name.clone()) {
+            let placement = cfg.layout.find(&name);
+            out.push(WidgetPlacement {
+                name,
+                summary,
+                source,
+                placement,
+            });
+        }
+    };
+
+    for d in descriptors {
+        push(d.name.clone(), d.summary.clone(), d.source.clone());
+    }
+    let mut instances: Vec<(&String, &Value)> = cfg.instances.iter().collect();
+    instances.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, value) in instances {
+        if is_builtin_widget_name(name) {
+            continue;
+        }
+        let Some(kind) = Config::instance_kind(value) else {
+            continue;
+        };
+        push(
+            name.clone(),
+            format!("{kind} instance"),
+            WidgetSource::Instance {
+                kind: kind.to_string(),
+            },
+        );
+    }
+    let mut plugins: Vec<&String> = plugin_names.iter().collect();
+    plugins.sort();
+    for name in plugins {
+        push(
+            name.clone(),
+            "wasm plugin".to_string(),
+            WidgetSource::Plugin,
+        );
+    }
+    out
 }
 
 /// Options for the `datetime` widget.
@@ -3034,5 +3105,106 @@ mount = "/data"
             layout_nudge(&mut l, "git", 1).unwrap_err(),
             LayoutEditError::NotPresent
         );
+    }
+
+    #[test]
+    fn placements_mark_where_each_widget_sits_and_leave_the_rest_unplaced() {
+        let cfg = Config {
+            layout: Layout {
+                left: vec!["pane_id".into()],
+                center: vec![],
+                right: vec!["cpu".into(), "weather".into()],
+            },
+            ..Default::default()
+        };
+        let descriptors = vec![
+            WidgetDescriptor {
+                name: "pane_id".into(),
+                summary: "pane id".into(),
+                configurable: true,
+                source: WidgetSource::Builtin,
+            },
+            WidgetDescriptor {
+                name: "cpu".into(),
+                summary: "cpu usage".into(),
+                configurable: true,
+                source: WidgetSource::Builtin,
+            },
+            WidgetDescriptor {
+                name: "git".into(),
+                summary: "git branch".into(),
+                configurable: true,
+                source: WidgetSource::Builtin,
+            },
+        ];
+        let out = widget_placements(&cfg, &descriptors, &["weather".to_string()]);
+
+        let by = |n: &str| out.iter().find(|p| p.name == n).unwrap().clone();
+        assert_eq!(by("pane_id").placement, Some((Region::Left, 0)));
+        assert_eq!(by("cpu").placement, Some((Region::Right, 0)));
+        assert_eq!(by("git").placement, None);
+        assert_eq!(by("weather").placement, Some((Region::Right, 1)));
+        assert_eq!(by("weather").source, WidgetSource::Plugin);
+    }
+
+    #[test]
+    fn placements_include_instances_with_their_kind() {
+        let mut cfg = Config {
+            layout: Layout {
+                left: vec![],
+                center: vec![],
+                right: vec!["clock_utc".into()],
+            },
+            ..Default::default()
+        };
+        cfg.instances.insert(
+            "clock_utc".to_string(),
+            toml::from_str::<toml::Value>("kind = \"datetime\"\ntimezone = \"UTC\"").unwrap(),
+        );
+        let out = widget_placements(&cfg, &[], &[]);
+        let e = out.iter().find(|p| p.name == "clock_utc").unwrap();
+        assert_eq!(
+            e.source,
+            WidgetSource::Instance {
+                kind: "datetime".into()
+            }
+        );
+        assert_eq!(e.placement, Some((Region::Right, 0)));
+    }
+
+    #[test]
+    fn placements_skip_an_instance_that_collides_with_a_builtin() {
+        // Built-in always wins (the W46 precedence guard); an [instances.cpu]
+        // entry must never be offered as its own selectable widget.
+        let mut cfg = Config::default();
+        cfg.instances.insert(
+            "cpu".to_string(),
+            toml::from_str::<toml::Value>("kind = \"datetime\"").unwrap(),
+        );
+        let descriptors = vec![WidgetDescriptor {
+            name: "cpu".into(),
+            summary: "cpu usage".into(),
+            configurable: true,
+            source: WidgetSource::Builtin,
+        }];
+        let out = widget_placements(&cfg, &descriptors, &[]);
+        let cpus: Vec<_> = out.iter().filter(|p| p.name == "cpu").collect();
+        assert_eq!(cpus.len(), 1, "exactly one 'cpu' entry");
+        assert_eq!(cpus[0].source, WidgetSource::Builtin);
+    }
+
+    #[test]
+    fn placements_are_deduped_and_sorted_builtins_then_instances_then_plugins() {
+        let cfg = Config::default();
+        let descriptors = vec![WidgetDescriptor {
+            name: "cpu".into(),
+            summary: "cpu usage".into(),
+            configurable: true,
+            source: WidgetSource::Builtin,
+        }];
+        // The same plugin stem listed twice must yield one entry.
+        let out = widget_placements(&cfg, &descriptors, &["w".to_string(), "w".to_string()]);
+        let names: Vec<&str> = out.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["cpu", "w"]);
     }
 }

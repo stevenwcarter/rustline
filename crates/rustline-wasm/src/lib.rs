@@ -58,6 +58,31 @@ pub fn abi_decision(host: u32, guest: Option<u32>) -> AbiDecision {
     }
 }
 
+/// The `.wasm` stems present in `plugin_dir`, sorted, **without reading or
+/// instantiating any of them**. This is the discovery half of
+/// `register_plugins`, split out so `rustline widget list`/`widget edit` can
+/// show plugin widgets without paying wasm cold-start or running guest code.
+/// A missing or unreadable directory yields an empty vec, never an error.
+pub fn discover_plugin_names(plugin_dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(plugin_dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("wasm") {
+                return None;
+            }
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 /// Discover `*.wasm` in `plugin_dir` and register each **needed** plugin as a
 /// widget. Only plugins whose filename stem appears in `needed` are
 /// instantiated (avoids wasm cold-start for unused plugins). A stem colliding
@@ -70,17 +95,9 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
     // same persisted record, so `rustline plugin denials <name>` has
     // something real to show instead of the default `NoopObserver`.
     let denials_path = denials::denials_path();
-    let Ok(entries) = std::fs::read_dir(plugin_dir) else {
-        return; // missing dir → no plugins, no error
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("wasm") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
+    for stem in discover_plugin_names(plugin_dir) {
+        let path = plugin_dir.join(format!("{stem}.wasm"));
+        let stem = stem.as_str();
         if !needed.iter().any(|n| n == stem) {
             continue;
         }
@@ -184,7 +201,9 @@ mod tests {
 
     use rustline_core::PluginConfig;
 
-    use super::{AbiDecision, DenialObserver, abi_decision, instantiate_named};
+    use super::{
+        AbiDecision, DenialObserver, abi_decision, discover_plugin_names, instantiate_named,
+    };
     use crate::capability::NoopObserver;
 
     #[test]
@@ -209,5 +228,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("w.wasm"), b"not real wasm").unwrap();
         assert!(instantiate_named(dir.path(), "w", &PluginConfig::default(), noop()).is_none());
+    }
+
+    #[test]
+    fn discover_plugin_names_lists_wasm_stems_sorted_and_ignores_other_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("zulu.wasm"), b"\0asm").unwrap();
+        std::fs::write(dir.path().join("alpha.wasm"), b"\0asm").unwrap();
+        std::fs::write(dir.path().join("alpha.toml"), b"name = 'alpha'").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"hi").unwrap();
+
+        assert_eq!(discover_plugin_names(dir.path()), ["alpha", "zulu"]);
+    }
+
+    #[test]
+    fn discover_plugin_names_on_a_missing_dir_is_empty_not_an_error() {
+        assert!(discover_plugin_names(std::path::Path::new("/nonexistent-plugin-dir")).is_empty());
     }
 }

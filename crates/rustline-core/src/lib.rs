@@ -13,8 +13,8 @@ pub use ansi::tmux_to_ansi;
 pub use assemble::{assign_palette, render_named_region, render_window, render_windows};
 pub use config::{
     ClickBinding, ClickBindings, ColorOverride, Config, LayoutChange, LayoutEditError, LogConfig,
-    PluginConfig, PluginSource, Region, ThemeConfig, WidgetClick, layout_disable, layout_enable,
-    layout_move, layout_nudge,
+    PluginConfig, PluginSource, Region, ThemeConfig, WidgetClick, WidgetPlacement, layout_disable,
+    layout_enable, layout_move, layout_nudge, widget_placements,
 };
 pub use context::{
     Battery, BatteryState, Context, CpuUsage, DiskInfo, GitInfo, MediaInfo, MemInfo, NetIface,
