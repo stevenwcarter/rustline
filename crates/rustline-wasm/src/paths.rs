@@ -66,14 +66,18 @@ pub fn ensure_wasmtime_cache_config(root: &Path) -> Option<PathBuf> {
     // root is writable — an unwritable one degrades to `None` here.
     std::fs::create_dir_all(&cache_dir).ok()?;
     let config_path = root.join("wasmtime-cache.toml");
-    // Fast path: the content is deterministic per root, so an existing file is
-    // already correct — avoid rewriting it on every cold spawn.
-    if config_path.is_file() {
+    let body = cache_config_toml(&cache_dir);
+    // Fast path: keep an existing file only if its bytes already match what we
+    // would write. A stale file (e.g. an old `[cache]` schema from a prior
+    // wasmtime) self-heals by rewriting, so wasmtime is never handed a config
+    // this binary wouldn't itself produce (guards the N2 upgrade hazard).
+    // Reading a ~60-byte file is cheap relative to the Cranelift compile the
+    // cache saves.
+    if std::fs::read_to_string(&config_path).ok().as_deref() == Some(body.as_str()) {
         return Some(config_path);
     }
-    let body = cache_config_toml(&cache_dir);
     let tmp = config_path.with_extension("tmp");
-    std::fs::write(&tmp, body).ok()?;
+    std::fs::write(&tmp, &body).ok()?;
     std::fs::rename(&tmp, &config_path).ok()?;
     Some(config_path)
 }
@@ -141,5 +145,23 @@ mod tests {
         let first = ensure_wasmtime_cache_config(dir.path()).unwrap();
         let second = ensure_wasmtime_cache_config(dir.path()).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn cache_config_rewrites_stale_content() {
+        // A pre-existing config in a now-invalid schema (e.g. an old wasmtime's
+        // `enabled` key) must be rewritten to the current format, not returned
+        // verbatim — else a wasmtime bump could be handed a config it rejects
+        // and drop every plugin (N2 upgrade hazard).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("wasmtime-cache")).unwrap();
+        let config_path = dir.path().join("wasmtime-cache.toml");
+        std::fs::write(&config_path, "[cache]\nenabled = true\n").unwrap();
+
+        let p = ensure_wasmtime_cache_config(dir.path()).unwrap();
+        assert_eq!(p, config_path);
+        let now = std::fs::read_to_string(&p).unwrap();
+        assert!(!now.contains("enabled"), "stale key rewritten away: {now}");
+        assert_eq!(now, cache_config_toml(&dir.path().join("wasmtime-cache")));
     }
 }
