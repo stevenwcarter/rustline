@@ -389,6 +389,13 @@ pub enum DaemonCmd {
     Status,
     /// Ask a running daemon to stop.
     Stop,
+    /// Generate a systemd **user** unit for the daemon and install it at
+    /// `$XDG_CONFIG_HOME/systemd/user/rustline-daemon.service`, then (unless
+    /// `--write-only` or `systemctl` isn't available) reload and
+    /// `enable --now` it via `systemctl --user`.
+    Install(DaemonInstallArgs),
+    /// Disable/stop and remove the installed systemd user unit.
+    Uninstall,
 }
 
 /// Arguments for `rustline daemon run` (and bare `rustline daemon`).
@@ -397,6 +404,20 @@ pub struct DaemonRunArgs {
     /// Override the plugin discovery directory (same resolution as render).
     #[arg(long)]
     pub plugin_dir: Option<String>,
+}
+
+/// Arguments for `rustline daemon install`.
+#[derive(Args, Default)]
+pub struct DaemonInstallArgs {
+    /// Write the unit file only; skip `systemctl --user enable --now` (the
+    /// manual command is printed instead).
+    #[arg(long)]
+    pub write_only: bool,
+    /// Override the binary path baked into the unit's `ExecStart` (default:
+    /// the running binary's own resolved absolute path via
+    /// `std::env::current_exe()`).
+    #[arg(long)]
+    pub binary: Option<String>,
 }
 
 /// Arguments for `rustline bench` (feature `bench`).

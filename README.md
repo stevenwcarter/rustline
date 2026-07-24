@@ -696,20 +696,42 @@ rustline daemon stop     # ask it to shut down
 ```
 
 `rustline daemon run` does **not** background itself — run it under a
-supervisor. A systemd **user** unit works well:
+supervisor. The easiest way is the built-in systemd installer:
+
+```bash
+rustline daemon install            # write the unit, enable + start it now
+rustline daemon install --write-only   # write the unit only; you enable it
+rustline daemon uninstall          # disable/stop it and remove the unit
+```
+
+`rustline daemon install` generates a systemd **user** unit at
+`$XDG_CONFIG_HOME/systemd/user/rustline-daemon.service` (falling back to
+`~/.config/systemd/user/`) whose `ExecStart` calls the running binary's own
+resolved absolute path (override with `--binary <path>`), then runs
+`systemctl --user daemon-reload` and `enable --now` for you. If `systemctl`
+isn't on `PATH` (or you passed `--write-only`), it prints the manual
+`systemctl --user enable --now rustline-daemon.service` command instead — the
+unit file is written either way, and a `systemctl` failure is never fatal.
+`rustline daemon uninstall` best-effort disables/stops the unit and removes
+the file; running it again once already uninstalled is a no-op.
+
+For reference, the unit it writes looks like this:
 
 ```ini
-# ~/.config/systemd/user/rustline-daemon.service
+# Managed by `rustline daemon install`.
 [Unit]
 Description=rustline render daemon
 
 [Service]
-ExecStart=%h/.local/bin/rustline daemon run
+ExecStart=/home/you/.local/bin/rustline daemon run
 Restart=on-failure
 
 [Install]
 WantedBy=default.target
 ```
+
+If you'd rather manage it by hand, write that file yourself (with your own
+binary path) and run:
 
 ```bash
 systemctl --user enable --now rustline-daemon.service

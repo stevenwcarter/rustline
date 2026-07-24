@@ -596,8 +596,10 @@ mod guest`): three more worked examples, each covering a host capability
   (`MouseDown{1,2,3}Status`). `Command::Daemon(DaemonArgs)` (W48) wraps an
   `Option<DaemonCmd>` so a bare `rustline daemon` (no subcommand) parses and
   defaults to running the server, same as `rustline daemon run`; `DaemonCmd
-  { Run(DaemonRunArgs { plugin_dir }), Status, Stop }` — `Run`'s
-  `--plugin-dir` overrides discovery like `render`'s does (see CLI below).
+  { Run(DaemonRunArgs { plugin_dir }), Status, Stop, Install(DaemonInstallArgs
+  { write_only, binary }), Uninstall }` — `Run`'s `--plugin-dir` overrides
+  discovery like `render`'s does, and `Install`'s `--write-only`/`--binary`
+  drive the systemd installer (see `daemon_service.rs` below and CLI below).
 - `battery.rs` — `read_battery()`, a `#[cfg(target_os)]` read surface (one of
   three — see `cpu.rs`/`memory.rs` below): a Linux sysfs
   (`/sys/class/power_supply/*/{capacity,status}`) arm and a macOS
@@ -753,6 +755,23 @@ mod guest`): three more worked examples, each covering a host capability
   both `rustline daemon status` and `doctor`'s advisory check) and `pub fn
   stop() -> io::Result<()>` (connect + `Shutdown`) round out the client-side
   control operations.
+- `daemon_service.rs` — `rustline daemon install|uninstall`: generates a
+  systemd **user** unit for the daemon and installs it at
+  `$XDG_CONFIG_HOME/systemd/user/rustline-daemon.service` (fallback
+  `~/.config/systemd/user/`, `service_unit_path()`). `service_unit(binary) ->
+  String` (pure) renders the unit text with `ExecStart=<binary> daemon run` +
+  `Restart=on-failure`. `systemctl --user` itself sits behind a `Systemctl`
+  trait (`available`/`daemon_reload`/`enable_now`/`disable_now`) — the same
+  seam `click.rs`'s `ClickExecutor` uses — so `install`/`uninstall` are
+  unit-tested with a recording fake; `RealSystemctl` is the only production
+  impl, every method best-effort (spawn failure/non-zero exit → `false`,
+  never a panic). `install` writes the unit (overwriting/reporting a replace),
+  then either prints the manual `systemctl --user enable --now` command
+  (`--write-only`, or `systemctl` absent from `PATH`) or reloads + enables
+  it; `uninstall` best-effort disables/stops the unit, removes the file if
+  present, and reloads — safe to run again once already uninstalled. Neither
+  ever treats a `systemctl` failure as fatal: the unit file is the durable
+  part of either operation.
 - `click.rs` — click resolution + dispatch (W36): `resolve_click(&Config,
   range, button) -> ClickAction` (`{Toggle, OpenUrl, Run, NoOp}`, pure over the
   config) and `dispatch(action, range, &impl ClickExecutor)`. The
@@ -1128,6 +1147,21 @@ config-file path for every subcommand that reads or writes it (default:
   One caveat: a per-invocation `render --plugin-dir=X` is ignored while a
   daemon is reachable (the wire protocol carries no `plugin_dir`; the daemon
   always uses whatever `--plugin-dir` it was started with).
+- `rustline daemon install [--write-only] [--binary <path>]` — generate a
+  systemd **user** unit (`ExecStart=<binary> daemon run`, `binary` defaulting
+  to the running binary's own resolved absolute path, same resolution `init`
+  uses) and write it to
+  `$XDG_CONFIG_HOME/systemd/user/rustline-daemon.service` (fallback
+  `~/.config/systemd/user/`), reporting if it replaced an existing unit. Then,
+  unless `--write-only` or `systemctl` isn't on `PATH`, runs `systemctl --user
+  daemon-reload` and `enable --now rustline-daemon.service`; either way it
+  prints the manual `systemctl --user enable --now …` command as a fallback. A
+  `systemctl` failure is never fatal — the unit file is already written.
+- `rustline daemon uninstall` — best-effort `systemctl --user disable --now`
+  the unit (ignoring "not loaded"), remove the installed unit file if
+  present, and reload the user daemon-reload cache; prints what it did,
+  including a "nothing to remove" note if the unit was already gone. Safe to
+  run more than once.
 - `rustline bench [--only regions|widgets|sources|plugins|all] [--iters N]
   [--real-iters N] [--warmup N] [--cold] [--format table|markdown]
   [--output FILE] [--plugin-dir DIR] [--state-dir DIR]` — feature-gated

@@ -9,6 +9,7 @@ mod cpu;
 mod daemon;
 mod daemon_client;
 mod daemon_proto;
+mod daemon_service;
 mod disk;
 mod doctor;
 mod git;
@@ -336,6 +337,21 @@ fn main() {
                         std::process::exit(1);
                     }
                 },
+                DaemonCmd::Install(a) => {
+                    let binary = resolve_binary(a.binary.as_deref());
+                    daemon_service::install(
+                        &daemon_service::service_unit_path(),
+                        &binary,
+                        a.write_only,
+                        &daemon_service::RealSystemctl,
+                    );
+                }
+                DaemonCmd::Uninstall => {
+                    daemon_service::uninstall(
+                        &daemon_service::service_unit_path(),
+                        &daemon_service::RealSystemctl,
+                    );
+                }
             }
         }
         Command::Completions { shell } => {
