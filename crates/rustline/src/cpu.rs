@@ -59,9 +59,10 @@ const HISTORY_SAMPLE_NAME: &str = "cpu-history";
 /// Push `current_percent` onto the persisted cpu% history ring, truncate to
 /// the last `spark_width` readings, persist it back, and return the
 /// resulting history (oldest first) for `Context.cpu_history`. Called only
-/// when the `cpu` widget's `format` actually references `{spark}` (see
-/// `build_context.rs`) — an unreferenced history costs a read+write for
-/// nothing, keeping `{spark}`-absent output byte-identical (no I/O at all).
+/// when the `cpu` widget's `format` or `alt_format` actually references
+/// `{spark}` (see `build_context.rs`) — an unreferenced history costs a
+/// read+write for nothing, keeping `{spark}`-absent output byte-identical (no
+/// I/O at all).
 pub fn read_cpu_history(state_dir: &Path, current_percent: f32, spark_width: usize) -> Vec<f32> {
     let mut history = crate::sample_store::read_sample(state_dir, HISTORY_SAMPLE_NAME)
         .as_deref()

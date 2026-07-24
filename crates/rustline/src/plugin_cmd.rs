@@ -149,6 +149,9 @@ fn plugin_list_json(cfg: &Config, plugin_dir: &Path) -> String {
         .iter()
         .map(|(name, pc)| PluginEntryJson {
             name,
+            // Display keeps `source` a flat string for the `string|null` JSON schema; the
+            // future-only Url/Path PluginSource variants would Display as "url: X"/"path: X"
+            // — revisit if install-by-url/path ships.
             source: pc.source.as_ref().map(|s| s.to_string()),
             tag: pc.tag.as_deref(),
             allowed_urls: &pc.allowed_urls,

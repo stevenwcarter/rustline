@@ -163,8 +163,9 @@ struct ThemeEntryJson {
 }
 
 /// The `theme list --json` payload: one entry per built-in (in registration
-/// order) then per themes-dir file. Shares the active/shadowed logic with
-/// `list_lines` so the human and JSON views can't drift.
+/// order) then per themes-dir file. Mirrors `list_lines`'s active/shadowed
+/// logic (re-derived, not shared) — pinned to it by the shadow+active
+/// characterization test.
 pub(crate) fn theme_list_json(active: &str, files: &[String]) -> String {
     let mut entries = Vec::new();
     for name in builtin_theme_names() {

@@ -32,8 +32,9 @@ const HISTORY_SAMPLE_NAME: &str = "memory-history";
 /// Push `current_percent` onto the persisted memory-used% history ring,
 /// truncate to the last `spark_width` readings, persist it back, and return
 /// the resulting history (oldest first) for `Context.mem_history`. Called
-/// only when the `memory` widget's `format` actually references `{spark}`
-/// (see `build_context.rs`) — mirrors `cpu.rs`'s `read_cpu_history`.
+/// only when the `memory` widget's `format` or `alt_format` actually
+/// references `{spark}` (see `build_context.rs`) — mirrors `cpu.rs`'s
+/// `read_cpu_history`.
 pub fn read_memory_history(state_dir: &Path, current_percent: f32, spark_width: usize) -> Vec<f32> {
     let mut history = crate::sample_store::read_sample(state_dir, HISTORY_SAMPLE_NAME)
         .as_deref()

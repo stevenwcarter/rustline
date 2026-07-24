@@ -49,7 +49,7 @@ pub struct Context {
     pub cpu: Option<CpuUsage>,
     /// Recent cpu% readings (oldest first), persisted across invocations and
     /// read once at build time — ONLY when the `cpu` widget's configured
-    /// `format` contains the literal `{spark}` (see
+    /// `format` or `alt_format` references the literal `{spark}` (see
     /// `crates/rustline/src/build_context.rs`); otherwise left empty, doing no
     /// history I/O at all. Feeds the `cpu` widget's `{spark}` placeholder
     /// (`widgets::spark::sparkline`). `#[serde(default)]` keeps
@@ -61,8 +61,8 @@ pub struct Context {
     pub memory: Option<MemInfo>,
     /// Recent memory-used% readings (oldest first), same gating/persistence
     /// story as [`Context::cpu_history`] but keyed on the `memory` widget's
-    /// format; feeds `memory`'s `{spark}` placeholder. `#[serde(default)]`
-    /// for the same reason as `cpu_history`.
+    /// `format`/`alt_format`; feeds `memory`'s `{spark}` placeholder.
+    /// `#[serde(default)]` for the same reason as `cpu_history`.
     #[serde(default)]
     pub mem_history: Vec<f32>,
     /// Git branch/status snapshot for `pane_current_path`, read once at build
@@ -99,10 +99,10 @@ pub struct Context {
     /// `ctx.throughputs.get(&self.iface_key)`, so multiple `throughput`
     /// instances configured with different `interface`s each read their own
     /// rate. The singular `throughput` field above is no longer read by the
-    /// widget; it is retained only for symmetry/additivity and — unlike
-    /// `disk` — is not wire-mirrored. Neither this map nor `throughput`
-    /// appears in `WireContext`. `#[serde(default)]` keeps deserialization
-    /// total across host/guest version skew (invariant #2).
+    /// widget; it is retained for symmetry/additivity and IS wire-mirrored
+    /// (`WireContext.throughput`, W54) — this `throughputs` map is the one
+    /// that stays host-only. `#[serde(default)]` keeps deserialization total
+    /// across host/guest version skew (invariant #2).
     #[serde(default)]
     pub throughputs: BTreeMap<String, Throughput>,
     /// System uptime in seconds, read once at build time (only when the
