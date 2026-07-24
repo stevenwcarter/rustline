@@ -193,6 +193,7 @@ pub(crate) fn build_throughput(name: &str, o: &ThroughputOpts) -> Box<dyn Widget
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
+        iface_key: o.interface.clone().unwrap_or_default(),
     })
 }
 
@@ -503,7 +504,9 @@ mod tests {
             memory: None,
             git: None,
             disk: None,
+            disks: Default::default(),
             throughput: None,
+            throughputs: Default::default(),
             os: String::new(),
             arch: String::new(),
             uptime: None,
@@ -721,13 +724,18 @@ mod tests {
         let reg = Registry::with_builtins(&cfg);
         assert!(reg.contains("disk"));
 
+        // The base `disk` widget reads `cfg.widgets.disk.mount` (default "/")
+        // as its lookup key into `Context.disks` (W46).
         let mut c = ctx(Vec::new());
         let g = 1024u64.pow(3);
-        c.disk = Some(DiskInfo {
-            total_bytes: 16 * g,
-            used_bytes: 6 * g,
-            available_bytes: 10 * g,
-        });
+        c.disks.insert(
+            cfg.widgets.disk.mount.clone(),
+            DiskInfo {
+                total_bytes: 16 * g,
+                used_bytes: 6 * g,
+                available_bytes: 10 * g,
+            },
+        );
         let widgets = reg.resolve(&["disk".into()]);
         let texts: Vec<String> = widgets
             .iter()
@@ -737,9 +745,9 @@ mod tests {
         // default format " {used}/{total}".
         assert_eq!(texts, vec![" 6.0G/16G".to_string()]);
 
-        // No disk info + default (empty) down_format -> widget skipped.
-        let mut c0 = ctx(Vec::new());
-        c0.disk = None;
+        // No entry for the configured mount + default (empty) down_format ->
+        // widget skipped.
+        let c0 = ctx(Vec::new());
         let widgets = reg.resolve(&["disk".into()]);
         let texts: Vec<String> = widgets
             .iter()
@@ -819,11 +827,17 @@ mod tests {
         let reg = Registry::with_builtins(&cfg);
         assert!(reg.contains("throughput"));
 
+        // The base `throughput` widget reads `cfg.widgets.throughput.interface`
+        // (default `None` -> "") as its lookup key into `Context.throughputs`
+        // (W46).
         let mut c = ctx(Vec::new());
-        c.throughput = Some(Throughput {
-            down_bytes_per_sec: 1024,
-            up_bytes_per_sec: 2048,
-        });
+        c.throughputs.insert(
+            cfg.widgets.throughput.interface.clone().unwrap_or_default(),
+            Throughput {
+                down_bytes_per_sec: 1024,
+                up_bytes_per_sec: 2048,
+            },
+        );
         let widgets = reg.resolve(&["throughput".into()]);
         let texts: Vec<String> = widgets
             .iter()
@@ -833,9 +847,9 @@ mod tests {
         // default format " {down} {up}".
         assert_eq!(texts, vec![" 1.0K/s 2.0K/s".to_string()]);
 
-        // No throughput reading + default (empty) down_format -> widget skipped.
-        let mut c0 = ctx(Vec::new());
-        c0.throughput = None;
+        // No entry for the configured interface key + default (empty)
+        // down_format -> widget skipped.
+        let c0 = ctx(Vec::new());
         let widgets = reg.resolve(&["throughput".into()]);
         let texts: Vec<String> = widgets
             .iter()

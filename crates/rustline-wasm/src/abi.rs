@@ -34,7 +34,7 @@ pub fn parse_render_output(s: &str) -> Vec<Segment> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use chrono::{DateTime, Local, TimeZone};
     use rustline_core::{
@@ -92,7 +92,13 @@ mod tests {
                 used_bytes: 200 * 1024 * 1024 * 1024,
                 available_bytes: 300 * 1024 * 1024 * 1024,
             }),
+            // Per-instance maps (W46) aren't mirrored on `WireContext` either
+            // — same pre-existing gap noted below for `throughput`/`uptime`/
+            // `media` — so this test leaves them empty rather than asserting
+            // on them.
+            disks: BTreeMap::new(),
             throughput: None,
+            throughputs: BTreeMap::new(),
             os: "linux".into(),
             arch: "x86_64".into(),
             uptime: Some(86_400 * 3 + 3600 * 4), // 3d 4h

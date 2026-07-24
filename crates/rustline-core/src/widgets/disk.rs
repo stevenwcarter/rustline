@@ -2,11 +2,14 @@ use crate::widgets::bar;
 use crate::widgets::memory::format_bytes;
 use crate::{Context, Segment, Widget};
 
-/// Renders filesystem usage for a configured mount from `Context::disk`.
-/// Pure — reads only that field. Structured like `MemoryWidget` (used/total/
-/// avail/percent/bar plus a warn/crit threshold badge), minus an `{icon}`
-/// placeholder, plus a static `{mount}` placeholder for the configured mount
-/// string (not read from `Context` — it's widget config, not a live signal).
+/// Renders filesystem usage for a configured mount, read from
+/// `Context.disks` keyed by this instance's own `mount` (W46 — multiple
+/// `disk` widget instances with different mounts each read their own entry
+/// rather than sharing `Context.disk`). Pure — reads only that map. Structured
+/// like `MemoryWidget` (used/total/avail/percent/bar plus a warn/crit
+/// threshold badge), minus an `{icon}` placeholder, plus a static `{mount}`
+/// placeholder for the configured mount string (not read from `Context` —
+/// it's widget config, not a live signal).
 pub struct DiskWidget {
     /// Registry/layout name; the toggle key threaded through render + click,
     /// and this instance's range name (invariant #7).
@@ -22,8 +25,8 @@ pub struct DiskWidget {
 
 impl Widget for DiskWidget {
     fn render(&self, ctx: &Context) -> Vec<Segment> {
-        match ctx.disk {
-            Some(d) => {
+        match ctx.disks.get(&self.mount) {
+            Some(&d) => {
                 let fraction = if d.total_bytes == 0 {
                     0.0
                 } else {
@@ -73,12 +76,18 @@ impl Widget for DiskWidget {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::{Context, DiskInfo, Widget};
     use chrono::{Local, TimeZone};
 
+    /// Builds a `Context` with `disk` populated under the "/" key of
+    /// `disks` — the mount every test widget below uses via `w()`'s default
+    /// `mount: "/"` (see `DiskWidget::render`'s `ctx.disks.get(&self.mount)`
+    /// lookup, W46).
     fn ctx(disk: Option<DiskInfo>) -> Context {
-        Context {
+        let mut c = Context {
             session_name: "0".into(),
             window_index: "0".into(),
             pane_index: "0".into(),
@@ -96,8 +105,10 @@ mod tests {
             cpu: None,
             memory: None,
             git: None,
-            disk,
+            disk: None,
+            disks: BTreeMap::new(),
             throughput: None,
+            throughputs: BTreeMap::new(),
             os: String::new(),
             arch: String::new(),
             uptime: None,
@@ -106,7 +117,11 @@ mod tests {
             cpu_history: Vec::new(),
             mem_history: Vec::new(),
             colors: Default::default(),
+        };
+        if let Some(d) = disk {
+            c.disks.insert("/".to_string(), d);
         }
+        c
     }
 
     fn disk(total: u64, used: u64, avail: u64) -> Option<DiskInfo> {
@@ -148,10 +163,23 @@ mod tests {
 
     #[test]
     fn renders_mount_from_widget_config_not_context() {
+        // The `{mount}` placeholder always comes from the widget's own
+        // `mount` field, never a `Context` field — but `mount` also now
+        // selects which `disks` entry is read (W46), so the data must be
+        // keyed under that same mount for the widget to render it at all.
         let g = 1024u64.pow(3);
         let mut widget = w("{mount}: {percent}%", "");
         widget.mount = "/home".into();
-        let out = widget.render(&ctx(disk(16 * g, 8 * g, 8 * g)));
+        let mut c = ctx(None);
+        c.disks.insert(
+            "/home".to_string(),
+            DiskInfo {
+                total_bytes: 16 * g,
+                used_bytes: 8 * g,
+                available_bytes: 8 * g,
+            },
+        );
+        let out = widget.render(&c);
         assert_eq!(out[0].text, "/home: 50%");
     }
 
@@ -217,6 +245,29 @@ mod tests {
         let out = w("{percent}%", "").render(&c);
         assert_eq!(out[0].style.bg, Some(crate::Color::Indexed(196)));
         assert!(out[0].style.bold);
+    }
+
+    #[test]
+    fn disk_widget_reads_its_mount_from_disks_map() {
+        let mut c = Context::default();
+        let g = 1024u64.pow(3);
+        c.disks.insert(
+            "/data".into(),
+            DiskInfo {
+                total_bytes: 10 * g,
+                used_bytes: 4 * g,
+                available_bytes: 6 * g,
+            },
+        );
+        let w = crate::widgets::build_disk(
+            "disk_data",
+            &crate::config::DiskOpts {
+                mount: "/data".into(),
+                ..Default::default()
+            },
+        );
+        let texts: Vec<String> = w.render(&c).into_iter().map(|s| s.text).collect();
+        assert_eq!(texts, vec![" 4.0G/10G".to_string()]); // default " {used}/{total}"
     }
 
     #[test]

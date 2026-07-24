@@ -1,6 +1,7 @@
 //! Build a [`Context`] from CLI arguments plus live host state (env vars,
 //! load average, hostname, wall clock).
 
+use std::collections::BTreeMap;
 use std::env;
 
 use crate::cli::{RegionArgs, WindowArgs};
@@ -132,10 +133,29 @@ pub fn build_region_context(
     } else {
         None
     };
+    // Mirrored into `disks` (W46) keyed by the same mount the base `disk`
+    // widget reads (`cfg.widgets.disk.mount`), so it resolves via
+    // `ctx.disks.get(&self.mount)` like any other instance. Per-instance
+    // reads for additional `[instances.*]` disk widgets configured with a
+    // *different* mount are a later task's job (W46 continuation) — this is
+    // just the base reading already computed above, reused rather than
+    // re-read.
+    let disks = match disk {
+        Some(d) => BTreeMap::from([(disk_mount.to_string(), d)]),
+        None => BTreeMap::new(),
+    };
     let throughput = if layout_needs(layout, "throughput") {
         crate::throughput::read_throughput(&rustline_wasm::state_root(), throughput_interface)
     } else {
         None
+    };
+    // Mirrored into `throughputs` (W46) keyed the same way `ThroughputWidget`
+    // computes its own `iface_key` (`interface.unwrap_or_default()`), same
+    // base-reading-reuse rationale as `disks` above.
+    let iface_key = throughput_interface.unwrap_or_default().to_string();
+    let throughputs = match &throughput {
+        Some(t) => BTreeMap::from([(iface_key, t.clone())]),
+        None => BTreeMap::new(),
     };
     // Interfaces feed both IP widgets, so either one names the read.
     let interfaces = if layout_needs(layout, "lan_ip") || layout_needs(layout, "tailscale_ip") {
@@ -209,7 +229,9 @@ pub fn build_region_context(
         mem_history,
         git,
         disk,
+        disks,
         throughput,
+        throughputs,
         uptime,
         media,
         os: std::env::consts::OS.to_string(),

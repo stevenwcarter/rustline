@@ -45,7 +45,12 @@ pub fn sample_context(show_alerts: bool) -> Context {
         } else {
             (12.0, 6, 10, 82, 200, 300)
         };
-    Context {
+    let disk_info = DiskInfo {
+        total_bytes: 512 * gib,
+        used_bytes: disk_used_gib * gib,
+        available_bytes: disk_avail_gib * gib,
+    };
+    let mut ctx = Context {
         session_name: "0".into(),
         window_index: "1".into(),
         pane_index: "0".into(),
@@ -87,11 +92,7 @@ pub fn sample_context(show_alerts: bool) -> Context {
             staged: 1,
             unstaged: 2,
         }),
-        disk: Some(DiskInfo {
-            total_bytes: 512 * gib,
-            used_bytes: disk_used_gib * gib,
-            available_bytes: disk_avail_gib * gib,
-        }),
+        disk: Some(disk_info),
         os: "linux".into(),
         arch: "x86_64".into(),
         uptime: Some(86_400 * 3 + 3600 * 4), // 3d 4h
@@ -101,7 +102,15 @@ pub fn sample_context(show_alerts: bool) -> Context {
             status: "Playing".into(),
         }),
         ..Default::default()
-    }
+    };
+    // Mirror the base disk reading into the per-instance map (W46) under the
+    // default mount "/" — the key `sample_context.rs`'s own `disk_widget()`
+    // test fixture and `Config::default()`'s `disk.mount` both use — so
+    // consumers that render a `DiskWidget` against this synthetic Context
+    // (e.g. this module's own tests, `bench`'s pure pass) still see data
+    // instead of degrading to `down_format`.
+    ctx.disks.insert("/".to_string(), disk_info);
+    ctx
 }
 
 #[cfg(test)]

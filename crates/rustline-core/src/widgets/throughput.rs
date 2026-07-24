@@ -1,10 +1,13 @@
 use crate::widgets::memory::format_bytes;
 use crate::{Context, Segment, Widget};
 
-/// Renders network throughput (download/upload bytes-per-second) from
-/// `Context::throughput`. Pure — reads only that field. `{down}`/`{up}` are
-/// human-readable binary sizes (via `memory.rs`'s `format_bytes`) suffixed
-/// `/s`, e.g. `1.2M/s`. Not threshold-aware (no `alert.rs` use, unlike
+/// Renders network throughput (download/upload bytes-per-second), read from
+/// `Context.throughputs` keyed by this instance's own `iface_key` (W46 —
+/// multiple `throughput` widget instances pinned to different interfaces
+/// each read their own entry rather than sharing `Context.throughput`).
+/// Pure — reads only that map. `{down}`/`{up}` are human-readable binary
+/// sizes (via `memory.rs`'s `format_bytes`) suffixed `/s`, e.g. `1.2M/s`.
+/// Not threshold-aware (no `alert.rs` use, unlike
 /// `cpu`/`memory`/`battery`/`loadavg`/`disk`) — a throughput rate has no
 /// universally "unhealthy" ceiling the way a percentage does.
 ///
@@ -19,11 +22,14 @@ pub struct ThroughputWidget {
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
+    /// The configured interface, or `""` to aggregate every non-loopback
+    /// interface — the key this instance looks up in `Context.throughputs`.
+    pub iface_key: String,
 }
 
 impl Widget for ThroughputWidget {
     fn render(&self, ctx: &Context) -> Vec<Segment> {
-        match &ctx.throughput {
+        match ctx.throughputs.get(&self.iface_key) {
             Some(t) => {
                 let fmt =
                     crate::widgets::active_format(ctx, &self.name, &self.format, &self.alt_format);
@@ -54,12 +60,19 @@ impl Widget for ThroughputWidget {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::{Context, Throughput, Widget};
     use chrono::{Local, TimeZone};
 
+    /// Builds a `Context` with `throughput` populated under the `""`
+    /// (aggregate) key of `throughputs` — the key every test widget below
+    /// uses via `w()`'s default `iface_key: ""` (see
+    /// `ThroughputWidget::render`'s `ctx.throughputs.get(&self.iface_key)`
+    /// lookup, W46).
     fn ctx(throughput: Option<Throughput>) -> Context {
-        Context {
+        let mut c = Context {
             session_name: "0".into(),
             window_index: "0".into(),
             pane_index: "0".into(),
@@ -78,7 +91,9 @@ mod tests {
             memory: None,
             git: None,
             disk: None,
-            throughput,
+            disks: BTreeMap::new(),
+            throughput: None,
+            throughputs: BTreeMap::new(),
             os: String::new(),
             arch: String::new(),
             uptime: None,
@@ -87,7 +102,11 @@ mod tests {
             cpu_history: Vec::new(),
             mem_history: Vec::new(),
             colors: Default::default(),
+        };
+        if let Some(t) = throughput {
+            c.throughputs.insert(String::new(), t);
         }
+        c
     }
 
     fn rate(down: u64, up: u64) -> Option<Throughput> {
@@ -103,6 +122,7 @@ mod tests {
             format: format.into(),
             alt_format: String::new(),
             down_format: down.into(),
+            iface_key: String::new(),
         }
     }
 
@@ -139,9 +159,34 @@ mod tests {
             format: "{down}".into(),
             alt_format: "{down}/{up}".into(),
             down_format: String::new(),
+            iface_key: String::new(),
         }
         .render(&c);
         assert_eq!(out[0].text, "1.0K/s/2.0K/s");
+    }
+
+    #[test]
+    fn throughput_widget_reads_its_interface_from_throughputs_map() {
+        let mut c = Context::default();
+        c.throughputs.insert(
+            "eth0".to_string(),
+            Throughput {
+                down_bytes_per_sec: 1024,
+                up_bytes_per_sec: 2048,
+            },
+        );
+        let widget = ThroughputWidget {
+            iface_key: "eth0".into(),
+            ..w("{down} {up}", "")
+        };
+        let out = widget.render(&c);
+        assert_eq!(out[0].text, "1.0K/s 2.0K/s");
+        // A different-keyed instance sees nothing for "eth0"'s data.
+        let other = ThroughputWidget {
+            iface_key: "wlan0".into(),
+            ..w("{down} {up}", "")
+        };
+        assert!(other.render(&c).is_empty());
     }
 
     #[test]

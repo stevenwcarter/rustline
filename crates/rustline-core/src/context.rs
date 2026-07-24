@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Local, TimeZone};
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,17 @@ pub struct Context {
     /// time (only when the `disk` widget is in the active layout — see
     /// `build_context.rs`); `None` when the mount can't be `statvfs`'d.
     pub disk: Option<DiskInfo>,
+    /// Per-instance disk-usage readings (W46), keyed by mount path. Lets
+    /// multiple `disk` widget instances configured with different `mount`s
+    /// each read their own snapshot instead of sharing the single `disk`
+    /// field above (which stays the base/legacy reading a plain, unnamed
+    /// `disk` widget consults). A `DiskWidget` reads its own entry via
+    /// `ctx.disks.get(&self.mount)`. `#[serde(default)]` keeps
+    /// deserialization total across host/guest version skew (invariant #2).
+    /// NOT mirrored into `WireContext` — multi-instance disk reads aren't
+    /// exposed to WASM guests.
+    #[serde(default)]
+    pub disks: BTreeMap<String, DiskInfo>,
     /// Network throughput (down/up bytes-per-second) snapshot, read once at
     /// build time (only when the `throughput` widget is in the active layout
     /// — see `build_context.rs`); `None` on the first invocation (nothing yet
@@ -83,6 +94,17 @@ pub struct Context {
     /// below.
     #[serde(default)]
     pub throughput: Option<Throughput>,
+    /// Per-instance network-throughput readings (W46), keyed by interface
+    /// name (`""` = aggregate of all non-loopback interfaces). Lets multiple
+    /// `throughput` widget instances configured with different `interface`s
+    /// each read their own rate instead of sharing the single `throughput`
+    /// field above (which stays the base/legacy reading). A
+    /// `ThroughputWidget` reads its own entry via
+    /// `ctx.throughputs.get(&self.iface_key)`. `#[serde(default)]` keeps
+    /// deserialization total across host/guest version skew (invariant #2).
+    /// NOT mirrored into `WireContext`.
+    #[serde(default)]
+    pub throughputs: BTreeMap<String, Throughput>,
     /// System uptime in seconds, read once at build time (only when the
     /// `uptime` widget is in the active layout — see `build_context.rs`);
     /// `None` when the platform is unsupported or the read failed.
@@ -143,7 +165,9 @@ impl Default for Context {
             mem_history: Vec::new(),
             git: None,
             disk: None,
+            disks: BTreeMap::new(),
             throughput: None,
+            throughputs: BTreeMap::new(),
             uptime: None,
             media: None,
             os: String::new(),
@@ -202,6 +226,8 @@ mod tests {
         assert!(ctx.throughput.is_none());
         assert!(ctx.cpu_history.is_empty());
         assert!(ctx.mem_history.is_empty());
+        assert!(ctx.disks.is_empty());
+        assert!(ctx.throughputs.is_empty());
     }
 
     #[test]
