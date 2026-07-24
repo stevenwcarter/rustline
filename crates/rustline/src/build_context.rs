@@ -7,14 +7,6 @@ use std::env;
 use crate::cli::{RegionArgs, WindowArgs};
 use rustline_core::{Config, Context, NetIface, Theme, WindowCtx};
 
-/// A widget accumulates `{spark}` history when EITHER its `format` or its
-/// click-toggle `alt_format` references `{spark}` — a `{spark}` that only
-/// appears in `alt_format` (a compact default that expands on click) must
-/// still populate the ring, else it renders permanently empty (W56).
-fn spark_referenced(format: &str, alt_format: &str) -> bool {
-    format.contains("{spark}") || alt_format.contains("{spark}")
-}
-
 /// Read the 1/5/15-minute load average via `getloadavg(3)`.
 ///
 /// Returns `None` if the platform call doesn't report all three samples
@@ -75,10 +67,12 @@ pub(crate) fn read_interfaces() -> Vec<NetIface> {
 /// `Context.disks`/`throughputs` get every instance's mount/interface, while
 /// the singular `Context.disk`/`throughput` stay the *base* widget's entry so
 /// the built-in `disk`/`throughput` widget resolves unchanged. The cpu/memory
-/// `{spark}` history is read+persisted only when the base widget both is in
-/// the layout AND its configured `format` **or** `alt_format` references
-/// `{spark}` — otherwise `Context.cpu_history`/`mem_history` stay empty with
-/// no history I/O, keeping `{spark}`-absent output byte-identical (W45, W56).
+/// `{spark}` history is one shared ring per kind, read+persisted when EITHER
+/// the base widget or any `cpu`/`memory`-kind `[instances.<name>]` in the
+/// layout references `{spark}` in its `format`/`alt_format`
+/// ([`Config::spark_referenced_in_layout`]) — otherwise `Context.cpu_history`/
+/// `mem_history` stay empty with no history I/O, keeping `{spark}`-absent
+/// output byte-identical (W45, W56, W57).
 pub fn build_region_context(
     args: &RegionArgs,
     layout: &[String],
@@ -147,13 +141,11 @@ pub fn build_region_context(
         None
     };
     let cpu_history = match cpu {
-        Some(c) if spark_referenced(&cfg.widgets.cpu.format, &cfg.widgets.cpu.alt_format) => {
-            crate::cpu::read_cpu_history(
-                &rustline_wasm::state_root(),
-                c.percent,
-                cfg.widgets.cpu.spark_width,
-            )
-        }
+        Some(c) if cfg.spark_referenced_in_layout(layout, "cpu") => crate::cpu::read_cpu_history(
+            &rustline_wasm::state_root(),
+            c.percent,
+            cfg.widgets.cpu.spark_width,
+        ),
         _ => Vec::new(),
     };
     let memory = if kinds.contains("memory") {
@@ -162,7 +154,7 @@ pub fn build_region_context(
         None
     };
     let mem_history = match memory {
-        Some(m) if spark_referenced(&cfg.widgets.memory.format, &cfg.widgets.memory.alt_format) => {
+        Some(m) if cfg.spark_referenced_in_layout(layout, "memory") => {
             let percent = if m.total_bytes == 0 {
                 0.0
             } else {
@@ -506,6 +498,35 @@ mod tests {
         drop(guard);
         assert_eq!(ctx.cpu_history.len(), 1);
         assert_eq!(ctx.mem_history.len(), 1);
+    }
+
+    #[test]
+    fn cpu_history_populated_when_a_cpu_instance_references_spark() {
+        // Base cpu format is the default (no {spark}); a cpu INSTANCE in the layout
+        // has {spark}. History must still populate (W57) — the shared ring.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        let mut t = toml::value::Table::new();
+        t.insert("kind".into(), "cpu".into());
+        t.insert("format".into(), "{icon} {spark} {percent}%".into());
+        cfg.instances.insert("cpu2".into(), toml::Value::Table(t));
+        let layout = ["cpu2".to_string()];
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by ENV_LOCK against the other env-mutating tests.
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", tmp.path());
+        }
+        let ctx = build_region_context(&RegionArgs::default(), &layout, &Theme::default(), &cfg);
+        // SAFETY: matches the set above.
+        unsafe {
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        drop(guard);
+        assert_eq!(
+            ctx.cpu_history.len(),
+            1,
+            "instance-only spark populates history"
+        );
     }
 
     #[test]

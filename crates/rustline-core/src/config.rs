@@ -1167,6 +1167,12 @@ fn is_builtin_widget_name(name: &str) -> bool {
     BUILTIN_WIDGET_NAMES.contains(&name)
 }
 
+/// The single home for the `{spark}` literal check: a widget references the
+/// sparkline placeholder in EITHER its `format` or its click-toggle `alt_format`.
+fn refs_spark(format: &str, alt_format: &str) -> bool {
+    format.contains("{spark}") || alt_format.contains("{spark}")
+}
+
 impl Config {
     /// Load config from `path`, never failing: a missing file or a parse
     /// error both yield [`Config::default`] (the latter after logging a
@@ -1513,6 +1519,35 @@ impl Config {
             ifaces.insert(self.widgets.throughput.interface.clone());
         }
         ifaces
+    }
+
+    /// Does any `cpu`/`memory` widget IN the layout — the base widget OR a
+    /// `[instances.<name>]` of that kind — reference `{spark}` in its
+    /// `format`/`alt_format`? Gates the shared history read/persist so an
+    /// instance-only `{spark}` still accumulates (W57). Non-cpu/memory → false.
+    pub fn spark_referenced_in_layout(&self, layout: &[String], kind: &str) -> bool {
+        let base_hit = layout.iter().any(|n| n == kind)
+            && match kind {
+                "cpu" => refs_spark(&self.widgets.cpu.format, &self.widgets.cpu.alt_format),
+                "memory" => {
+                    refs_spark(&self.widgets.memory.format, &self.widgets.memory.alt_format)
+                }
+                _ => false,
+            };
+        base_hit
+            || self
+                .instances_of_kind(layout, kind)
+                .any(|table| match kind {
+                    "cpu" => {
+                        let o: CpuOpts = table.clone().try_into().unwrap_or_default();
+                        refs_spark(&o.format, &o.alt_format)
+                    }
+                    "memory" => {
+                        let o: MemoryOpts = table.clone().try_into().unwrap_or_default();
+                        refs_spark(&o.format, &o.alt_format)
+                    }
+                    _ => false,
+                })
     }
 
     /// Iterate the `[instances.<name>]` tables a `layout` references that are of
@@ -2557,6 +2592,32 @@ mount = "/data"
         assert!(!ifaces.contains(&Some("eth0".into())));
         // Nothing referenced -> empty.
         assert!(c.throughput_interfaces(&[]).is_empty());
+    }
+
+    #[test]
+    fn spark_referenced_in_layout_covers_base_and_instances() {
+        // Base cpu with {spark} in format.
+        let mut cfg = Config::default();
+        cfg.widgets.cpu.format = "{icon} {spark} {percent}%".into();
+        assert!(cfg.spark_referenced_in_layout(&["cpu".into()], "cpu"));
+
+        // Base default (no spark), but a cpu instance IN the layout has {spark}.
+        let mut cfg2 = Config::default();
+        let mut t = toml::value::Table::new();
+        t.insert("kind".into(), "cpu".into());
+        t.insert("format".into(), "{spark}".into());
+        cfg2.instances.insert("cpu2".into(), toml::Value::Table(t));
+        assert!(
+            cfg2.spark_referenced_in_layout(&["cpu2".into()], "cpu"),
+            "instance-only {{spark}} counts"
+        );
+        // Same instance NOT in the layout → false.
+        assert!(!cfg2.spark_referenced_in_layout(&["cpu".into()], "cpu"));
+
+        // Neither base nor instance references spark → false; wrong kind → false.
+        let cfg3 = Config::default();
+        assert!(!cfg3.spark_referenced_in_layout(&["cpu".into()], "cpu"));
+        assert!(!cfg3.spark_referenced_in_layout(&["disk".into()], "disk"));
     }
 
     #[test]
