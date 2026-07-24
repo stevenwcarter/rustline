@@ -27,6 +27,8 @@ mod throughput;
 mod tmux_conf;
 mod toggles;
 mod uptime;
+mod widget_cmd;
+mod widget_tui;
 mod windows;
 
 use std::env;
@@ -312,6 +314,10 @@ fn main() {
             plugin_cmd::run(cmd, &cfg_path, &plugin_dir);
         }
         Command::Theme(cmd) => theme_cmd::run(cmd, &cfg_path, &themes_dir()),
+        Command::Widget(cmd) => {
+            let plugin_dir = resolve_plugin_dir(None, &cfg);
+            std::process::exit(widget_cmd::run(cmd, &cfg_path, &plugin_dir));
+        }
         Command::Click(args) => run_click(&args, &cfg),
         Command::Doctor => {
             let plugin_dir = resolve_plugin_dir(None, &cfg);
