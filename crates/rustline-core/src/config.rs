@@ -1133,6 +1133,40 @@ pub struct Config {
     pub instances: HashMap<String, Value>,
 }
 
+/// The sixteen built-in widget names ([`crate::widget::Registry::with_builtins`]).
+///
+/// Built-in registration always wins over an `[instances.<name>]` entry with
+/// a colliding name — see `widgets::mod`'s `registry.contains(name)` check,
+/// which is the authority this list mirrors. Every place that projects
+/// `self.instances` onto a name-keyed map or set ([`Config::color_overrides`],
+/// [`Config::click_map`], [`Config::layout_kinds`]) must apply the same
+/// built-in-wins precedence, or a same-named instance silently hijacks the
+/// built-in widget's color/click binding/kind (invariant #7).
+const BUILTIN_WIDGET_NAMES: [&str; 16] = [
+    "pane_id",
+    "hostname",
+    "windows",
+    "datetime",
+    "cwd",
+    "lan_ip",
+    "tailscale_ip",
+    "battery",
+    "cpu",
+    "memory",
+    "loadavg",
+    "git",
+    "disk",
+    "uptime",
+    "media",
+    "throughput",
+];
+
+/// True iff `name` is one of the built-in widget names, which always takes
+/// precedence over a same-named `[instances.<name>]` entry.
+fn is_builtin_widget_name(name: &str) -> bool {
+    BUILTIN_WIDGET_NAMES.contains(&name)
+}
+
 impl Config {
     /// Load config from `path`, never failing: a missing file or a parse
     /// error both yield [`Config::default`] (the latter after logging a
@@ -1197,7 +1231,9 @@ impl Config {
     /// byte-identical case cheap and the common case). Also projects
     /// `[instances.<name>]` entries with a resolvable `kind` the same way
     /// (via [`Config::instance_meta`], W46), so a named instance's color
-    /// override is included under its own instance name.
+    /// override is included under its own instance name — unless that name
+    /// collides with a built-in, in which case the instance is skipped
+    /// entirely (built-in wins; see [`is_builtin_widget_name`]).
     pub fn color_overrides(&self) -> HashMap<String, ColorOverride> {
         let candidates: [(&str, &ColorOverride); 15] = [
             ("hostname", &self.widgets.hostname.color),
@@ -1222,6 +1258,9 @@ impl Config {
             .map(|(name, color)| (name.to_string(), color.clone()))
             .collect();
         for (name, table) in &self.instances {
+            if is_builtin_widget_name(name) {
+                continue;
+            }
             let Some(kind) = Config::instance_kind(table) else {
                 continue;
             };
@@ -1249,7 +1288,9 @@ impl Config {
     /// projector. Also projects `[instances.<name>]` entries with a
     /// resolvable `kind` the same way (via [`Config::instance_meta`], W46),
     /// so a named instance's toggleability/bindings are included under its
-    /// own instance name.
+    /// own instance name — unless that name collides with a built-in, in
+    /// which case the instance is skipped entirely (built-in wins; see
+    /// [`is_builtin_widget_name`]).
     pub fn click_map(&self) -> HashMap<String, WidgetClick> {
         let candidates: [(&str, &str, &ClickBindings); 12] = [
             (
@@ -1318,6 +1359,9 @@ impl Config {
             })
             .collect();
         for (name, table) in &self.instances {
+            if is_builtin_widget_name(name) {
+                continue;
+            }
             let Some(kind) = Config::instance_kind(table) else {
                 continue;
             };
@@ -1409,18 +1453,25 @@ impl Config {
     /// the kind-aware basis for read-gating in the binary's
     /// `build_region_context` (W46).
     ///
-    /// Each layout entry maps to a kind: an `[instances.<name>]` entry maps to
-    /// its declared `kind` (an instance whose table has no `kind` string is
-    /// dropped, since there's nothing to gate on); any other name maps to
-    /// itself — a built-in/base widget name (`cpu`, `disk`, …) is already its
-    /// own kind, and a plugin/unknown name maps to itself harmlessly, since it
-    /// matches none of the OS-read gates.
+    /// A built-in name (see [`BUILTIN_WIDGET_NAMES`]) always maps to itself,
+    /// even when `self.instances` has a colliding key — built-in wins,
+    /// mirroring the same precedence [`Config::color_overrides`]/
+    /// [`Config::click_map`] apply (invariant #7). For any other name: an
+    /// `[instances.<name>]` entry maps to its declared `kind` (an instance
+    /// whose table has no `kind` string is dropped, since there's nothing to
+    /// gate on); any other name maps to itself — a plugin/unknown name maps
+    /// to itself harmlessly, since it matches none of the OS-read gates.
     pub fn layout_kinds(&self, layout: &[String]) -> BTreeSet<String> {
         layout
             .iter()
-            .filter_map(|name| match self.instances.get(name) {
-                Some(table) => Config::instance_kind(table).map(str::to_string),
-                None => Some(name.clone()),
+            .filter_map(|name| {
+                if is_builtin_widget_name(name) {
+                    return Some(name.clone());
+                }
+                match self.instances.get(name) {
+                    Some(table) => Config::instance_kind(table).map(str::to_string),
+                    None => Some(name.clone()),
+                }
             })
             .collect()
     }
@@ -2500,5 +2551,49 @@ mount = "/data"
         assert!(!ifaces.contains(&Some("eth0".into())));
         // Nothing referenced -> empty.
         assert!(c.throughput_interfaces(&[]).is_empty());
+    }
+
+    #[test]
+    fn color_overrides_and_click_map_skip_instance_colliding_with_builtin_name() {
+        // Regression for the W46 review finding: `[instances.cpu]` must never
+        // shadow the built-in `cpu` widget in these two projections — the
+        // built-in always wins the name "cpu", mirroring
+        // `Registry::with_builtins`'s `registry.contains` skip (invariant #7).
+        let mut c = Config::default();
+        c.instances.insert(
+            "cpu".into(),
+            toml::from_str("kind='datetime'\nalt_format='X'\nfg={ Indexed = 1 }").unwrap(),
+        );
+        // Built-in `[widgets.cpu]` is untouched (no color, no alt_format), so
+        // the colliding instance's fg/alt_format must not leak through.
+        assert!(!c.color_overrides().contains_key("cpu"));
+        assert!(!c.click_map().get("cpu").unwrap().toggleable);
+    }
+
+    #[test]
+    fn layout_kinds_builtin_name_wins_over_colliding_instance_kind() {
+        // Same collision, this time against `layout_kinds`: a built-in name
+        // in the layout must resolve to itself, not a same-named instance's
+        // (different) declared kind.
+        let mut c = Config::default();
+        c.instances
+            .insert("cpu".into(), toml::from_str("kind = 'disk'").unwrap());
+        let kinds = c.layout_kinds(&["cpu".into()]);
+        assert!(kinds.contains("cpu"));
+        assert!(!kinds.contains("disk"));
+    }
+
+    #[test]
+    fn noncolliding_instance_still_projects_after_builtin_guard() {
+        // Regression guard for the fix above: a non-colliding instance name
+        // must still participate in every projection unchanged.
+        let mut c = Config::default();
+        c.instances.insert(
+            "clock_utc".into(),
+            toml::from_str("kind='datetime'\nalt_format='X'\nfg={ Indexed = 2 }").unwrap(),
+        );
+        assert!(c.color_overrides().contains_key("clock_utc"));
+        assert!(c.click_map().get("clock_utc").unwrap().toggleable);
+        assert!(c.layout_kinds(&["clock_utc".into()]).contains("datetime"));
     }
 }
