@@ -4,6 +4,9 @@
 default:
     @just --list
 
+install:
+    cargo install --path crates/rustline
+
 # Build the release binary
 build:
     cargo build --release
