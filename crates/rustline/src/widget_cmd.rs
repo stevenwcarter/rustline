@@ -24,9 +24,17 @@ use crate::cli::WidgetCmd;
 /// a missing array within it, falls back to `Config::load`'s default for that
 /// region — so an edit against a zero-config install writes three complete,
 /// correct arrays rather than orphaning the two the user never mentioned.
+///
+/// `[layout]` may be written as a standard table (`[layout]` header) or as an
+/// inline table (`layout = { left = [...], right = [...] }`) — both are
+/// valid config that `Config::load` parses identically, so both are read
+/// here via `as_table_like`, which treats the two alike. A `layout` key
+/// holding neither (a scalar, e.g. `layout = "oops"`) is simply not
+/// table-like, so `table` is `None` and every region falls back to its
+/// default, matching `Config::load`'s own total fallback.
 pub(crate) fn read_layout(doc: &DocumentMut) -> Layout {
     let defaults = Layout::default();
-    let table = doc.get("layout").and_then(Item::as_table);
+    let table = doc.get("layout").and_then(Item::as_table_like);
     let region = |key: &str, fallback: &[String]| -> Vec<String> {
         table
             .and_then(|t| t.get(key))
@@ -48,12 +56,22 @@ pub(crate) fn read_layout(doc: &DocumentMut) -> Layout {
 /// Write all three arrays back into `[layout]`, creating the table if absent.
 /// Only the three arrays are touched; everything else in the document —
 /// comments, ordering, other tables — is left exactly as it was.
-pub(crate) fn write_layout(doc: &mut DocumentMut, layout: &Layout) {
-    let table = doc
+///
+/// Mirrors [`read_layout`]'s table-like handling: an existing standard table
+/// OR inline table is written into via `as_table_like_mut` alike. A `layout`
+/// key holding a genuinely non-table value (e.g. `layout = "oops"` or
+/// `layout = 42`) is refused with `Err` — nothing is mutated — rather than
+/// panicking, upholding the "a refused edit writes nothing" contract; the
+/// caller must check this before touching disk.
+pub(crate) fn write_layout(doc: &mut DocumentMut, layout: &Layout) -> Result<(), String> {
+    let item = doc
         .entry("layout")
-        .or_insert_with(|| Item::Table(Table::new()))
-        .as_table_mut()
-        .expect("[layout] is a table");
+        .or_insert_with(|| Item::Table(Table::new()));
+    let table = item.as_table_like_mut().ok_or_else(|| {
+        "`layout` in the config file is not a table (found a scalar or array); \
+         refusing to edit it"
+            .to_string()
+    })?;
     for region in Region::ALL {
         let mut arr = Array::new();
         for name in layout.get(region) {
@@ -61,6 +79,7 @@ pub(crate) fn write_layout(doc: &mut DocumentMut, layout: &Layout) {
         }
         table.insert(region.as_str(), value(arr));
     }
+    Ok(())
 }
 
 /// Every name a layout entry may legally take: registered built-ins,
@@ -193,7 +212,10 @@ fn mutate(
             return 1;
         }
     };
-    write_layout(&mut doc, &layout);
+    if let Err(error) = write_layout(&mut doc, &layout) {
+        eprintln!("{error}");
+        return 1;
+    }
     if let Some(parent) = config_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -292,7 +314,7 @@ mod tests {
             center: vec!["windows".into()],
             right: vec!["cwd".into()],
         };
-        write_layout(&mut doc, &layout);
+        write_layout(&mut doc, &layout).unwrap();
         let text = doc.to_string();
         assert!(text.contains("# my config"), "comment preserved: {text}");
         assert!(
@@ -310,7 +332,7 @@ mod tests {
             center: vec![],
             right: vec!["cwd".into()],
         };
-        write_layout(&mut doc, &layout);
+        write_layout(&mut doc, &layout).unwrap();
         let text = doc.to_string();
         assert!(text.contains("[layout]"), "{text}");
     }
@@ -325,7 +347,7 @@ mod tests {
             center: vec!["windows".into()],
             right: vec!["cwd".into(), "cpu".into()],
         };
-        write_layout(&mut doc, &layout);
+        write_layout(&mut doc, &layout).unwrap();
         let parsed: Config = toml::from_str(&doc.to_string()).expect("strict parse");
         assert_eq!(parsed.layout, layout);
     }
@@ -338,11 +360,119 @@ mod tests {
             center: vec![],
             right: vec!["cwd".into()],
         };
-        write_layout(&mut doc, &layout);
+        write_layout(&mut doc, &layout).unwrap();
         let parsed: Config = toml::from_str(&doc.to_string()).unwrap();
         assert!(parsed.layout.left.is_empty());
         assert!(parsed.layout.center.is_empty());
         assert_eq!(parsed.layout.right, ["cwd"]);
+    }
+
+    #[test]
+    fn read_layout_reads_an_inline_table_layout() {
+        // `layout = { ... }` is valid config (`Config::load`/`print-config`
+        // round-trip it fine); `read_layout` must return the user's real
+        // arrays, not silently fall back to the defaults.
+        let layout = read_layout(&doc_of(
+            "layout = { left = [\"pane_id\"], right = [\"cwd\"] }\n",
+        ));
+        assert_eq!(layout.left, ["pane_id"]);
+        assert_eq!(
+            layout.center,
+            Layout::default().center,
+            "no center key: default"
+        );
+        assert_eq!(layout.right, ["cwd"]);
+    }
+
+    #[test]
+    fn write_layout_round_trips_an_inline_table_layout() {
+        // Writing back into an inline-table layout must succeed (not refuse,
+        // not panic) and the result must still parse under the strict parser.
+        let mut doc = doc_of("layout = { left = [\"pane_id\"], right = [\"cwd\"] }\n");
+        let layout = Layout {
+            left: vec!["pane_id".into(), "hostname".into()],
+            center: vec!["windows".into()],
+            right: vec!["cwd".into(), "cpu".into()],
+        };
+        write_layout(&mut doc, &layout).expect("inline table is table-like");
+        let text = doc.to_string();
+        assert!(
+            text.contains("hostname"),
+            "new entry present in the inline table: {text}"
+        );
+        let parsed: Config = toml::from_str(&text).expect("strict parse");
+        assert_eq!(parsed.layout, layout);
+    }
+
+    #[test]
+    fn write_layout_refuses_a_scalar_layout_cleanly() {
+        // `layout = "oops"` (or any non-table scalar/array) must be refused
+        // with `Err`, never a panic — the write-nothing contract this
+        // function's caller (`mutate`) depends on.
+        let mut doc = doc_of("layout = \"oops\"\n");
+        let before = doc.to_string();
+        let error = write_layout(&mut doc, &Layout::default())
+            .expect_err("a scalar layout value must be refused, not accepted");
+        assert!(error.contains("layout"), "error names the problem: {error}");
+        assert_eq!(doc.to_string(), before, "document left untouched");
+    }
+
+    #[test]
+    fn write_layout_refuses_a_numeric_layout_cleanly() {
+        let mut doc = doc_of("layout = 42\n");
+        write_layout(&mut doc, &Layout::default())
+            .expect_err("a numeric layout value must be refused, not accepted");
+    }
+
+    /// Finding 3: `placements_json` must emit well-formed JSON with the
+    /// correct `source` string for all three `WidgetSource` variants, and
+    /// correct `region`/`index` for both a placed and an unplaced widget.
+    #[test]
+    fn placements_json_emits_correct_source_and_placement_for_every_variant() {
+        let rows = [
+            WidgetPlacement {
+                name: "cpu".to_string(),
+                summary: "CPU usage".to_string(),
+                source: WidgetSource::Builtin,
+                placement: Some((Region::Right, 1)),
+            },
+            WidgetPlacement {
+                name: "weather".to_string(),
+                summary: "Current weather".to_string(),
+                source: WidgetSource::Plugin,
+                placement: None,
+            },
+            WidgetPlacement {
+                name: "clock_utc".to_string(),
+                summary: "UTC clock".to_string(),
+                source: WidgetSource::Instance {
+                    kind: "datetime".to_string(),
+                },
+                placement: Some((Region::Left, 0)),
+            },
+        ];
+        let json = placements_json(&rows);
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("well-formed JSON");
+        let items = parsed.as_array().expect("top-level array");
+        assert_eq!(items.len(), 3);
+
+        let cpu = &items[0];
+        assert_eq!(cpu["name"], "cpu");
+        assert_eq!(cpu["source"], "builtin");
+        assert_eq!(cpu["region"], "right");
+        assert_eq!(cpu["index"], 1);
+
+        let weather = &items[1];
+        assert_eq!(weather["name"], "weather");
+        assert_eq!(weather["source"], "plugin");
+        assert!(weather["region"].is_null(), "unplaced: {weather}");
+        assert!(weather["index"].is_null(), "unplaced: {weather}");
+
+        let clock = &items[2];
+        assert_eq!(clock["name"], "clock_utc");
+        assert_eq!(clock["source"], "instance:datetime");
+        assert_eq!(clock["region"], "left");
+        assert_eq!(clock["index"], 0);
     }
 
     #[test]
