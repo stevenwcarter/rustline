@@ -342,14 +342,18 @@ impl Launchctl for RealLaunchctl {
         command_on_path("launchctl")
     }
     fn bootstrap(&self, plist: &Path) -> bool {
+        // `bootstrap` must name the plist file — it reads it to load the job.
         let domain = gui_domain();
         let plist = plist.to_string_lossy();
         run_silent("launchctl", &["bootstrap", domain.as_str(), plist.as_ref()])
     }
-    fn bootout(&self, plist: &Path) -> bool {
-        let domain = gui_domain();
-        let plist = plist.to_string_lossy();
-        run_silent("launchctl", &["bootout", domain.as_str(), plist.as_ref()])
+    fn bootout(&self, _plist: &Path) -> bool {
+        // Unload by the job's service target `gui/$UID/<label>` rather than the
+        // plist path, so uninstall still unloads the job even if its plist file
+        // was manually removed first — symmetric with the systemd path's
+        // label-based `disable_now(UNIT_NAME)`.
+        let target = format!("{}/{AGENT_LABEL}", gui_domain());
+        run_silent("launchctl", &["bootout", &target])
     }
 }
 

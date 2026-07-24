@@ -260,6 +260,17 @@ fn read_cpu_macos_in(state_dir: &Path) -> Option<CpuUsage> {
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
 fn read_mach_cpu_ticks() -> Option<CpuTimes> {
+    use std::sync::OnceLock;
+
+    // `mach_host_self()` hands back a send right and bumps a user-reference
+    // count on the host port every call. Cache it once so the long-running
+    // daemon (which calls this once per `render right`) doesn't accrue a uref
+    // per read — one stable right for the process, released at exit.
+    // SAFETY: `mach_host_self` has no preconditions and returns the caller's
+    // host name port; caching it for the process lifetime is the standard idiom.
+    static HOST: OnceLock<libc::mach_port_t> = OnceLock::new();
+    let host = *HOST.get_or_init(|| unsafe { libc::mach_host_self() });
+
     // SAFETY: on `KERN_SUCCESS`, `host_statistics` fills `info` with
     // `HOST_CPU_LOAD_INFO_COUNT` (4) `natural_t` counters — exactly the length
     // of `host_cpu_load_info`'s `cpu_ticks` array — so the struct is fully
@@ -268,7 +279,7 @@ fn read_mach_cpu_ticks() -> Option<CpuTimes> {
         let mut info = std::mem::MaybeUninit::<libc::host_cpu_load_info>::uninit();
         let mut count: libc::mach_msg_type_number_t = libc::HOST_CPU_LOAD_INFO_COUNT;
         let kr = libc::host_statistics(
-            libc::mach_host_self(),
+            host,
             libc::HOST_CPU_LOAD_INFO,
             info.as_mut_ptr() as libc::host_info_t,
             &mut count,
