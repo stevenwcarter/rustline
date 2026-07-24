@@ -133,9 +133,40 @@ mod tests {
     }
 
     #[test]
+    fn frame_roundtrips_each_response_variant() {
+        for resp in [
+            DaemonResponse::Markup("#[fg=colour1]hi".into()),
+            DaemonResponse::Pong,
+            DaemonResponse::ShuttingDown,
+        ] {
+            let mut buf = Vec::new();
+            write_frame(&mut buf, &resp).unwrap();
+            let back: DaemonResponse = read_frame(&mut &buf[..]).unwrap();
+            assert_eq!(back, resp);
+        }
+    }
+
+    #[test]
     fn truncated_frame_is_err_not_panic() {
-        let bytes = [0u8, 0, 0, 10, b'{']; // claims 10 bytes, has 1
+        // Length prefix = 10 (LE) but only one body byte present, so the body's
+        // `read_exact` hits `UnexpectedEof` — an `Err`, never a panic. (10 is
+        // well under `MAX_FRAME_LEN`, so this exercises the truncated-body path,
+        // not the length-cap path below.)
+        let bytes = [10u8, 0, 0, 0, b'{'];
         let r: io::Result<DaemonRequest> = read_frame(&mut &bytes[..]);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn oversized_frame_length_is_err_before_allocating() {
+        // A claimed length above `MAX_FRAME_LEN` (9 MiB > the 8 MiB cap) is
+        // rejected by the cap check *before* any body buffer is allocated: only
+        // the 4-byte length prefix is present (no body follows), yet this is an
+        // `Err`, proving the cap check fires first rather than trying to
+        // `read_exact` — let alone allocate — a 9 MiB body.
+        let bytes = (9u32 * 1024 * 1024).to_le_bytes();
+        let r: io::Result<DaemonRequest> = read_frame(&mut &bytes[..]);
+        let err = r.expect_err("over-cap length must be an error");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }

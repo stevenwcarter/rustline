@@ -886,9 +886,22 @@ mod tests {
         );
         let reg = Registry::with_builtins(&cfg);
         assert!(reg.contains("clock_utc") && reg.contains("clock_ny"));
-        // Both resolve and render (values differ by tz; assert both non-empty).
         let out = reg.resolve(&["clock_utc".into(), "clock_ny".into()]);
         assert_eq!(out.len(), 2);
+
+        // A FIXED instant (from the `ctx` helper's pinned `now`) renders to
+        // different hours in UTC vs America/New_York — the two zones are always
+        // 4–5h apart, never equal — so `%H` must yield distinct text. Asserting
+        // only `out.len() == 2` would pass even if timezone were ignored.
+        let c = ctx(Vec::new());
+        let texts: Vec<String> = out
+            .iter()
+            .map(|(_, w)| w.render(&c).into_iter().map(|s| s.text).collect())
+            .collect();
+        assert_ne!(
+            texts[0], texts[1],
+            "UTC and America/New_York must format to different hours"
+        );
     }
 
     #[test]

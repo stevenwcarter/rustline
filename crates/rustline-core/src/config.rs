@@ -1524,6 +1524,12 @@ impl Config {
         kind: &'a str,
     ) -> impl Iterator<Item = &'a Value> {
         layout.iter().filter_map(move |name| {
+            // Built-in-wins precedence: a built-in name never resolves to a
+            // same-named `[instances.<name>]` entry (invariant #7), matching the
+            // guard `color_overrides`/`click_map`/`layout_kinds` already apply.
+            if is_builtin_widget_name(name) {
+                return None;
+            }
             let table = self.instances.get(name)?;
             (Config::instance_kind(table) == Some(kind)).then_some(table)
         })
@@ -2595,5 +2601,38 @@ mount = "/data"
         assert!(c.color_overrides().contains_key("clock_utc"));
         assert!(c.click_map().get("clock_utc").unwrap().toggleable);
         assert!(c.layout_kinds(&["clock_utc".into()]).contains("datetime"));
+    }
+
+    #[test]
+    fn builtin_widget_names_mirror_registry_with_builtins() {
+        // `BUILTIN_WIDGET_NAMES` is a hand-maintained mirror of the built-ins
+        // `Registry::with_builtins` registers. Nothing else keeps them in sync,
+        // so a future 17th built-in added there without updating the list would
+        // silently break built-in-wins precedence (invariant #7). Pin the two.
+        use crate::widget::WidgetSource;
+        let reg = crate::Registry::with_builtins(&Config::default());
+        let from_registry: BTreeSet<&str> = reg
+            .descriptors()
+            .iter()
+            .filter(|d| d.source == WidgetSource::Builtin)
+            .map(|d| d.name.as_str())
+            .collect();
+        let mirror: BTreeSet<&str> = BUILTIN_WIDGET_NAMES.iter().copied().collect();
+        assert_eq!(from_registry, mirror);
+    }
+
+    #[test]
+    fn disk_mounts_skip_instance_colliding_with_builtin_name() {
+        // Built-in-wins precedence in `instances_of_kind` (M7): an
+        // `[instances.cpu]` declaring `kind='disk'` must never contribute its
+        // mount, because the built-in `cpu` owns the name "cpu" (invariant #7),
+        // matching the guard color_overrides/click_map/layout_kinds apply.
+        let mut c = Config::default();
+        c.instances.insert(
+            "cpu".into(),
+            toml::from_str("kind = 'disk'\nmount = '/hijack'").unwrap(),
+        );
+        let mounts = c.disk_mounts(&["cpu".into()]);
+        assert!(!mounts.contains("/hijack"));
     }
 }

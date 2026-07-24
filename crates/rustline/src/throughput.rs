@@ -19,9 +19,14 @@ use rustline_core::Throughput;
 /// persisted at, via `sample_store` — keyed by interface so a multi-interface
 /// layout (W46) never clobbers one interface's prior sample with another's:
 /// `throughput-sample` for the aggregate read (`None`), or
-/// `throughput-sample-<iface>` for a named interface, with any character
-/// outside `[A-Za-z0-9_-]` replaced by `_` so the result is always a single
-/// safe path component.
+/// `throughput-sample-<sanitized>-<hash>` for a named interface. The
+/// human-readable `<sanitized>` stem maps any character outside `[A-Za-z0-9_-]`
+/// to `_` (keeping the name a single safe path component), but that alone is
+/// **not injective** — `eth0.100` and `eth0_100` both sanitize to `eth0_100` —
+/// so a `<hash>` (FNV-1a of the *raw* interface name) is appended to keep
+/// distinct interfaces on distinct files. Two interfaces sharing one sample
+/// would otherwise compute a wrong rate. The aggregate name stays exactly
+/// `throughput-sample` (never churned by this scheme).
 #[cfg(any(target_os = "linux", test))]
 fn sample_name(interface: Option<&str>) -> String {
     match interface {
@@ -37,9 +42,22 @@ fn sample_name(interface: Option<&str>) -> String {
                     }
                 })
                 .collect();
-            format!("throughput-sample-{sanitized}")
+            format!("throughput-sample-{sanitized}-{:08x}", fnv1a(iface))
         }
     }
+}
+
+/// FNV-1a (32-bit) of `s` — a deterministic, dependency-free disambiguator for
+/// [`sample_name`]. Not cryptographic; a collision only means two interfaces
+/// would share a sample file, no worse than the pre-hash sanitizer's behavior.
+#[cfg(any(target_os = "linux", test))]
+fn fnv1a(s: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in s.as_bytes() {
+        h ^= u32::from(*b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
 }
 
 /// Read network throughput, or `None` on the first invocation (nothing yet to
@@ -264,19 +282,27 @@ mod tests {
     }
 
     #[test]
-    fn sample_name_is_per_interface_and_sanitized() {
-        // Aggregate keeps the original single name; a named interface gets its
-        // own suffixed file, so two interfaces never share one sample.
+    fn sample_name_is_per_interface_and_injective() {
+        // Aggregate keeps the exact legacy name — the default-config sample file
+        // is never churned by the per-interface hashing scheme.
         assert_eq!(sample_name(None), "throughput-sample");
-        assert_eq!(sample_name(Some("eth0")), "throughput-sample-eth0");
-        assert_eq!(sample_name(Some("wlan0")), "throughput-sample-wlan0");
+        // A named interface gets a human-readable stem plus a hash suffix, so it
+        // differs from the aggregate and from other interfaces.
+        assert!(sample_name(Some("eth0")).starts_with("throughput-sample-eth0-"));
         assert_ne!(sample_name(None), sample_name(Some("eth0")));
-        // Any character outside [A-Za-z0-9_-] becomes '_', so the name stays a
-        // single safe path component even for exotic interface names.
-        assert_eq!(
-            sample_name(Some("en p0/1:2")),
-            "throughput-sample-en_p0_1_2"
-        );
+        assert_ne!(sample_name(Some("eth0")), sample_name(Some("wlan0")));
+        // Deterministic: the same interface always maps to the same file.
+        assert_eq!(sample_name(Some("eth0")), sample_name(Some("eth0")));
+        // Injective across punctuation-only differences: names that sanitize to
+        // the same stem MUST still get distinct files (before the hash suffix
+        // `eth0.100`/`eth0_100` and `eth0:1`/`eth0/1` collapsed to one file,
+        // making two interfaces share a sample and compute a wrong rate).
+        assert_ne!(sample_name(Some("eth0.100")), sample_name(Some("eth0_100")));
+        assert_ne!(sample_name(Some("eth0:1")), sample_name(Some("eth0/1")));
+        // The result is still a single safe path component — no exotic char
+        // (space, `/`, `:`) leaks through the sanitized stem or the hex hash.
+        let n = sample_name(Some("en p0/1:2"));
+        assert!(!n.contains(['/', ' ', ':', '.']));
     }
 
     // Two distinct interfaces persist to distinct sample files, so neither

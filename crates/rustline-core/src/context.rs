@@ -74,15 +74,14 @@ pub struct Context {
     /// time (only when the `disk` widget is in the active layout — see
     /// `build_context.rs`); `None` when the mount can't be `statvfs`'d.
     pub disk: Option<DiskInfo>,
-    /// Per-instance disk-usage readings (W46), keyed by mount path. Lets
-    /// multiple `disk` widget instances configured with different `mount`s
-    /// each read their own snapshot instead of sharing the single `disk`
-    /// field above (which stays the base/legacy reading a plain, unnamed
-    /// `disk` widget consults). A `DiskWidget` reads its own entry via
-    /// `ctx.disks.get(&self.mount)`. `#[serde(default)]` keeps
-    /// deserialization total across host/guest version skew (invariant #2).
-    /// NOT mirrored into `WireContext` — multi-instance disk reads aren't
-    /// exposed to WASM guests.
+    /// Per-instance disk-usage readings (W46), keyed by mount path — the map a
+    /// `DiskWidget` actually consults, via `ctx.disks.get(&self.mount)`, so
+    /// multiple `disk` instances configured with different `mount`s each read
+    /// their own snapshot. The singular `disk` field above is no longer read by
+    /// the widget; it is retained as the `WireContext.disk` mirror source (the
+    /// per-instance map itself is NOT mirrored to WASM guests).
+    /// `#[serde(default)]` keeps deserialization total across host/guest
+    /// version skew (invariant #2).
     #[serde(default)]
     pub disks: BTreeMap<String, DiskInfo>,
     /// Network throughput (down/up bytes-per-second) snapshot, read once at
@@ -95,14 +94,15 @@ pub struct Context {
     #[serde(default)]
     pub throughput: Option<Throughput>,
     /// Per-instance network-throughput readings (W46), keyed by interface
-    /// name (`""` = aggregate of all non-loopback interfaces). Lets multiple
-    /// `throughput` widget instances configured with different `interface`s
-    /// each read their own rate instead of sharing the single `throughput`
-    /// field above (which stays the base/legacy reading). A
-    /// `ThroughputWidget` reads its own entry via
-    /// `ctx.throughputs.get(&self.iface_key)`. `#[serde(default)]` keeps
-    /// deserialization total across host/guest version skew (invariant #2).
-    /// NOT mirrored into `WireContext`.
+    /// name (`""` = aggregate of all non-loopback interfaces) — the map a
+    /// `ThroughputWidget` actually consults, via
+    /// `ctx.throughputs.get(&self.iface_key)`, so multiple `throughput`
+    /// instances configured with different `interface`s each read their own
+    /// rate. The singular `throughput` field above is no longer read by the
+    /// widget; it is retained only for symmetry/additivity and — unlike
+    /// `disk` — is not wire-mirrored. Neither this map nor `throughput`
+    /// appears in `WireContext`. `#[serde(default)]` keeps deserialization
+    /// total across host/guest version skew (invariant #2).
     #[serde(default)]
     pub throughputs: BTreeMap<String, Throughput>,
     /// System uptime in seconds, read once at build time (only when the

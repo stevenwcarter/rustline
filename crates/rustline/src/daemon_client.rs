@@ -18,11 +18,15 @@ use crate::daemon_proto::{self, DaemonRequest, DaemonResponse, RegionKind, Rende
 const SOCKET_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Resolve the daemon's Unix socket path: `$XDG_RUNTIME_DIR/rustline/daemon.sock`,
-/// falling back to `<state_root>/daemon.sock` when `XDG_RUNTIME_DIR` is unset.
+/// falling back to `<state_root>/daemon.sock` when `XDG_RUNTIME_DIR` is unset —
+/// or set but empty, which the XDG spec says to treat as unset.
 pub fn daemon_socket_path() -> PathBuf {
-    match std::env::var("XDG_RUNTIME_DIR") {
-        Ok(dir) => PathBuf::from(dir).join("rustline").join("daemon.sock"),
-        Err(_) => rustline_wasm::state_root().join("daemon.sock"),
+    match std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+    {
+        Some(dir) => PathBuf::from(dir).join("rustline").join("daemon.sock"),
+        None => rustline_wasm::state_root().join("daemon.sock"),
     }
 }
 

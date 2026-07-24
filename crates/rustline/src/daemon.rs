@@ -195,6 +195,13 @@ fn serve_connection(
     state: &Mutex<DaemonState>,
     config_path: &Path,
 ) -> io::Result<Disposition> {
+    // The client sets its own timeouts, but a server must never trust a peer to:
+    // an accepted stream with no timeout lets a stalled peer pin this thread
+    // forever. Bound both directions on the accepted stream. A `set_*_timeout`
+    // error just drops this one connection (the `?` propagates to the accept
+    // loop, which logs and moves on) — best-effort, never break the bar.
+    stream.set_read_timeout(Some(SOCKET_TIMEOUT))?;
+    stream.set_write_timeout(Some(SOCKET_TIMEOUT))?;
     let req: DaemonRequest = daemon_proto::read_frame(&mut stream)?;
     let (resp, disposition) = handle_request(state, config_path, req);
     daemon_proto::write_frame(&mut stream, &resp)?;
@@ -396,6 +403,47 @@ mod tests {
 
         assert_eq!(daemon_markup, in_process);
         assert!(!daemon_markup.is_empty(), "sanity: the layout renders");
+    }
+
+    #[test]
+    fn daemon_window_render_matches_in_process() {
+        // The window-pill path has no live/jittering reads (`build_window_context`
+        // reads only `Context.window`), so this is deterministic. It pins the
+        // currently-unguarded invariant that `render_window` resolves only
+        // `["windows"]` — so the daemon's (potentially plugin-laden) registry and
+        // a freshly built builtins registry produce byte-identical window output.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, "").unwrap();
+        let plugin_dir = dir.path().join("plugins"); // nonexistent → no wasm
+
+        let wire = RenderArgsWire {
+            current: true,
+            index: Some("2".into()),
+            name: Some("editor".into()),
+            flags: Some("*".into()),
+            ..RenderArgsWire::default()
+        };
+
+        let state = DaemonState::build(&cfg_path, plugin_dir);
+        let daemon_markup = state.render(RegionKind::Window, &wire);
+
+        // Rebuild the exact in-process path `main`'s `Render::Window` arm runs.
+        let cfg = Config::load(&cfg_path);
+        let theme = crate::resolve_theme(&cfg);
+        let registry = Registry::with_builtins(&cfg);
+        let window_args = WindowArgs {
+            current: wire.current,
+            index: wire.index.clone().unwrap_or_default(),
+            name: wire.name.clone().unwrap_or_default(),
+            flags: wire.flags.clone().unwrap_or_default(),
+            preview: wire.preview,
+        };
+        let ctx = build_window_context(&window_args);
+        let in_process = render_window(&ctx, &registry, &theme);
+
+        assert_eq!(daemon_markup, in_process);
+        assert!(!daemon_markup.is_empty(), "sanity: the window pill renders");
     }
 
     #[test]
