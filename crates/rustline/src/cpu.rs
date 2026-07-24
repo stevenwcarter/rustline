@@ -4,22 +4,24 @@
 //! prefers a *cross-invocation* delta: it diffs the current `/proc/stat`
 //! against a persisted prior snapshot (zero sleep) when that snapshot is fresh,
 //! and only falls back to taking both samples across a short sleep on the first
-//! run or a stale snapshot (see `CPU_SNAPSHOT_STALENESS_SECS`). macOS uses
-//! `top`'s own internal sample. Mirrors `battery.rs`: the pure parsers compile
+//! run or a stale snapshot (see `CPU_SNAPSHOT_STALENESS_SECS`). macOS reads the
+//! same cumulative counters from the mach kernel (`host_statistics`) and shares
+//! that identical snapshot-delta path. Mirrors `battery.rs`: the pure parsers compile
 //! under `test` on any host and carry the unit tests, while only the file-read /
 //! subprocess / sleep / snapshot-persistence is `#[cfg]`-gated.
 
 use std::path::Path;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::PathBuf;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustline_core::CpuUsage;
 
-/// Linux two-read sampling window: short enough to keep `render` snappy, long
-/// enough to be a stable reading. (macOS uses `top`'s own ~1 s sample instead.)
-#[cfg(target_os = "linux")]
+/// Two-read sampling window for the cold/stale-snapshot fallback: short enough
+/// to keep `render` snappy, long enough to be a stable reading. Used by both
+/// the Linux (`/proc/stat`) and macOS (`host_statistics`) readers.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const CPU_SAMPLE_WINDOW: Duration = Duration::from_millis(120);
 
 /// Upper bound (seconds) on how old the persisted `/proc/stat` snapshot may be
@@ -29,7 +31,7 @@ const CPU_SAMPLE_WINDOW: Duration = Duration::from_millis(120);
 /// (coarser than the 120 ms window but a fine steady-state reading); past it,
 /// the average would span too long to represent "current" load (or the box was
 /// idle/suspended), so `read_cpu` re-primes via the classic two-sample path.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 const CPU_SNAPSHOT_STALENESS_SECS: u64 = 60;
 
 /// Read CPU utilization, or `None` if the platform is unsupported or the read
@@ -118,7 +120,7 @@ fn read_cpu_linux_in(state_dir: &Path) -> Option<CpuUsage> {
 /// persisted across invocations so the next `read_cpu` can compute a delta
 /// without the sampling sleep. Also the sample history a future sparkline can
 /// consume.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CpuSnapshot {
     idle: u64,
@@ -133,7 +135,7 @@ struct CpuSnapshot {
 /// (same instant or a backward clock) or `> staleness_secs`, or the total-jiffy
 /// delta is `<= 0` (idle interval or backward counters after suspend/resume).
 /// Otherwise the same busy% formula as [`busy_percent`], clamped `0..=100`.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn busy_from_snapshots(prev: &CpuSnapshot, now: &CpuSnapshot, staleness_secs: u64) -> Option<f32> {
     let age = now.ts.checked_sub(prev.ts)?;
     if age == 0 || age > staleness_secs {
@@ -146,7 +148,7 @@ fn busy_from_snapshots(prev: &CpuSnapshot, now: &CpuSnapshot, staleness_secs: u6
 
 /// Serialize a snapshot to a single `total idle ts` line (trailing newline),
 /// the same plain-text, total-on-parse-failure discipline as the toggles file.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn serialize_snapshot(snap: &CpuSnapshot) -> String {
     format!("{} {} {}\n", snap.total, snap.idle, snap.ts)
 }
@@ -154,7 +156,7 @@ fn serialize_snapshot(snap: &CpuSnapshot) -> String {
 /// Parse a `total idle ts` line back into a snapshot. Total: any
 /// missing/short/non-numeric content yields `None` (treated as absent →
 /// fallback), never a panic. Extra trailing tokens are ignored.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn parse_snapshot(text: &str) -> Option<CpuSnapshot> {
     let mut fields = text.lines().next()?.split_whitespace();
     let total = fields.next()?.parse().ok()?;
@@ -164,14 +166,14 @@ fn parse_snapshot(text: &str) -> Option<CpuSnapshot> {
 }
 
 /// State-file path for the persisted snapshot: `<state_dir>/cpu-sample`.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn snapshot_path(state_dir: &Path) -> PathBuf {
     state_dir.join("cpu-sample")
 }
 
 /// Current wall clock as unix seconds; a pre-epoch clock degrades to `0`
 /// (which makes any prior snapshot read as backward-clock → fallback).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -181,14 +183,14 @@ fn now_unix_secs() -> u64 {
 
 /// Load the persisted snapshot; a missing/unreadable/corrupt file → `None`
 /// (treated as absent, so the caller falls back to the two-sample read).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn load_snapshot(state_dir: &Path) -> Option<CpuSnapshot> {
     parse_snapshot(&std::fs::read_to_string(snapshot_path(state_dir)).ok()?)
 }
 
 /// Best-effort atomic persist (temp file + rename); logs a warning on failure
 /// and never panics — a broken cache must never break the bar.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn store_snapshot(state_dir: &Path, snap: &CpuSnapshot) {
     let path = snapshot_path(state_dir);
     if let Some(parent) = path.parent() {
@@ -206,16 +208,100 @@ fn store_snapshot(state_dir: &Path, snap: &CpuSnapshot) {
 
 #[cfg(target_os = "macos")]
 fn read_cpu_macos() -> Option<CpuUsage> {
-    let output = std::process::Command::new("top")
-        .args(["-l", "2", "-n", "0"])
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    parse_top_cpu(&stdout).map(|percent| CpuUsage { percent })
+    read_cpu_macos_in(&rustline_wasm::state_root())
+}
+
+/// [`read_cpu_macos`]'s body, parameterized on the snapshot-cache dir so tests
+/// can inject a `tempfile::tempdir()` (the same seam as [`read_cpu_linux_in`]).
+///
+/// Reads cumulative CPU ticks from the mach kernel
+/// (`host_statistics(HOST_CPU_LOAD_INFO)`) and takes the exact same zero-sleep
+/// cross-invocation delta as the Linux reader, falling back to a short
+/// two-sample read only on a cold/stale snapshot. This replaces the old
+/// `top -l 2 -n 0` shell-out, which sleeps ~1 s internally and made every
+/// `render right` a >1 s call — under the daemon's shared render lock that
+/// stalled the whole refresh burst and dropped queued clients with EPIPE.
+#[cfg(target_os = "macos")]
+fn read_cpu_macos_in(state_dir: &Path) -> Option<CpuUsage> {
+    let cur_times = read_mach_cpu_ticks()?;
+    let current = CpuSnapshot {
+        idle: cur_times.idle,
+        total: cur_times.total,
+        ts: now_unix_secs(),
+    };
+
+    // Fast path (default): a fresh persisted snapshot gives busy% with no sleep.
+    // Fallback: no recent prior -> take the second sample the classic way.
+    let percent = match load_snapshot(state_dir)
+        .and_then(|prev| busy_from_snapshots(&prev, &current, CPU_SNAPSHOT_STALENESS_SECS))
+    {
+        Some(p) => p,
+        None => {
+            std::thread::sleep(CPU_SAMPLE_WINDOW);
+            let second = read_mach_cpu_ticks()?;
+            busy_percent(cur_times, second)
+        }
+    };
+
+    // Always persist so the next invocation can take the fast path. Best-effort.
+    store_snapshot(state_dir, &current);
+    Some(CpuUsage { percent })
+}
+
+/// Cumulative CPU ticks since boot from the mach kernel, in the same
+/// `(idle, total)` shape Linux derives from `/proc/stat`: `total` is the sum of
+/// the user/system/idle/nice tick counters, `idle` the idle counter alone.
+/// `None` if the `host_statistics` call fails. The only `unsafe` in this file's
+/// macOS path, isolated here.
+///
+/// `libc` deprecates its mach bindings in favor of the `mach2` crate, but these
+/// symbols remain present and functional; we keep the dependency graph minimal
+/// (rustls-only, no new crates — see the `cargo tree` invariants) and scope the
+/// `allow(deprecated)` to this one FFI shim.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn read_mach_cpu_ticks() -> Option<CpuTimes> {
+    use std::sync::OnceLock;
+
+    // `mach_host_self()` hands back a send right and bumps a user-reference
+    // count on the host port every call. Cache it once so the long-running
+    // daemon (which calls this once per `render right`) doesn't accrue a uref
+    // per read — one stable right for the process, released at exit.
+    // SAFETY: `mach_host_self` has no preconditions and returns the caller's
+    // host name port; caching it for the process lifetime is the standard idiom.
+    static HOST: OnceLock<libc::mach_port_t> = OnceLock::new();
+    let host = *HOST.get_or_init(|| unsafe { libc::mach_host_self() });
+
+    // SAFETY: on `KERN_SUCCESS`, `host_statistics` fills `info` with
+    // `HOST_CPU_LOAD_INFO_COUNT` (4) `natural_t` counters — exactly the length
+    // of `host_cpu_load_info`'s `cpu_ticks` array — so the struct is fully
+    // initialized before we read it. We read it only on success.
+    unsafe {
+        let mut info = std::mem::MaybeUninit::<libc::host_cpu_load_info>::uninit();
+        let mut count: libc::mach_msg_type_number_t = libc::HOST_CPU_LOAD_INFO_COUNT;
+        let kr = libc::host_statistics(
+            host,
+            libc::HOST_CPU_LOAD_INFO,
+            info.as_mut_ptr() as libc::host_info_t,
+            &mut count,
+        );
+        if kr != libc::KERN_SUCCESS {
+            return None;
+        }
+        let ticks = info.assume_init().cpu_ticks;
+        let user = u64::from(ticks[libc::CPU_STATE_USER as usize]);
+        let system = u64::from(ticks[libc::CPU_STATE_SYSTEM as usize]);
+        let idle = u64::from(ticks[libc::CPU_STATE_IDLE as usize]);
+        let nice = u64::from(ticks[libc::CPU_STATE_NICE as usize]);
+        Some(CpuTimes {
+            idle,
+            total: user + system + idle + nice,
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 struct CpuTimes {
     idle: u64,
     total: u64,
@@ -244,7 +330,7 @@ fn parse_proc_stat(text: &str) -> Option<CpuTimes> {
 
 /// Busy % over the interval between two cumulative snapshots. `dt == 0` or
 /// backward counters (suspend/resume) → `0.0`, never negative or `NaN`.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn busy_percent(prev: CpuTimes, cur: CpuTimes) -> f32 {
     let dt = cur.total.saturating_sub(prev.total);
     let didle = cur.idle.saturating_sub(prev.idle);
@@ -252,20 +338,6 @@ fn busy_percent(prev: CpuTimes, cur: CpuTimes) -> f32 {
         return 0.0;
     }
     (dt.saturating_sub(didle) as f32 / dt as f32 * 100.0).clamp(0.0, 100.0)
-}
-
-/// Parse `top -l 2 -n 0` stdout: from the **last** `CPU usage:` line take the
-/// number before `% idle` and return `100 - idle`. No such line → `None`.
-#[cfg(any(target_os = "macos", test))]
-fn parse_top_cpu(output: &str) -> Option<f32> {
-    let line = output.lines().rfind(|l| l.contains("CPU usage:"))?;
-    let idle_str = line
-        .split("% idle")
-        .next()?
-        .rsplit(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .next()?;
-    let idle: f32 = idle_str.parse().ok()?;
-    Some((100.0 - idle).clamp(0.0, 100.0))
 }
 
 #[cfg(test)]
@@ -332,24 +404,10 @@ mod tests {
         assert!(b.is_finite());
     }
 
-    #[test]
-    fn top_cpu_uses_last_sample() {
-        let out = "Processes: 400 total\n\
-                   CPU usage: 3.00% user, 2.00% sys, 95.00% idle\n\
-                   CPU usage: 12.50% user, 6.25% sys, 81.25% idle\n";
-        let p = parse_top_cpu(out).unwrap();
-        assert!((p - 18.75).abs() < 0.01); // 100 - 81.25 (the last line)
-    }
-
-    #[test]
-    fn top_cpu_no_line_is_none() {
-        assert!(parse_top_cpu("nothing here").is_none());
-    }
-
-    // Linux takes the state-dir-injecting path so this never touches the real
-    // XDG state dir (`read_cpu()` itself always writes to the real one — see
-    // `read_cpu_linux_in`'s doc comment). Other platforms don't persist any
-    // snapshot, so calling the public `read_cpu()` directly is already hermetic.
+    // Linux and macOS both take the state-dir-injecting path so this never
+    // touches the real XDG state dir (`read_cpu()` itself always writes to the
+    // real one — see `read_cpu_linux_in`/`read_cpu_macos_in`). Other platforms
+    // don't persist any snapshot, so calling `read_cpu()` directly is hermetic.
     #[test]
     #[cfg(target_os = "linux")]
     fn read_cpu_never_panics() {
@@ -360,7 +418,45 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    fn read_cpu_never_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(c) = read_cpu_macos_in(dir.path()) {
+            assert!((0.0..=100.0).contains(&c.percent));
+        }
+    }
+
+    // The regression guard for the daemon EPIPE storm: with a fresh persisted
+    // snapshot, the macOS reader must take the zero-sleep delta path — no
+    // `top -l 2` (~1.4 s) and no ~120 ms two-sample fallback — so `render right`
+    // stops pinning the daemon's shared render lock for over a second.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn read_cpu_macos_warm_path_takes_no_sleep() {
+        let dir = tempfile::tempdir().unwrap();
+        // Seed a fresh prior snapshot a couple seconds in the past with tiny
+        // cumulative counters, so the current (huge, since-boot) mach reading is
+        // strictly larger: age is within staleness and Δtotal > 0, so the delta
+        // path is taken rather than the sleeping fallback.
+        let prev = CpuSnapshot {
+            total: 1,
+            idle: 1,
+            ts: now_unix_secs().saturating_sub(2),
+        };
+        store_snapshot(dir.path(), &prev);
+        let start = std::time::Instant::now();
+        let c = read_cpu_macos_in(dir.path()).expect("mach cpu read");
+        let elapsed = start.elapsed();
+        assert!((0.0..=100.0).contains(&c.percent));
+        // Comfortably under the 120 ms fallback window: proves no sleep occurred.
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "warm path took {elapsed:?}; expected the no-sleep delta path"
+        );
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     fn read_cpu_never_panics() {
         if let Some(c) = read_cpu() {
             assert!((0.0..=100.0).contains(&c.percent));

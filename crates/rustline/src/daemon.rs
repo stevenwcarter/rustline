@@ -260,7 +260,26 @@ fn serve_at(sock: &Path, config_path: &Path, plugin_dir: PathBuf) -> io::Result<
                     std::process::exit(0);
                 }
                 Ok(Disposition::Continue) => {}
-                Err(e) => tracing::warn!("daemon connection dropped: {e}"),
+                Err(e) => {
+                    // A client that hit its own short read timeout and fell
+                    // back to the in-process render (invariant N2) closes its
+                    // socket before we finish writing the response, so our
+                    // `write_frame` sees EPIPE/ECONNRESET (or a write-timeout
+                    // WouldBlock, or EOF mid-request). That's an expected,
+                    // benign disconnect — never break the bar — so it logs at
+                    // debug; only a genuine framing/IO fault stays a warn.
+                    use std::io::ErrorKind::{
+                        BrokenPipe, ConnectionReset, TimedOut, UnexpectedEof, WouldBlock,
+                    };
+                    if matches!(
+                        e.kind(),
+                        BrokenPipe | ConnectionReset | UnexpectedEof | TimedOut | WouldBlock
+                    ) {
+                        tracing::debug!("daemon client disconnected before response: {e}");
+                    } else {
+                        tracing::warn!("daemon connection dropped: {e}");
+                    }
+                }
             },
         );
     }

@@ -704,26 +704,37 @@ rustline daemon stop     # ask it to shut down
 ```
 
 `rustline daemon run` does **not** background itself — run it under a
-supervisor. The easiest way is the built-in systemd installer:
+supervisor. The easiest way is the built-in installer, which uses your
+platform's native per-user service manager (**systemd** on Linux, **launchd**
+on macOS) so the daemon starts at login:
 
 ```bash
-rustline daemon install            # write the unit, enable + start it now
-rustline daemon install --write-only   # write the unit only; you enable it
-rustline daemon uninstall          # disable/stop it and remove the unit
+rustline daemon install            # write the service file, load + start it now
+rustline daemon install --write-only   # write the file only; you load it
+rustline daemon uninstall          # unload/stop it and remove the file
 ```
 
-`rustline daemon install` generates a systemd **user** unit at
+On **Linux**, `rustline daemon install` generates a systemd **user** unit at
 `$XDG_CONFIG_HOME/systemd/user/rustline-daemon.service` (falling back to
 `~/.config/systemd/user/`) whose `ExecStart` calls the running binary's own
 resolved absolute path (override with `--binary <path>`), then runs
 `systemctl --user daemon-reload` and `enable --now` for you. If `systemctl`
 isn't on `PATH` (or you passed `--write-only`), it prints the manual
-`systemctl --user enable --now rustline-daemon.service` command instead — the
-unit file is written either way, and a `systemctl` failure is never fatal.
-`rustline daemon uninstall` best-effort disables/stops the unit and removes
-the file; running it again once already uninstalled is a no-op.
+`systemctl --user enable --now rustline-daemon.service` command instead.
 
-For reference, the unit it writes looks like this:
+On **macOS**, it writes a launchd **LaunchAgent** at
+`~/Library/LaunchAgents/rustline-daemon.plist` (`RunAtLoad` starts it at every
+login; `KeepAlive` restarts it only if it crashes — a clean `daemon stop`
+stays stopped), then loads it with `launchctl bootstrap gui/$UID`. If
+`launchctl` isn't on `PATH` (or you passed `--write-only`), it prints the
+manual `launchctl bootstrap gui/$(id -u) …` command instead.
+
+Either way the service file is written first and a `systemctl`/`launchctl`
+failure is never fatal. `rustline daemon uninstall` best-effort unloads the
+service and removes the file; running it again once already uninstalled is a
+no-op.
+
+For reference, on Linux the unit it writes looks like this:
 
 ```ini
 # Managed by `rustline daemon install`.
@@ -738,11 +749,39 @@ Restart=on-failure
 WantedBy=default.target
 ```
 
-If you'd rather manage it by hand, write that file yourself (with your own
-binary path) and run:
+…and on macOS, the LaunchAgent plist:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Managed by `rustline daemon install`. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>rustline-daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/you/.local/bin/rustline</string>
+        <string>daemon</string>
+        <string>run</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+</dict>
+</plist>
+```
+
+If you'd rather manage it by hand, write the appropriate file yourself (with
+your own binary path) and run:
 
 ```bash
-systemctl --user enable --now rustline-daemon.service
+systemctl --user enable --now rustline-daemon.service            # Linux
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/rustline-daemon.plist  # macOS
 ```
 
 Or start it from tmux itself with a `run-shell` line in `~/.tmux.conf`

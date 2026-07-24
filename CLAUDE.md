@@ -604,7 +604,8 @@ mod guest`): three more worked examples, each covering a host capability
   { Run(DaemonRunArgs { plugin_dir }), Status, Stop, Install(DaemonInstallArgs
   { write_only, binary }), Uninstall }` — `Run`'s `--plugin-dir` overrides
   discovery like `render`'s does, and `Install`'s `--write-only`/`--binary`
-  drive the systemd installer (see `daemon_service.rs` below and CLI below).
+  drive the per-OS service installer (Linux systemd / macOS launchd — see
+  `daemon_service.rs` below and CLI below).
 - `battery.rs` — `read_battery()`, a `#[cfg(target_os)]` read surface (one of
   three — see `cpu.rs`/`memory.rs` below): a Linux sysfs
   (`/sys/class/power_supply/*/{capacity,status}`) arm and a macOS
@@ -623,14 +624,27 @@ mod guest`): three more worked examples, each covering a host capability
   (`parse_proc_stat` + `busy_percent`, sampling `CPU_SAMPLE_WINDOW` ~120 ms
   apart). Either way the current reading is persisted afterward
   (`store_snapshot`, a best-effort atomic temp-file + rename) so the *next*
-  call can take the fast path — this is no longer a stateless delta. macOS
-  shells out to `top -l 2 -n 0` and parses the last `CPU usage:` line
-  (`parse_top_cpu`), unchanged. All the pure helpers (`parse_proc_stat`/
-  `busy_percent`/`busy_from_snapshots`/`parse_snapshot`/`serialize_snapshot`/
-  `parse_top_cpu`) are `#[cfg(any(target_os = …, test))]`-compiled and
-  unit-tested on the Linux dev box, with the snapshot-cache tests injecting a
-  tempdir rather than touching the real state dir. Unsupported platform or
-  failed read → `None`. Also `read_cpu_history(state_dir, current_percent,
+  call can take the fast path — this is no longer a stateless delta. **macOS now
+  shares this exact snapshot-delta path**: `read_cpu_macos_in` reads cumulative
+  CPU ticks from the mach kernel via `read_mach_cpu_ticks`
+  (`host_statistics(HOST_CPU_LOAD_INFO)`, the file's only `unsafe`, a scoped
+  `#[allow(deprecated)]` over libc's mach bindings so the dep graph stays
+  minimal) into the same `(idle, total)` `CpuTimes` shape Linux derives from
+  `/proc/stat`, then takes the same zero-sleep cross-invocation delta (fast
+  path) or the `CPU_SAMPLE_WINDOW` ~120 ms two-sample fallback, persisting to
+  the same `<state_root>/cpu-sample` file — so the snapshot machinery
+  (`CpuSnapshot`/`busy_from_snapshots`/`serialize_snapshot`/`parse_snapshot`/
+  `load_snapshot`/`store_snapshot`/`busy_percent`) is now
+  `#[cfg(any(target_os = "linux", target_os = "macos", test))]`. This
+  **replaced the old `top -l 2 -n 0` shell-out** (`parse_top_cpu`, now gone),
+  which slept ~1.4 s internally on every read: under the render daemon's shared
+  render lock that pinned the whole refresh burst and dropped queued clients
+  with EPIPE (see `daemon.rs`'s benign-disconnect logging). All the pure
+  helpers (`parse_proc_stat`/`busy_percent`/`busy_from_snapshots`/
+  `parse_snapshot`/`serialize_snapshot`) are
+  `#[cfg(any(target_os = …, test))]`-compiled and unit-tested on the dev box,
+  with the snapshot-cache tests injecting a tempdir rather than touching the
+  real state dir. Unsupported platform or failed read → `None`. Also `read_cpu_history(state_dir, current_percent,
   spark_width) -> Vec<f32>` (W45): a SEPARATE persisted ring at
   `<state_root>/cpu-history` (distinct from the `cpu-sample` snapshot above) —
   load via `sample_store` + `history::parse_history`, push the current reading,
@@ -760,23 +774,39 @@ mod guest`): three more worked examples, each covering a host capability
   both `rustline daemon status` and `doctor`'s advisory check) and `pub fn
   stop() -> io::Result<()>` (connect + `Shutdown`) round out the client-side
   control operations.
-- `daemon_service.rs` — `rustline daemon install|uninstall`: generates a
-  systemd **user** unit for the daemon and installs it at
+- `daemon_service.rs` — `rustline daemon install|uninstall`: makes the daemon
+  survive logins using each platform's native per-user service mechanism, with
+  the OS backend chosen at **compile time**. The public `install(binary,
+  write_only)`/`uninstall()` are platform-agnostic dispatchers — `main.rs`
+  names neither the path nor the service manager; an unsupported platform
+  prints a notice and does nothing. **Linux → systemd user unit** at
   `$XDG_CONFIG_HOME/systemd/user/rustline-daemon.service` (fallback
-  `~/.config/systemd/user/`, `service_unit_path()`). `service_unit(binary) ->
-  String` (pure) renders the unit text with `ExecStart=<binary> daemon run` +
-  `Restart=on-failure`. `systemctl --user` itself sits behind a `Systemctl`
-  trait (`available`/`daemon_reload`/`enable_now`/`disable_now`) — the same
-  seam `click.rs`'s `ClickExecutor` uses — so `install`/`uninstall` are
-  unit-tested with a recording fake; `RealSystemctl` is the only production
-  impl, every method best-effort (spawn failure/non-zero exit → `false`,
-  never a panic). `install` writes the unit (overwriting/reporting a replace),
-  then either prints the manual `systemctl --user enable --now` command
-  (`--write-only`, or `systemctl` absent from `PATH`) or reloads + enables
-  it; `uninstall` best-effort disables/stops the unit, removes the file if
-  present, and reloads — safe to run again once already uninstalled. Neither
-  ever treats a `systemctl` failure as fatal: the unit file is the durable
-  part of either operation.
+  `~/.config/systemd/user/`, `service_unit_path()`); `service_unit(binary)`
+  (pure) renders `ExecStart=<binary> daemon run` + `Restart=on-failure`, wired
+  via the `Systemctl` trait (`available`/`daemon_reload`/`enable_now`/
+  `disable_now`), `RealSystemctl` the only production impl. **macOS → launchd
+  LaunchAgent** at `~/Library/LaunchAgents/rustline-daemon.plist`
+  (`plist_path()`); `plist_contents(binary)` (pure) renders the plist with
+  `Label=rustline-daemon`, `ProgramArguments=[<binary>, daemon, run]`,
+  `RunAtLoad=true`, and `KeepAlive={SuccessfulExit=false}` (restart on failure
+  only — the launchd analogue of `Restart=on-failure`; a clean `daemon stop`
+  stays stopped), wired via the `Launchctl` trait (`available`/`bootstrap`/
+  `bootout`), `RealLaunchctl` the only production impl (`launchctl
+  bootstrap|bootout gui/$UID <plist>`, `gui_domain()` via `libc::getuid`, the
+  sole macOS `unsafe`). Both backends share `command_on_path` and a
+  stdio-silenced `run_silent`; both traits are the same recording-fake seam
+  `click.rs`'s `ClickExecutor` uses, so the pure builders + `install_*`/
+  `uninstall_*` flows are unit-tested (via `FakeSystemctl`/`FakeLaunchctl` on a
+  tempdir path) on both the Linux CI box and macOS — the pure fns/inner flows
+  are `#[cfg(any(target_os = …, test))]`-compiled, the `Real*` impls
+  `#[cfg(target_os = …)]`. `install` writes the unit/plist (overwriting/
+  reporting a replace), then either prints the manual load command
+  (`--write-only`, or the manager absent from `PATH`) or reloads/enables it
+  (macOS `bootout`s any stale instance first so reinstall is idempotent);
+  `uninstall` best-effort unloads and removes the file, safe to re-run. Every
+  real invocation is best-effort (spawn failure/non-zero exit → `false`, never
+  a panic) and neither operation treats a manager failure as fatal — the
+  unit/plist file is the durable part.
 - `click.rs` — click resolution + dispatch (W36): `resolve_click(&Config,
   range, button) -> ClickAction` (`{Toggle, OpenUrl, Run, NoOp}`, pure over the
   config) and `dispatch(action, range, &impl ClickExecutor)`. The
@@ -1179,21 +1209,27 @@ config-file path for every subcommand that reads or writes it (default:
   One caveat: a per-invocation `render --plugin-dir=X` is ignored while a
   daemon is reachable (the wire protocol carries no `plugin_dir`; the daemon
   always uses whatever `--plugin-dir` it was started with).
-- `rustline daemon install [--write-only] [--binary <path>]` — generate a
-  systemd **user** unit (`ExecStart=<binary> daemon run`, `binary` defaulting
-  to the running binary's own resolved absolute path, same resolution `init`
-  uses) and write it to
+- `rustline daemon install [--write-only] [--binary <path>]` — install the
+  daemon as a per-user service that starts at login, using the platform's
+  native mechanism (chosen at compile time; `ExecStart`/`ProgramArguments`
+  `<binary>` defaults to the running binary's own resolved absolute path, same
+  resolution `init` uses). **On Linux** it writes a systemd **user** unit to
   `$XDG_CONFIG_HOME/systemd/user/rustline-daemon.service` (fallback
-  `~/.config/systemd/user/`), reporting if it replaced an existing unit. Then,
-  unless `--write-only` or `systemctl` isn't on `PATH`, runs `systemctl --user
-  daemon-reload` and `enable --now rustline-daemon.service`; either way it
-  prints the manual `systemctl --user enable --now …` command as a fallback. A
-  `systemctl` failure is never fatal — the unit file is already written.
-- `rustline daemon uninstall` — best-effort `systemctl --user disable --now`
-  the unit (ignoring "not loaded"), remove the installed unit file if
-  present, and reload the user daemon-reload cache; prints what it did,
-  including a "nothing to remove" note if the unit was already gone. Safe to
-  run more than once.
+  `~/.config/systemd/user/`) and, unless `--write-only` or `systemctl` isn't on
+  `PATH`, runs `systemctl --user daemon-reload` + `enable --now
+  rustline-daemon.service`. **On macOS** it writes a launchd **LaunchAgent** to
+  `~/Library/LaunchAgents/rustline-daemon.plist`
+  (`RunAtLoad`, `KeepAlive={SuccessfulExit=false}` = restart on failure only)
+  and, unless `--write-only` or `launchctl` isn't on `PATH`, loads it via
+  `launchctl bootout` (clear any stale instance) + `bootstrap gui/$UID
+  <plist>`. Either way it reports a replaced file and prints the manual load
+  command as a fallback; a `systemctl`/`launchctl` failure is never fatal — the
+  unit/plist file is already written.
+- `rustline daemon uninstall` — best-effort unload the service (Linux
+  `systemctl --user disable --now`, macOS `launchctl bootout`, ignoring "not
+  loaded"), remove the installed unit/plist file if present (Linux also reloads
+  the user daemon-reload cache); prints what it did, including a "nothing to
+  remove" note if it was already gone. Safe to run more than once.
 - `rustline bench [--only regions|widgets|sources|plugins|daemon|all] [--iters N]
   [--real-iters N] [--warmup N] [--cold] [--format table|markdown]
   [--output FILE] [--plugin-dir DIR] [--state-dir DIR]` — feature-gated
@@ -1796,11 +1832,14 @@ info|debug|trace` and is parsed leniently (a typo falls back to the default).
 (`crates/rustline/src/battery.rs`), `read_cpu()` (`crates/rustline/src/cpu.rs`),
 and `read_memory()` (`crates/rustline/src/memory.rs`) are the three
 `#[cfg(target_os)]` surfaces in the codebase; each OS arm (Linux sysfs/`/proc`,
-macOS `pmset`/`top`/`sysctl`+`vm_stat`) delegates to a pure parser
-(`parse_linux`/`parse_pmset`, `parse_proc_stat`/`parse_top_cpu`,
-`parse_meminfo`/`parse_macos_memory`) that is `#[cfg(any(target_os = …,
-test))]`-compiled, so all of them are unit-tested on the Linux dev box even
-though only one reader arm per module compiles per platform. Follow this
+macOS `pmset`/`sysctl`+`vm_stat`, and cpu's mach `host_statistics`) delegates to
+a pure parser where the source is text (`parse_linux`/`parse_pmset`,
+`parse_proc_stat`, `parse_meminfo`/`parse_macos_memory`) that is
+`#[cfg(any(target_os = …, test))]`-compiled, so those are unit-tested on the
+dev box even though only one reader arm per module compiles per platform. (The
+cpu reader is the one exception to the pure-text-parser shape: its macOS arm is
+a mach FFI call returning counters directly, so it feeds the *shared*
+snapshot-delta helpers rather than a bespoke parser — see `cpu.rs` above.) Follow this
 pattern for any future OS-specific signal. `Context.os`/`Context.arch` (from
 `std::env::consts::OS`/`ARCH`) are now available for WASM guests that want to
 branch on platform.
