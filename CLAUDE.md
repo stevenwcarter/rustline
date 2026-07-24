@@ -13,7 +13,13 @@ Cargo **workspace**, edition 2024, `resolver = "2"`:
   `Context` snapshot it produces a tmux-format `String`. No I/O, no environment
   reads at render time. This is deliberately the reuse seam: today's only
   front-end is the CLI, but a future daemon would build `Context`s from a
-  different source and call the same core unchanged. Re-exports the
+  different source and call the same core unchanged — the optional W48
+  render daemon (`crates/rustline/src/daemon.rs`) is a first cut at this: it
+  still lives inside the `rustline` bin and still builds `Context`s the same
+  way the CLI does per request, just keeping the config/theme/registry warm
+  between requests rather than rebuilding them cold each time; a more
+  ambitious future daemon (push-driven Context construction, sub-second
+  widgets) remains open. Re-exports the
   `rustline-abi` types (`Segment`, `Style`, `Color`) so `rustline_core::Segment`
   etc. keep working unchanged.
 - `crates/rustline-abi` — a small, **serde-only** crate holding the
@@ -32,7 +38,8 @@ Cargo **workspace**, edition 2024, `resolver = "2"`:
   ambient authority — guests run with wasi off and no built-in Extism
   HTTP/FS; every effect is host-checked (`rl_log` is the sole intentional
   exception — see invariant N1). Reusable verbatim by a future daemon
-  front-end.
+  front-end — the W48 render daemon already does this, building its warm
+  `Registry` via the same `register_plugins`.
 - `crates/rustline-plugin-sdk` — the **guest-side SDK** a WASM plugin depends
   on (W39): one crate bundling typed host-capability wrappers (`http_get`,
   `http_get_cached`, `state_read`/`state_write`, `file_read`/`file_write`,
@@ -107,6 +114,15 @@ these shared types, not a design shortcut. Keep them serializable.
   `git: Option<GitInfo>`, `disk: Option<DiskInfo>`,
   `throughput: Option<Throughput>`, `uptime: Option<u64>` (seconds),
   `media: Option<MediaInfo>`,
+  `disks: BTreeMap<String, DiskInfo>` (keyed by mount) and
+  `throughputs: BTreeMap<String, Throughput>` (keyed by interface, `""` =
+  aggregate) — the per-instance reading maps multiple `disk`/`throughput`
+  widget **instances** (W46, see `config.rs` below) each consult by their own
+  `mount`/`iface_key`; both `#[serde(default)]` and, like `uptime`/`media`/
+  `throughput`/`cpu_history`/`mem_history`, NOT mirrored into `WireContext`
+  (invariant #2) — `Context.disk`/`Context.throughput` stay populated with
+  just the *base* widget's reading (the WASM mirror; a guest never sees the
+  maps),
   `os: String`, `arch:
   String`, `toggled: BTreeSet<String>`, `colors: ThemeColors`), plus
   `Context::default()` (an empty, epoch-timestamped instance, so test/synthetic
@@ -186,7 +202,29 @@ these shared types, not a design shortcut. Keep them serializable.
   recording a minimal built-in/non-configurable one), and
   `descriptors()`/`available_names()` enumerate them in registration order
   (W22) — the enabling abstraction for a future widget-listing command, not
-  itself exposed as a CLI subcommand yet.
+  itself exposed as a CLI subcommand yet. The twelve clickable/format-bearing
+  widget structs (see `toggle.rs` below) each now carry a `name: String`
+  field (W46) — their range/toggle identity (invariant #7) — instead of
+  hardcoding their kind name in `range_name()`/`active_format`; a base
+  built-in sets `name` to its kind (byte-identical output), an
+  `[instances.<name>]` entry sets it to the instance name. `widgets/mod.rs`
+  gains one `pub(crate) fn build_<kind>(name: &str, o: &<Kind>Opts) -> Box<dyn
+  Widget>` helper per clickable kind (`build_datetime`, `build_lan_ip`,
+  `build_tailscale_ip`, `build_battery`, `build_cpu`, `build_memory`,
+  `build_loadavg`, `build_git`, `build_disk`, `build_uptime`, `build_media`,
+  `build_throughput`), reused by both base registration (passes the kind
+  name) and instance registration (passes the instance name) — one factory
+  body instead of two. `Registry::with_builtins(&Config)` gains a second pass
+  over `cfg.instances` (W46): for each `(name, table)`, an unknown/missing
+  `kind`, a non-clickable kind (`cwd`/`hostname`/`pane_id`/`windows` —
+  instanceable but never clickable, so out of scope for this pass), or a name
+  already registered (a built-in or an earlier instance) is `warn!`+skipped
+  (invariant #3, built-in always wins); otherwise the table is re-parsed into
+  that kind's Opts (`try_into().unwrap_or_default()` — the extra `kind` key is
+  harmlessly ignored, no Opts struct has `deny_unknown_fields`) and registered
+  under the instance name via its `build_<kind>` helper. An instance name over
+  15 bytes still registers but logs a one-time "not click-toggleable" warn
+  (mirrors a too-long plugin stem).
 - `widgets/` — the sixteen built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
   `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`,
   `git`, `disk`, `uptime`, `media`, `throughput`, plus `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
@@ -239,7 +277,10 @@ these shared types, not a design shortcut. Keep them serializable.
   (substitutes a configurable `dirty_glyph`, default `*`, iff `staged > 0 ||
   unstaged > 0`, else empty) placeholders; NOT threshold-aware (no
   `alert.rs` use) and NOT in the default layout.
-  `disk.rs` is the `disk` widget: pure over `Context.disk`, with
+  `disk.rs` is the `disk` widget: pure over `ctx.disks.get(&self.mount)` (W46
+  — a `disk` instance's own configured `mount` selects its reading out of the
+  per-mount map; the base widget's `mount` is `[widgets.disk].mount`, default
+  `/`), with
   `{used}`/`{total}`/`{avail}` (human-readable binary sizes via `memory.rs`'s
   `format_bytes`, now `pub(crate)` and reused rather than duplicated),
   `{percent}`, `{bar}` (via the same shared `bar::gauge_bar` as `cpu`/
@@ -257,7 +298,10 @@ these shared types, not a design shortcut. Keep them serializable.
   layout.
   `throughput.rs` is the `ThroughputWidget` (W47, named with the `Widget`
   suffix to avoid colliding with the `rustline_abi::Throughput` data type):
-  pure over `Context.throughput`, with `{down}`/`{up}` placeholders (down/up
+  pure over `ctx.throughputs.get(&self.iface_key)` (W46 — `iface_key` is the
+  widget's/instance's own configured `interface`, or `""` to aggregate; the
+  base widget reads `[widgets.throughput].interface` the same way), with
+  `{down}`/`{up}` placeholders (down/up
   bytes-per-sec as human-readable `format_bytes` sizes suffixed `/s`, e.g.
   `1.2M/s`), plus `alt_format`/`down_format`; NOT threshold-aware (a rate has
   no universal ceiling) and NOT in the default layout.
@@ -316,7 +360,35 @@ these shared types, not a design shortcut. Keep them serializable.
   (W47 — `format`/`alt_format`/`down_format`/`interface`/color/click, mirroring
   the other opt-in widgets), and `CpuOpts`/`MemoryOpts` each gain a
   `spark_width` (W45, default 8 — the `{spark}` history ring length, consulted
-  only when `format` references `{spark}`).
+  only when `format` references `{spark}`). `Config` also gains `pub
+  instances: HashMap<String, toml::Value>` (`#[serde(default)]`, W46) — one
+  raw `[instances.<name>]` table per named widget instance; the entry's
+  `kind` key selects which built-in kind to build, and the rest of the table
+  is that kind's own Opts (re-parsed per kind via `try_into` rather than a
+  typed `WidgetInstance`, so the existing `<Kind>Opts` structs are reused
+  verbatim — see Config below for the TOML shape). Helper methods: `pub fn
+  instance_kind(v: &toml::Value) -> Option<&str>` reads the `kind` key; `pub
+  fn instance_meta(kind: &str, v: &toml::Value) -> Option<(ColorOverride,
+  String, ClickBindings)>` dispatches on kind to parse an instance's color
+  override/`alt_format`/click bindings (one shared match arm backing both
+  projections below, mirroring `Registry`'s per-kind dispatch); `pub fn
+  layout_kinds(&self, layout: &[String]) -> BTreeSet<String>` maps each
+  layout entry to its kind (a built-in name maps to itself; an instance name
+  maps to its declared `kind`) for kind-aware read-gating; `pub fn
+  disk_mounts(&self, layout: &[String]) -> BTreeSet<String>` and `pub fn
+  throughput_interfaces(&self, layout: &[String]) -> BTreeSet<Option<String>>`
+  collect the distinct mounts/interfaces the layout's `disk`/`throughput`
+  entries (base + every instance) actually reference, for the per-mount/
+  per-interface reads below. A module-level `const BUILTIN_WIDGET_NAMES: [&str;
+  16]` + `fn is_builtin_widget_name(name: &str) -> bool` is the built-in-wins
+  precedence guard: `color_overrides()`/`click_map()`/`layout_kinds` all skip
+  a `[instances.<name>]` entry whose name collides with a built-in, mirroring
+  `Registry`'s own collision skip (W46 review fix — an instance was initially
+  able to silently hijack a same-named built-in's projected color/click).
+  `color_overrides()`/`click_map()` (previously widgets-only) now also
+  project each non-colliding instance via `instance_meta`, keyed by the
+  instance name, so instance color overrides and click bindings flow through
+  `render_named_region`/`resolve_click` unchanged.
 - `ansi.rs` — `tmux_to_ansi(&str) -> String`: transcodes the tmux markup we emit
   into ANSI SGR (`colourN` → 256-color, `#rrggbb` → truecolor, named → basic)
   for the `--preview` flag.
@@ -521,7 +593,11 @@ mod guest`): three more worked examples, each covering a host capability
   `init` (`InitArgs`) is the onboarding-wizard subcommand (see CLI below);
   `click` (`ClickArgs { range, button }`, both defaulted so an empty click is a
   parseable no-op) is a flat subcommand invoked by the tmux mouse binding
-  (`MouseDown{1,2,3}Status`).
+  (`MouseDown{1,2,3}Status`). `Command::Daemon(DaemonArgs)` (W48) wraps an
+  `Option<DaemonCmd>` so a bare `rustline daemon` (no subcommand) parses and
+  defaults to running the server, same as `rustline daemon run`; `DaemonCmd
+  { Run(DaemonRunArgs { plugin_dir }), Status, Stop }` — `Run`'s
+  `--plugin-dir` overrides discovery like `render`'s does (see CLI below).
 - `battery.rs` — `read_battery()`, a `#[cfg(target_os)]` read surface (one of
   three — see `cpu.rs`/`memory.rs` below): a Linux sysfs
   (`/sys/class/power_supply/*/{capacity,status}`) arm and a macOS
@@ -591,8 +667,14 @@ mod guest`): three more worked examples, each covering a host capability
   (W47), a Linux read surface at the `Context`-build edge. A rate is a delta,
   so — mirroring `cpu.rs`'s persisted-snapshot pattern — it diffs the current
   `/proc/net/dev` counters against a prior `(rx, tx, ts)` sample persisted at
-  `<state_root>/throughput-sample` via `sample_store` (no sleep across two live
-  reads). `None` on the first invocation (nothing to diff against), an
+  a per-interface sample file (W46 — `fn sample_name(interface:
+  Option<&str>) -> String`: `throughput-sample` for the aggregate read
+  (`None`), `throughput-sample-<sanitized-iface>` for a named interface, any
+  non-`[A-Za-z0-9_-]` character replaced so multiple simultaneous
+  `throughput` instances on different interfaces read/write distinct files
+  instead of clobbering one shared sample) via `sample_store` (no sleep
+  across two live reads). `None` on the first invocation (nothing to diff
+  against), an
   unsupported platform, or a read failure — never a fabricated `0` (invariant
   #6). The pure `parse_proc_net_dev`/`throughput_rate`/`aggregate` helpers are
   `#[cfg(any(target_os = "linux", test))]`-compiled (same as `cpu.rs`), so
@@ -620,6 +702,57 @@ mod guest`): three more worked examples, each covering a host capability
   every field its preview layout can observe keeps theme_cmd's original
   pre-consolidation value verbatim (pinned byte-identical by a characterization
   test); the extra superset fields carry synthetic data no preview widget reads.
+- `daemon_proto.rs` — the optional daemon's wire protocol (W48), pure and
+  self-contained (no socket/listener/client here): `DaemonRequest {
+  Render { region: RegionKind, args: RenderArgsWire }, Ping, Shutdown }`,
+  `RegionKind { Left, Right, Window }` (mirrors `cli::Render`'s three
+  variants), `RenderArgsWire` (combines `cli::RegionArgs`'s
+  `session`/`window`/`pane`/`pane_path` and `cli::WindowArgs`'s
+  `index`/`name`/`flags`/`current` into one struct covering all three
+  `RegionKind`s — fields that don't apply to the requested kind are
+  absent/default; derives `Default`), and `DaemonResponse { Markup(String),
+  Pong, ShuttingDown }`. `fn write_frame<W: Write>(w, &impl Serialize) ->
+  io::Result<()>`/`fn read_frame<R: Read, T: DeserializeOwned>(r) ->
+  io::Result<T>` frame each message as a 4-byte little-endian length prefix
+  + JSON, with an 8 MiB cap checked **before** allocating (an oversize or
+  truncated frame is an `io::Error`, never a panic).
+- `daemon_client.rs` — the daemon client (W48): `fn daemon_socket_path() ->
+  PathBuf` resolves `$XDG_RUNTIME_DIR/rustline/daemon.sock`, falling back to
+  `<state_root>/daemon.sock` when `XDG_RUNTIME_DIR` is unset; `fn
+  try_render(region: RegionKind, args: RenderArgsWire) -> Option<String>`
+  is the safety seam every render call site goes through: one `stat` first
+  (socket file absent → `None` immediately, near-zero overhead when the
+  daemon isn't running), else connect with a short (250 ms)
+  read/write timeout, `write_frame` the request, `read_frame` the response,
+  and return the markup **only** on `DaemonResponse::Markup` — `None` on
+  *any* other outcome (connect/timeout/decode error, or a `Pong`/
+  `ShuttingDown` reply), so the caller always has a safe in-process render to
+  fall back to (invariant N2 extended to the daemon path — "never break the
+  bar").
+- `daemon.rs` — the daemon server (W48): `DaemonState { config, theme,
+  plugin_dir, registry, config_mtime }` holds everything warm across
+  requests — parsed `Config`, resolved `Theme`, a built `Registry` (built
+  over the **union** of both regions' layouts so plugins referenced by
+  either side are warm), and the config file's last-seen mtime — with a
+  `reload_if_changed` that re-parses/re-resolves/rebuilds only when
+  `config.toml`'s mtime has actually advanced (the common case reuses
+  everything, including live WASM plugin instances). `pub fn serve(config_path:
+  &Path, plugin_dir: PathBuf) -> io::Result<()>` binds a `UnixListener` at
+  `daemon_client::daemon_socket_path()` (removing a stale socket file first),
+  then accepts connections on their own thread against a shared
+  `Arc<Mutex<DaemonState>>`; a `Render` request builds the *same* `Context` via
+  `build_region_context`/`build_window_context` and renders via the *same*
+  `render_named_region`/`render_window` the in-process path uses, so daemon
+  output is byte-identical; `Ping` → `Pong`; `Shutdown` → reply
+  `ShuttingDown`, remove the socket, and exit. Renders serialize behind the
+  state `Mutex` (fine — renders are fast, and it also satisfies
+  `extism::Plugin`'s `!Sync` constraint: only one thread ever renders through
+  a given plugin instance at a time), and the mutex is never held across a
+  blocking socket read/write, so one slow/hung client can't stall the others
+  or deadlock a reload. `pub fn status() -> bool` (connect + `Ping`, used by
+  both `rustline daemon status` and `doctor`'s advisory check) and `pub fn
+  stop() -> io::Result<()>` (connect + `Shutdown`) round out the client-side
+  control operations.
 - `click.rs` — click resolution + dispatch (W36): `resolve_click(&Config,
   range, button) -> ClickAction` (`{Toggle, OpenUrl, Run, NoOp}`, pure over the
   config) and `dispatch(action, range, &impl ClickExecutor)`. The
@@ -644,12 +777,7 @@ mod guest`): three more worked examples, each covering a host capability
   now also `battery` (via `battery::read_battery()`), `cpu` (via
   `cpu::read_cpu()`), `memory` (via `memory::read_memory()`), `git` (via
   `git::read_git(&pane_current_path)`, gated: only read when `git` is in the
-  region's layout, mirroring the `cpu`/`memory` gate), `disk` (via
-  `disk::read_disk(&disk_mount)`, gated the same way on `disk` being in the
-  region's layout; `disk_mount` is `build_region_context`'s fourth parameter,
-  threaded in by its caller from `cfg.widgets.disk.mount` since — unlike
-  `git`, which reuses `pane_current_path` already on hand — the mount isn't
-  otherwise available inside `build_context.rs`), `throughput` (via
+  region's layout, mirroring the `cpu`/`memory` gate), `throughput` (via
   `throughput::read_throughput`, gated the same way on `throughput` being in
   the layout, W47), the `{spark}`-gated `cpu_history`/`mem_history` (only read —
   via `cpu::read_cpu_history`/`memory::read_memory_history` — when the `cpu`/
@@ -658,8 +786,21 @@ mod guest`): three more worked examples, each covering a host capability
   `spark_width`, W45), `os`, `arch`
   (from `std::env::consts::OS`/`ARCH`), and `toggled` (via
   `toggles::read_toggles()`, unconditionally — cheap relative to the gated
-  cpu/memory/git/disk reads). A private `layout_needs(layout, name) -> bool`
-  is the one predicate behind every one of these gates, now also covering
+  cpu/memory/git/disk reads). `pub fn build_region_context(args: &RegionArgs,
+  layout: &[String], theme: &Theme, cfg: &Config) -> Context` (W46 — the
+  signature dropped the old separate `disk_mount` parameter; `cfg` carries
+  everything needed) is now **kind-aware**: it resolves `cfg.layout_kinds(layout)`
+  once and gates every read (`git`/`battery`/`cpu`/`memory`/`uptime`/`media`/
+  interfaces/etc.) off that kind set instead of the raw layout names, so an
+  `[instances.<name>]` widget of a given kind fires that kind's read even when
+  the *base* name (e.g. plain `"disk"`) isn't itself in the layout. `disk` and
+  `throughput` fan out over every **distinct** mount/interface the layout
+  references — `cfg.disk_mounts(layout)`/`cfg.throughput_interfaces(layout)` —
+  calling `read_disk`/`read_throughput` once per distinct value and collecting
+  the results into `ctx.disks`/`ctx.throughputs`; `ctx.disk`/`ctx.throughput`
+  are then set to just the *base* widget's mount/interface entry (for the WASM
+  mirror). A private `layout_needs(layout, name) -> bool` is the one predicate
+  behind every one of these gates, now also covering
   `battery` and the IP-widgets' interface scan (W5; both used to be read
   unconditionally). `build_window_context` builds the minimal `Context`
   `render window` needs — just `Context.window`, via `..Context::default()`
@@ -760,7 +901,27 @@ mod guest`): three more worked examples, each covering a host capability
   `parse_yes_no` (pure prompt-parsing, unit-tested), and `run`/`prompt_answers`
   (the I/O shell: `--print` wins and emits the legacy one-line block via the
   caller's already-resolved theme; else `--defaults` or the interactive
-  prompt loop, erroring on non-TTY stdin without a flag). `assets/
+  prompt loop, erroring on non-TTY stdin without a flag). Also (W33):
+  `fn seed_answers(config_path: &Path) -> InitAnswers` pre-fills a re-run's
+  answers from an existing `config.toml` — `theme` from `cfg.theme.base`,
+  `battery`/`lan_ip`/`tailscale` from whether that name appears anywhere in
+  `cfg.layout.{left,center,right}`, and `clock` reverse-mapped from
+  `cfg.widgets.datetime.format` via the pure `fn clock_from_format(fmt: &str)
+  -> Option<ClockStyle>` (exact match against the four presets, `None` on no
+  match); the tmux-only answers (`two_line`/`mouse`/`interval`) aren't
+  recoverable from config and keep `defaults()`. A missing config file
+  returns `defaults()` (with `battery` still hardware-probed via
+  `battery::read_battery()`, preserving the pre-W33 fresh-run default).
+  `prompt_answers` gains a `seed: &InitAnswers` parameter and shows each
+  seeded value as that question's default. `fn summarize_answers(a:
+  &InitAnswers) -> String` renders one line per collected answer for the new
+  confirm step: after gathering answers (interactive runs only —
+  `--defaults`/`--dry-run`/`--print`/`--uninstall`/non-TTY are unchanged),
+  `run` prints the summary plus the existing dry-run line-diff machinery
+  (`dry_run_config`/`dry_run_tmux_block`/`line_diff`) against both files'
+  current contents, asks `ask("Write these changes?", true)`, and only calls
+  `apply` on yes — a no prints "Aborted; nothing written." and writes
+  nothing. `assets/
   starter-config.toml` (embedded via `include_str!`) is the recommended
   starter template `init.rs` mutates — the shortened `alt_format`s and
   curated layout it seeds live only here, **not** in any widget's code
@@ -782,18 +943,30 @@ mod guest`): three more worked examples, each covering a host capability
   once into `effective_config_path` and threaded into every subcommand that
   reads/writes the config.
   `themes_dir()` resolves `$XDG_CONFIG_HOME/rustline/themes` (fallback
-  `~/.config/rustline/themes`), parallel to `config_path()`; `resolve_theme(&Config)
-  -> Theme` is the file-aware layering used by `render`/`init` (`Theme::default()`
+  `~/.config/rustline/themes`), parallel to `config_path()`; `pub(crate) fn
+  resolve_theme(&Config)
+  -> Theme` is the file-aware layering used by `render`/`init`/**`daemon.rs`**
+  (W48 — `resolve_theme` stayed `pub(crate)` for `init.rs` but now also backs
+  `DaemonState::build`/`reload_if_changed`, since a warm daemon must resolve
+  the theme the same way a cold render does) (`Theme::default()`
   → `resolve_base_theme` → inline `[theme]` overrides via `to_theme_over`), and
-  `resolve_base_theme(name) -> Option<Theme>` (now `pub(crate)` so `init.rs` can
-  resolve the wizard's chosen theme into `bar_bg`/`fg` for the tmux block)
-  resolves a base name themes-dir-file first, then built-in (an
+  `resolve_base_theme(name) -> Option<Theme>` resolves a base name
+  themes-dir-file first, then built-in (an
   invalid/missing file falls through to the built-in lookup with a `warn!`) —
   this is where a user's themes-dir file **shadows** a same-named built-in
   (see Themes below). `tmux_conf_path()` resolves the user's tmux config
   (`$HOME/.tmux.conf`), parallel to `config_path()`/`themes_dir()`; `Command::
   Init` dispatches straight to `init::run` with all four resolved paths plus
-  the already-resolved `theme`.
+  the already-resolved `theme`. The three `render`
+  arms (`left`/`right`/`window`, W48) now each try `daemon_client::try_render`
+  first — build the same `RenderArgsWire`, call `try_render(RegionKind::…,
+  wire)` — and only fall through to the existing in-process path (unchanged,
+  byte-identical) on `None`; `--preview` is applied client-side by `emit` in
+  both cases, since the daemon always returns raw markup. `Command::Daemon`
+  dispatches `DaemonCmd::Run` to `daemon::serve` (foreground; prints an error
+  and doesn't panic on failure), `DaemonCmd::Status` to `daemon::status()`
+  (prints running/not-running, exit code reflects it), and
+  `DaemonCmd::Stop` to `daemon::stop()`.
 - `bench/` (`#[cfg(feature = "bench")]`) — the `rustline bench` subcommand:
   `harness.rs` (`summarize`/`measure`/`Stats`/`Row`/`Group`), `fixture.rs`
   (`fabricated_context` — the pure-pass mock seam, now a thin wrapper over the
@@ -829,7 +1002,13 @@ config-file path for every subcommand that reads or writes it (default:
   and upserts an idempotent `# >>> rustline >>>` / `# <<< rustline <<<` block
   into `~/.tmux.conf` (also backed up first, to `~/.tmux.conf.rustline.bak`).
   A non-TTY invocation without a flag errors with a hint instead of writing
-  silently. `rustline init --defaults` runs the same two writes
+  silently. **Re-running the wizard (W33) seeds every question's shown default
+  from your existing `config.toml`** (theme, which optional widgets are in
+  your layout, clock style) instead of resetting to the recommended answers —
+  see `init.rs`'s `seed_answers` above — and, before writing anything, prints
+  a one-line-per-answer summary plus a line diff of both files against their
+  current contents and asks "Write these changes?"; answering no aborts with
+  nothing written. `rustline init --defaults` runs the same two writes
   non-interactively with recommended answers. `rustline init --print` is the
   legacy behavior: prints just the raw one-line tmux block to stdout (using
   `theme.bar_bg`/`fg` for `status-style`) and writes nothing. `rustline init
@@ -857,7 +1036,12 @@ config-file path for every subcommand that reads or writes it (default:
   truecolor terminal, `rustline` on `$PATH`, and the managed tmux-conf block)
   as pass/warn/fail, plus the resolved config/themes/plugin/log paths; only
   reads and prints, never writes; exits non-zero only if any check outright
-  fails (a `warn` is advisory).
+  fails (a `warn` is advisory). Also (W48) an advisory-only "render daemon"
+  row: `warn` (not `fail` — the daemon is opt-in) when
+  `daemon_client::daemon_socket_path()` has no socket file at all ("not
+  running"), `warn` when a socket exists but doesn't answer a `Ping`
+  ("present but not reachable — a stale socket from a killed daemon?"), or
+  `pass` when it's reachable; never affects `doctor`'s exit code.
 - `rustline completions <bash|zsh|fish>` — print a shell-completion script
   (via `clap_complete`) to stdout.
 - `rustline plugin list` — discovered/configured plugins with their source,
@@ -928,6 +1112,22 @@ config-file path for every subcommand that reads or writes it (default:
   (`left_click`/`right_click`/`middle_click`) overrides per button with a
   toggle/`open_url`/`run` action. Invoked by the `init`-emitted
   `MouseDown{1,2,3}Status` tmux bindings (left/middle/right).
+- `rustline daemon [run] [--plugin-dir <d>] | status | stop` (W48) — the
+  optional persistent daemon. `rustline daemon` and `rustline daemon run` are
+  equivalent (bare form defaults to `run`): runs the server in the
+  foreground, keeping the parsed config, resolved theme, built widget
+  registry, and instantiated WASM plugins warm across renders instead of
+  rebuilding them on every tmux refresh; a supervisor (systemd unit, tmux
+  `run-shell … &`) backgrounds it — rustline never self-daemonizes/forks.
+  `rustline daemon status` connects and pings, printing running/not-running
+  with the exit code reflecting it; `rustline daemon stop` connects and asks
+  it to shut down. Render clients (`render left|right|window`) try the
+  daemon's socket first and **transparently fall back to the normal
+  in-process render** on any failure (including the daemon simply not
+  running) — the daemon is purely an optional speedup, never a dependency.
+  One caveat: a per-invocation `render --plugin-dir=X` is ignored while a
+  daemon is reachable (the wire protocol carries no `plugin_dir`; the daemon
+  always uses whatever `--plugin-dir` it was started with).
 - `rustline bench [--only regions|widgets|sources|plugins|all] [--iters N]
   [--real-iters N] [--warmup N] [--cold] [--format table|markdown]
   [--output FILE] [--plugin-dir DIR] [--state-dir DIR]` — feature-gated
@@ -945,7 +1145,14 @@ tmux consumes (stdout is the status line — logs always go to stderr).
 
 ## tmux integration model
 
-Shell-out per region on `status-interval` (no daemon in v1). The block
+Shell-out per region on `status-interval`. Each `#(<binary> render …)` spawn
+is still a fresh process either way — the difference an optional `rustline
+daemon` (W48, see CLI above) makes is what happens *inside* that process:
+with a reachable daemon, the spawn is a thin Unix-socket round-trip against
+already-warm state instead of a cold rebuild of the config/theme/registry/
+plugins. Nothing about the tmux wiring itself changes; `init` doesn't wire up
+the daemon (no wizard question for it yet — start/manage it yourself, see
+README). The block
 `rustline init` writes (via `init_block`) wires `status-left`/`status-right`/
 `window-status-format` to `#(<binary> render …)` — `<binary>` is the
 resolved, shell-quoted absolute path to the running binary
@@ -992,6 +1199,52 @@ optional `timezone` (an IANA zone name, e.g. `"America/New_York"`; default
 option) that formats in that zone instead via `chrono-tz`; an unrecognized
 name is logged and falls back to local time rather than erroring. Unknown
 widget names in a layout are skipped, not fatal.
+
+**Multiple widget instances (`[instances.<name>]`):** the same widget *kind*
+can appear more than once in a layout with distinct options — e.g. two
+clocks in different timezones, or usage bars for two different disk mounts —
+via a top-level `[instances.<name>]` table per instance. `kind` selects the
+built-in widget kind to build; every other key in the table is that kind's
+own option set (`format`, `alt_format`, `fg`/`bg`, click bindings, and
+whatever else that kind takes — e.g. `timezone` for a `datetime` instance,
+`mount` for a `disk` instance). Add the instance's own name (not the kind
+name) to a `layout` array to place it.
+
+```toml
+[layout]
+right = ["cwd", "clock_utc", "datetime", "disk_data"]
+
+[instances.clock_utc]
+kind = "datetime"
+timezone = "UTC"
+format = "%H:%MZ"
+
+[instances.disk_data]
+kind = "disk"
+mount = "/data"
+format = " {used}/{total}"
+```
+
+Only the twelve click-toggleable/format-bearing kinds (`datetime`, `lan_ip`,
+`tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg`, `git`, `disk`,
+`uptime`, `media`, `throughput`) can be instanced this way; `cwd`, `hostname`,
+`pane_id`, and `windows` are not (they carry no clickable identity to give an
+instance). An instance name follows the same range-safe rule as a widget's
+click-toggle name (`[A-Za-z0-9_-]`, at most 15 bytes, to stay a valid tmux
+`range=user|NAME`), and **may not shadow a built-in widget's name** — an
+`[instances.cpu]` entry, say, is always skipped (with a `warn!`) in favor of
+the real `cpu` built-in, the same "built-in wins" precedence a same-named
+WASM plugin loses to. An instance with an unknown/missing `kind`, or a name
+colliding with a built-in or an earlier instance, is likewise skipped rather
+than breaking config load (invariant #3). Each instance's own `name` becomes
+its click-toggle/range identity end-to-end (invariant #7) — its
+`Context.toggled` key, its `range=user|NAME`, and its `active_format` lookup
+are all the *instance* name, not the kind.
+
+Note: a per-invocation `rustline render --plugin-dir=X` is silently ignored
+while the optional daemon (see below) is reachable — the daemon always
+serves with whatever `--plugin-dir` it was started with, since the wire
+protocol carries no per-request override.
 
 **Hostname and pane_id widgets:** both are in the default layout (`left =
 [pane_id, hostname]`) and each now take a `format` option (previously a fixed
@@ -1303,10 +1556,14 @@ becomes a tmux `range=user|<name>` argument verbatim. Also avoid the handful
 of host-owned state-file names the CLI writes flat under `<state_root>`, each
 of which would collide with a plugin's own same-named state directory:
 `cpu-sample` (the `cpu` widget's snapshot cache), `cpu-history`/
-`memory-history` (the `{spark}` history rings, W45), `throughput-sample` (the
-`throughput` widget's prior counter sample, W47), and `wasmtime-cache`/
+`memory-history` (the `{spark}` history rings, W45), `throughput-sample`/
+`throughput-sample-<iface>` (the `throughput` widget's prior counter sample —
+one file for the aggregate read, one per named interface once multiple
+`throughput` instances exist, W46/W47), `wasmtime-cache`/
 `wasmtime-cache.toml` (the WASM compile cache dir + its config, W43 — kept
-deliberately distinct from any plugin state subdir). Every collision degrades
+deliberately distinct from any plugin state subdir), and `daemon.sock` (the
+optional persistent daemon's Unix socket under `$XDG_RUNTIME_DIR/rustline/`,
+falling back to `<state_root>/daemon.sock`, W48). Every collision degrades
 gracefully (a failed create/rename is `warn!`-logged, never panics), but is
 still best avoided.
 
@@ -1440,7 +1697,11 @@ info|debug|trace` and is parsed leniently (a typo falls back to the default).
    legacy). Keep the wire types **additive** — no `deny_unknown_fields`, so an
    older guest keeps deserializing a newer `Context` (this is why `uptime`/
    `media`/`throughput`/`cpu_history`/`mem_history` could be omitted from
-   `WireContext` without breaking anything).
+   `WireContext` without breaking anything — and why W46's `Context.disks`/
+   `Context.throughputs` maps (the per-instance disk/throughput readings) are
+   likewise NOT mirrored into `WireContext`; a WASM guest still sees only the
+   base `Context.disk`/`Context.throughput` singular reading, unaffected by
+   how many `disk`/`throughput` instances exist in the layout).
 3. **`Config::load` is total** — a bad config must never break the bar.
 4. **`init` output must be injection-safe** (`#{q:}` + `--flag=` form).
 5. **`render_region` puts `segments[0]` leftmost regardless of `Direction`.** The
@@ -1454,7 +1715,19 @@ info|debug|trace` and is parsed leniently (a typo falls back to the default).
    `Context.toggled` key, and a widget's/plugin's own `range_name()`/
    `active_format` key must all be the *same* layout/registry name. Break that
    chain anywhere and the widget silently stops being clickable or
-   toggleable — there's no error, just a click that does nothing.
+   toggleable — there's no error, just a click that does nothing. W46
+   (multiple widget instances) extends this: for a named `[instances.<name>]`
+   entry, that identity chain runs on the **instance** name, not its `kind` —
+   each of the twelve clickable widget structs now carries its own `name:
+   String` field precisely so `render`/`range_name`/`active_format` all key
+   off the instance name instead of a hardcoded kind literal. This also
+   means an instance can never be allowed to shadow a built-in of the same
+   name (it would silently steal that built-in's click/toggle identity) —
+   `Registry::with_builtins` skips a colliding instance outright (built-in
+   wins), and `Config::color_overrides()`/`click_map()`/`layout_kinds` apply
+   the same `is_builtin_widget_name` precedence guard so a colliding
+   instance's config can't hijack the built-in's projected color/click
+   binding either (a W46 review-caught bug — see `config.rs` above).
 
 **Platform-specific reads stay at the `Context`-build edge.** `read_battery()`
 (`crates/rustline/src/battery.rs`), `read_cpu()` (`crates/rustline/src/cpu.rs`),
@@ -1728,8 +2001,42 @@ branch on platform.
     a `[cache] directory`-only TOML with no `enabled`; best-effort/N2) plus a
     `bench` `build_plugin`-timing pass measuring the ~13× / ~45 ms-per-plugin
     cold-start compile win.
-- Optional daemon front-end for sub-second / push-driven widgets (the pure core
-  and the wasm host are already daemon-ready).
+- Done (whats-next bundle #4, branch `whats-next/2026-07-23-execute` — see the
+  [design spec](docs/superpowers/specs/2026-07-23-rustline-whatsnext-bundle-4-design.md)
+  / [plan](docs/superpowers/plans/2026-07-23-rustline-whatsnext-bundle-4.md)):
+  - W33 — `rustline init` re-run seeding + confirm: `init.rs`'s
+    `seed_answers`/`clock_from_format` pre-fill the wizard's shown defaults
+    from an existing `config.toml` instead of always the recommended answers,
+    and `summarize_answers` + a line-diff + "Write these changes?" confirm
+    gates the actual write on interactive runs (`--defaults`/`--dry-run`/
+    `--print`/`--uninstall`/non-TTY unchanged).
+  - W46 — multiple widget instances: a top-level `[instances.<name>]` table
+    (`Config.instances: HashMap<String, toml::Value>`, re-parsed per `kind`
+    into that kind's existing Opts struct) lets any of the twelve clickable
+    widget kinds appear more than once in a layout with distinct options
+    (dual clocks in different timezones, multiple disk mounts, per-interface
+    throughput). Each of those twelve widget structs now carries a `name`
+    field so its click-toggle/range identity is the *instance* name, not the
+    kind (invariant #7); `Context.disks`/`Context.throughputs` (keyed by
+    mount/interface) let the parameterized `disk`/`throughput` kinds serve
+    distinct instances without clobbering each other, and per-interface
+    throughput sample files (`throughput-sample-<iface>`) prevent the same
+    for persisted state. An instance can never shadow a built-in name
+    (`BUILTIN_WIDGET_NAMES`/`is_builtin_widget_name`, applied uniformly across
+    registration, `color_overrides()`, `click_map()`, and `layout_kinds`).
+  - W48 — optional persistent daemon: `rustline daemon run|status|stop`
+    (`daemon.rs`/`daemon_client.rs`/`daemon_proto.rs`) keeps the parsed
+    config, resolved theme, warm widget registry, and instantiated WASM
+    plugins alive across tmux refreshes behind a length-prefixed-JSON Unix
+    socket protocol; it reuses the exact same `build_region_context`/
+    `render_named_region` path as the in-process render, so output is
+    byte-identical, reloads on a config-file mtime change, and every render
+    client (`render left|right|window`) tries the socket first and falls
+    back to the normal in-process render on **any** failure (daemon not
+    running included) — never a dependency, purely a speedup. No
+    self-daemonization (`daemon run` is foreground-only; a supervisor
+    backgrounds it) and no auto-spawn. `doctor` gained an advisory-only
+    daemon-reachability row.
 - Per-widget richer customization; naming the widget in the panic-guard `warn!`.
 - Range-on-binding — today a `run`/`open_url` click binding only fires on a
   widget that already emits a clickable range (i.e. has a non-empty
@@ -1760,3 +2067,5 @@ branch on platform.
 - Spec (whats-next bundle #3): `docs/superpowers/specs/2026-07-23-rustline-whatsnext-bundle-3-design.md`
 - Plan (whats-next bundle #3): `docs/superpowers/plans/2026-07-23-rustline-whatsnext-bundle-3.md`
 - Note (W43 compiled-module cache feasibility): `docs/superpowers/notes/2026-07-23-w43-compiled-module-cache-feasibility.md`
+- Spec (whats-next bundle #4): `docs/superpowers/specs/2026-07-23-rustline-whatsnext-bundle-4-design.md`
+- Plan (whats-next bundle #4): `docs/superpowers/plans/2026-07-23-rustline-whatsnext-bundle-4.md`

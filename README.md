@@ -31,6 +31,13 @@ pane, window, host, and system info, with zero required configuration.
   `cpu` reading toggling to one with a gauge bar). You can also bind a specific
   mouse button (left/middle/right) to open a URL or run a command.
 - Per-widget color overrides (`fg`/`bg`) to pin a widget's colors.
+- Run the same widget more than once with different options via
+  `[instances.<name>]` — e.g. two clocks in different timezones, or gauges
+  for more than one disk mount.
+- Optional persistent daemon (`rustline daemon run`) that keeps your config,
+  theme, widget registry, and WASM plugins warm across tmux refreshes;
+  renders fall back to the normal in-process path automatically whenever
+  it's not running.
 - Install third-party WASM plugins straight from GitHub
   (`rustline plugin install owner/repo`), then grant only the capabilities they
   need.
@@ -105,6 +112,14 @@ resolved absolute path rather than a bare name, since the tmux server's own
 shell may not share your interactive shell's `$PATH` — run `rustline doctor`
 if the bar ever comes up empty.
 
+Re-running `rustline init` later (say, to turn on mouse mode or switch
+themes) seeds every question's shown default from your *existing*
+`config.toml` instead of resetting to the recommended answers, and — before
+writing anything — shows a summary of what you answered plus a diff of both
+files against their current contents and asks you to confirm.
+
+
+
 > **Font requirement:** the powerline separators are drawn with Powerline
 > glyphs (U+E0B0–U+E0B3). Use a Nerd Font or another powerline-patched font
 > in your terminal, or the separators will show as boxes/blanks.
@@ -139,7 +154,9 @@ widgets](#ip-address-widgets) below), `battery` (see [Battery
 widget](#battery-widget) below), `git` (see [Git widget](#git-widget)
 below), `disk` (see [Disk widget](#disk-widget) below), `uptime` / `media`
 (see [Uptime and media widgets](#uptime-and-media-widgets) below), and
-`throughput` (see [Throughput widget](#throughput-widget) below).
+`throughput` (see [Throughput widget](#throughput-widget) below). Most of
+these can also appear more than once in your layout under a name of your
+choosing — see [Multiple widget instances](#multiple-widget-instances) below.
 
 Example — reorder the right region and change the clock format:
 
@@ -165,6 +182,37 @@ first if it doesn't exist); `rustline config validate` strictly parses it
 and reports any error with its location, unlike `Config::load`'s silent
 fallback to defaults. A global `--config <path>` flag points any subcommand
 at a different config file.
+
+### Multiple widget instances
+
+The same widget can appear more than once in your layout with different
+options via a top-level `[instances.<name>]` table — pick any name you like,
+set `kind` to the widget kind you want, and the rest of the table is that
+kind's usual options. Add the instance's name (not the kind) to a `layout`
+array to place it:
+
+```toml
+[layout]
+right = ["clock_utc", "datetime", "disk_data", "disk"]
+
+[instances.clock_utc]
+kind      = "datetime"
+timezone  = "UTC"
+format    = "%H:%MZ"
+
+[instances.disk_data]
+kind  = "disk"
+mount = "/data"
+```
+
+This works for any of the twelve widgets that support click-to-toggle
+(`datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`, `loadavg`,
+`git`, `disk`, `uptime`, `media`, `throughput`) — handy for a second clock in
+another timezone, usage bars for more than one disk mount, or per-interface
+throughput. An instance name follows the same rule as a click-toggle name
+(letters/digits/`_`/`-`, at most 15 bytes) and can't reuse a built-in
+widget's name — that name always wins, and a colliding or malformed instance
+is skipped with a log warning rather than breaking your config.
 
 ### Hostname and pane ID widgets
 
@@ -630,6 +678,64 @@ re-fetching every iteration. A separate build-timing pass measures each
 plugin's cold `build_plugin` with the on-disk wasmtime compile cache off vs on
 — on a warm cache a cold spawn deserializes the precompiled module instead of
 re-running the compiler (measured ~13× faster per plugin).
+
+## Daemon (optional)
+
+By default every `rustline render` invocation is a fresh, self-contained
+process — it parses your config, resolves your theme, builds the widget
+registry, and (for `left`/`right`) discovers/instantiates any WASM plugins,
+every single time tmux fires `status-interval`. That's normally fast enough
+not to notice, but an optional persistent daemon can keep all of that warm
+across refreshes instead, so a render becomes a quick socket round-trip
+against already-built state:
+
+```bash
+rustline daemon run      # or just `rustline daemon`; runs in the foreground
+rustline daemon status   # is it up and reachable?
+rustline daemon stop     # ask it to shut down
+```
+
+`rustline daemon run` does **not** background itself — run it under a
+supervisor. A systemd **user** unit works well:
+
+```ini
+# ~/.config/systemd/user/rustline-daemon.service
+[Unit]
+Description=rustline render daemon
+
+[Service]
+ExecStart=%h/.local/bin/rustline daemon run
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now rustline-daemon.service
+```
+
+Or start it from tmux itself with a `run-shell` line in `~/.tmux.conf`
+(outside the managed `rustline init` block, so it isn't removed by a
+future re-run):
+
+```tmux
+run-shell "rustline daemon status >/dev/null 2>&1 || rustline daemon run >/dev/null 2>&1 &"
+```
+
+**You never have to think about whether it's running.** Every render call
+tries the daemon's Unix socket first and transparently falls back to the
+normal in-process render on *any* failure — the socket doesn't exist, the
+daemon isn't listening, a request times out, whatever. There's no wizard
+question for this yet and no auto-spawn: it's entirely opt-in, and
+`rustline doctor` reports whether a daemon is currently reachable
+(advisory only — never a failing check). The daemon reloads its config
+automatically when `config.toml`'s modification time changes, so editing
+your config doesn't require a restart. One thing it does *not* pick up
+live: a per-invocation `render --plugin-dir=X` is ignored while a daemon is
+reachable, since the daemon always serves with whatever `--plugin-dir` it
+was started with — restart it if you need to point it at a different
+plugin directory.
 
 ## Plugins
 
