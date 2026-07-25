@@ -354,7 +354,10 @@ pub fn exec(program: &str, args: &[&str]) -> Result<ExecResult, HostError> {
 /// [`exec`] with a host-managed TTL cache keyed on the whole command line, so
 /// a slow command isn't re-run on every status-line refresh. `now` is an
 /// RFC3339 instant (the host uses it for freshness). Only a zero-exit run is
-/// cached; a failed refresh serves the last good result with `stale = true`.
+/// written to the cache. A non-zero exit is returned immediately as fresh
+/// data (`stale: false`, not written to the cache) — only a run that
+/// couldn't happen at all (denied, spawn failure, timeout) falls back to a
+/// stale cached entry, if one exists.
 pub fn exec_cached(
     program: &str,
     args: &[&str],

@@ -294,8 +294,15 @@ may not have your `$PATH`" rationale). No tmux format variable is
 interpolated here at all, so there is no `#{q:}` concern.
 
 Consequences to keep consistent:
-- The `init --print` legacy one-line block is **unchanged** (it emits no
-  bindings today and still won't).
+- The `init --print` legacy one-line block is **not** special-cased here:
+  `--print` calls the same `tmux_conf::init_block` as every other path (just
+  with `two_line: false, mouse: false, interval: 1`), and `init_block` has
+  always emitted the `MouseDown{1,2,3}Status` bindings unconditionally. So
+  `--print`'s block **also** gains the new `bind-key W` line — that is the
+  correct, consistent outcome, not a gap to special-case around. No existing
+  test pins `--print`'s output byte-for-byte, so nothing needs to change to
+  make this true; it already falls out of `init_block` being one shared
+  function.
 - `init --uninstall` already strips the whole marker block, so the binding is
   removed with it — nothing to add.
 - `tmux_conf.rs`'s characterization tests must be updated to expect the new
