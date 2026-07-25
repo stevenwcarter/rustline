@@ -47,7 +47,10 @@ pane, window, host, and system info, with zero required configuration.
   (`rustline plugin install owner/repo`), then grant only the capabilities they
   need — including, if you choose to, running a local command
   (`allowed_commands`). A plugin's recorded checksum is verified every time it
-  loads, not just recorded at install time. See [Plugins](#plugins) below.
+  loads, not just recorded at install time — this catches accidental swaps
+  and corrupt/stale files, though it's not a privilege boundary or a pin
+  against a compromised upstream (see [Plugins](#plugins) below for the exact
+  scope).
 - Seven built-in themes (a `default` plus six multi-accent, truecolor curated
   themes) selectable via `rustline theme use`, browsable interactively with
   `rustline theme pick`, plus a `theme new` scaffolder for tweaking your own
@@ -87,8 +90,9 @@ tar xzf rustline-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
 cp rustline-v0.1.0-x86_64-unknown-linux-gnu/rustline ~/.local/bin/rustline
 ```
 
-Releases are marked as GitHub **pre-releases** while the project is under
-`v0.x`.
+Every release is unconditionally marked as a GitHub **pre-release** — the
+release workflow sets this on every tag it publishes, with no version check
+(there is no "graduate to a stable release" switch yet).
 
 ### Build from source
 
@@ -1070,8 +1074,12 @@ weather
   build:   just build-plugin weather
 ```
 
-The index is a small, versioned JSON document fetched over HTTPS and cached
-for 24h at `<state_root>/plugin-index.json`; a fetch failure serves the
+The index is a small, versioned JSON document, fetched from the built-in
+default over HTTPS (a GitHub-hosted `raw.githubusercontent.com` URL) and
+cached for 24h at `<state_root>/plugin-index.json`. That's only the default,
+though — `plugin_index_url` (below) is passed straight to the same `ureq`
+client `plugin install` uses, so a plain `http://` mirror works too (unlike
+the default, it just isn't verified in transit). A fetch failure serves the
 last-known-good cached copy (with a warning) rather than failing outright, as
 long as something has been cached before. Each entry marks whether it's
 already present in your plugin dir, and shows either a `just build-plugin
@@ -1086,8 +1094,12 @@ plugin_index_url = "https://example.com/my-index.json"   # optional; overrides t
 
 Each entry's `capabilities` list is advertising copy only — it tells you what
 a plugin will *ask* for before you install it, but grants nothing on its own;
-only `plugin approve` (or a hand edit) ever widens an allowlist. `search` is
-entirely read-only: it never touches your config or the plugin dir.
+only `plugin approve` (or a hand edit) ever widens an allowlist. `search` does
+read your config (for `plugin_index_url`) and your plugin dir (to mark
+already-installed entries) — but it never *modifies* either: it never writes
+`config.toml`, never installs or removes a plugin, and never touches the
+toggle state. Its only write is the index cache itself, at
+`<state_root>/plugin-index.json`.
 
 Install a published plugin straight from a GitHub release instead of building
 it yourself:
@@ -1127,6 +1139,31 @@ after rebuilding a plugin — where a recorded digest legitimately goes stale
 on every build. It only warns on a bad checksum and still runs the plugin.
 Your actual status line, the daemon, and every other real load always
 enforce the check.
+
+**Hazard: rebuilding an installed plugin invalidates its checksum.** Only
+`plugin install`/`plugin update` ever write `[plugins.<name>].checksum`.
+`plugin build` (and `just build-plugin`) overwrite the `.wasm` in place but
+never touch that field, so if you `plugin install` a plugin and later rebuild
+it from source, the recorded digest no longer matches — the plugin fails the
+check on the next load and silently drops out of the bar. Recover by clearing
+`[plugins.<name>].checksum` in your config (opts that plugin back out of
+verification), or, if it has a recorded GitHub `source`, running `rustline
+plugin update <name>` — though that re-downloads the published release and
+overwrites your local rebuild, so only use it if you're fine reverting to
+what's published.
+
+**What this actually protects against.** Checksum verification is a real
+integrity check, not a security perimeter: it catches accidental swaps,
+truncated or corrupt downloads, stale build artifacts, and a plugin dir that
+somehow ended up writable by a different principal than your config — worth
+having, but bounded. It does **not** stop a same-user attacker: anyone who can
+write to `~/.local/share/rustline/plugins/*.wasm` can just as easily edit
+`~/.config/rustline/config.toml` and delete the `checksum` line — there's no
+privilege boundary between the two, and no strict/"require checksum" mode that
+would refuse to load an unpinned plugin. It also does **not** pin against a
+compromised upstream: `plugin install`/`plugin update` both *rewrite* the
+digest from whatever they just downloaded (trust-on-first-use), so a
+compromised release is recorded and then dutifully verified against itself.
 
 Scaffold a new plugin crate instead of copying `weather` by hand:
 

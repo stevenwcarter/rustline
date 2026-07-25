@@ -643,14 +643,21 @@ these shared types, not a design shortcut. Keep them serializable.
   bytes: &[u8]) -> ChecksumVerdict` accept 64 hex chars (case-insensitive), an
   optional `sha256:` prefix, and surrounding whitespace; an absent or blank
   `recorded` is `NotRecorded` (nothing to verify, loads as before), not a
-  refusal. `ChecksumVerdict::allows_load()` is the one predicate
-  `register_plugins` consults: `NotRecorded`/`Match` permit registration;
-  `Mismatch`/`Malformed` don't — a value this build cannot even parse as a
-  digest **fails closed** (treated as a rejection, the same as a proven
-  mismatch, never as "effectively unpinned"). Pure and I/O-free, so every
-  rejection path is unit-tested without touching a real `.wasm`. Re-exported
-  at the crate root as `rustline_wasm::{sha256_hex, verify_checksum,
-  ChecksumVerdict}`.
+  refusal. `register_plugins` — the real gate the bar, the daemon, and
+  `plugin list` all go through — matches the four `ChecksumVerdict` variants
+  directly rather than calling `allows_load()`, so it can log a distinct
+  `warn!` message per rejection reason: `NotRecorded`/`Match` permit
+  registration; `Mismatch`/`Malformed` skip the plugin — a value this build
+  cannot even parse as a digest **fails closed** (treated as a rejection, the
+  same as a proven mismatch, never as "effectively unpinned").
+  `ChecksumVerdict::allows_load()` is a convenience predicate with a single
+  caller, `instantiate_named` (the `plugin run` dev harness): it uses the
+  verdict only to decide whether to `warn!` before loading anyway (a harness
+  iterating on a plugin you just rebuilt expects a stale digest), never to
+  refuse — the harness always instantiates regardless of the verdict. Pure
+  and I/O-free, so every rejection path is unit-tested without touching a
+  real `.wasm`. Re-exported at the crate root as
+  `rustline_wasm::{sha256_hex, verify_checksum, ChecksumVerdict}`.
 - `lib.rs::{abi_decision, register_plugins, instantiate_named,
   discover_plugin_names}` — `pub fn discover_plugin_names(plugin_dir: &Path)
   -> Vec<String>` is the discovery half of `register_plugins` split out on its
@@ -2229,6 +2236,32 @@ through the real, non-bypassable gate. `plugin list` does **not** — it reads
 only the config's `[plugins.*]` entries and never opens a `.wasm`, so it
 lists a checksum-failing (or entirely missing) plugin exactly like a healthy
 one; use `plugin run` or the log to see a verdict.
+
+**Hazard: rebuilding an installed plugin invalidates its recorded checksum.**
+`checksum` is written **only** by `plugin install`/`plugin update` (grep
+confirms `plugin_install.rs` is the sole writer of that field). `plugin build`
+and `just build-plugin` overwrite the `.wasm` in place but never touch
+`checksum` — so `plugin install`ing a plugin, then later rebuilding it from
+source, leaves a stale digest that no longer matches the new bytes: the next
+load is a `Mismatch`, and the widget silently disappears from the bar (a
+`warn!` in the log, never a crash — invariant N2). Recover by clearing
+`[plugins.<name>].checksum` (opts that plugin back out of verification) or,
+if the plugin has a recorded `owner/repo` `source`, running `rustline plugin
+update <name>` — though that re-downloads the published release and
+overwrites your local rebuild rather than hashing it, so it's only the right
+recovery when you're fine reverting to what's published.
+
+**What checksum verification does and does not defend against.** It catches
+accidental swaps, truncated/corrupt downloads, stale build artifacts, and a
+plugin dir writable by a different principal than the config — genuinely
+useful failure modes. It is **not** a privilege boundary: anyone who can write
+`~/.local/share/rustline/plugins/*.wasm` can equally edit
+`~/.config/rustline/config.toml` and delete the `checksum` line, and there is
+no strict/"require checksum" mode that would stop them. It is also **not** a
+pin against a compromised upstream: `plugin install`/`plugin update` both
+*rewrite* the digest from whatever they just downloaded (trust-on-first-use;
+see above) — a poisoned release is recorded and then verified against itself,
+not caught.
 
 **Exec capability (`allowed_commands`):** a plugin can ask the host to run a
 program on its behalf via `rl_exec` (plain, every render) or `rl_exec_cached`
