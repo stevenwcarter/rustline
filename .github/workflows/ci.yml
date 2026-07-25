@@ -36,6 +36,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v3
+      # `release.yml` builds with `--locked`; nothing else does. Without this a
+      # stale Cargo.lock passes every PR check and first fails at tag-push time.
+      # Covers all six committed locks (workspace + the excluded plugins).
+      - run: just check-lock
       - run: just test
 
   plugins:
