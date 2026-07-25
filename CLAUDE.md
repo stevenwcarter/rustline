@@ -1480,13 +1480,34 @@ config-file path for every subcommand that reads or writes it (default:
   widget manager needs tmux >= 3.2 (display-popup); the status line itself
   works") — the widget-manager popup binding needs `display-popup` (tmux
   ≥ 3.2), one version tier above the `range=user|` floor (≥ 3.1) the status
-  line itself needs; this row never affects the exit code either.
+  line itself needs; this row never affects the exit code either. Also
+  another advisory-only row, "plugin checksums": hashes every configured
+  `[plugins.*]` entry's installed `.wasm` (via `plugin_checksum::status_for`
+  — the same read-and-verify helper backing `plugin list`'s `checksum_status`
+  field, below) and reports a summary — `"<N> verified, <M> unpinned"`, plus,
+  only when there's something actionable, `"; checksum mismatch: <names>"` /
+  `"; malformed checksum: <names>"` / `"; .wasm not found: <names>"` — or
+  `"no plugins configured"` when `[plugins.*]` is empty. **Always `ok`/`warn`,
+  never `fail`**: a checksum problem is real and worth surfacing, but
+  `doctor`'s exit code is reserved for setup that's outright broken, and the
+  checksum gate itself already degrades a bad plugin to "widget missing,"
+  never to a broken bar (N2) — structurally, `run()`'s exit-code count only
+  ever tallies `CheckStatus::Fail` entries, and this row is coded to never
+  produce one.
 - `rustline completions <bash|zsh|fish>` — print a shell-completion script
   (via `clap_complete`) to stdout.
 - `rustline plugin list [--json]` — discovered/configured plugins with their
-  source, allowlists, and state quota; `--json` emits a JSON array of
-  `{name, source, tag, allowed_urls, allowed_paths, allowed_commands,
-  max_state_bytes, has_manifest}` instead of human text.
+  source, allowlists, state quota, and checksum status; `--json` emits a JSON
+  array of `{name, source, tag, allowed_urls, allowed_paths,
+  allowed_commands, max_state_bytes, has_manifest, checksum_status}` instead
+  of human text (the human path prints the same value as a `checksum: `
+  line per plugin). `checksum_status` is one of `"verified"`/`"unpinned"`/
+  `"mismatch"`/`"malformed"`/`"missing"` (`plugin_checksum::
+  PluginChecksumStatus`, the same read-and-verify helper backing `doctor`'s
+  "plugin checksums" row above) — read-only and purely informational: it
+  reports what `register_plugins`' real load-time gate would decide, but
+  doesn't gate `list` itself, so a mismatching/malformed/missing plugin still
+  appears with its full allowlists.
 - `rustline plugin search [QUERY] [--json] [--refresh]` — browse the curated
   plugin index (W49) for widgets you can install; omitting `QUERY` lists
   every entry, otherwise a case-insensitive substring filter over name and
@@ -1528,10 +1549,23 @@ config-file path for every subcommand that reads or writes it (default:
   exactly those requested URL/path/command patterns into
   `[plugins.<name>]`'s allowlists; declines (writing nothing) without
   confirmation, and does nothing if the plugin has no manifest.
-- `rustline plugin build <dir> [--release] [--plugin-dir <d>]` — build any
-  WASM guest plugin crate (any `cdylib`-for-`wasm32-unknown-unknown` crate,
-  not just this repo's `plugins/*`) and install the resulting `.wasm` into the
-  plugin dir. Errors (never panics) on a missing crate/artifact.
+- `rustline plugin build <dir> [--release] [--plugin-dir <d>] [--yes]` —
+  build any WASM guest plugin crate (any `cdylib`-for-`wasm32-unknown-unknown`
+  crate, not just this repo's `plugins/*`) and install the resulting `.wasm`
+  into the plugin dir. Errors (never panics) on a missing crate/artifact.
+  After a successful install, if that plugin has a recorded
+  `[plugins.<name>].checksum` that no longer matches the freshly built bytes,
+  it offers to refresh it: on a TTY it asks `Update the recorded checksum?
+  [Y/n]` (Enter means yes — unlike `plugin approve`'s confirm, which defaults
+  to no, since this is just re-pinning a hash to bytes you built yourself,
+  not a new capability grant); `--yes` refreshes non-interactively (for
+  scripts/CI). On a **non-TTY** run without `--yes`, it deliberately does
+  **not** prompt and does **not** rewrite the checksum — it prints a notice
+  and leaves the stale digest in place, since silently re-pinning in a
+  non-interactive context would let a compromised local toolchain bless its
+  own output. Stays silent whenever no checksum is recorded or the bytes
+  already match. `just build-plugin` (which routes through this command)
+  surfaces the same prompt/notice.
 - `rustline plugin run <name> [--plugin-dir <d>]` — dev harness: instantiate
   one plugin, render it against a fabricated sample `Context`, and print its
   segments plus any capability denials it triggered. Read-only — touches
@@ -2232,24 +2266,41 @@ a bad verdict — it logs and still runs the plugin — since that dev harness i
 used right after rebuilding a plugin, where a recorded digest legitimately
 mismatches every build; the bar and the daemon (which rebuilds its registry
 via this same `register_plugins` on a config-file mtime change) both go
-through the real, non-bypassable gate. `plugin list` does **not** — it reads
-only the config's `[plugins.*]` entries and never opens a `.wasm`, so it
-lists a checksum-failing (or entirely missing) plugin exactly like a healthy
-one; use `plugin run` or the log to see a verdict.
+through the real, non-bypassable gate. `plugin list` is not gated by this at
+all — a checksum-failing (or entirely missing) plugin still appears in the
+list exactly like a healthy one, with its full allowlists — but it now
+*surfaces* the same read for visibility: both the human and `--json` output
+include a per-plugin checksum status (`unpinned`/`verified`/`mismatch`/
+`malformed`/`missing`, via `plugin_checksum::status_for` — the same
+read-and-verify helper backing `doctor`'s "plugin checksums" row; see the CLI
+section above). Purely informational: `list` reads the `.wasm` bytes to
+compute it, but the verdict never changes what gets listed.
 
-**Hazard: rebuilding an installed plugin invalidates its recorded checksum.**
-`checksum` is written **only** by `plugin install`/`plugin update` (grep
-confirms `plugin_install.rs` is the sole writer of that field). `plugin build`
-and `just build-plugin` overwrite the `.wasm` in place but never touch
-`checksum` — so `plugin install`ing a plugin, then later rebuilding it from
-source, leaves a stale digest that no longer matches the new bytes: the next
-load is a `Mismatch`, and the widget silently disappears from the bar (a
-`warn!` in the log, never a crash — invariant N2). Recover by clearing
-`[plugins.<name>].checksum` (opts that plugin back out of verification) or,
-if the plugin has a recorded `owner/repo` `source`, running `rustline plugin
-update <name>` — though that re-downloads the published release and
-overwrites your local rebuild rather than hashing it, so it's only the right
-recovery when you're fine reverting to what's published.
+**Rebuilding an installed plugin's stale checksum is handled by `plugin
+build` itself, not left as a hazard.** `checksum` is written **only** by
+`plugin install`/`plugin update` (grep confirms `plugin_install.rs` is the
+sole writer of that field) — `plugin build` (and `just build-plugin`, which
+now routes through it) just installs the freshly built `.wasm`. But after a
+successful install, `build_plugin` calls `plugin_cmd.rs`'s
+`maybe_refresh_stale_checksum`: if that plugin has a recorded checksum and
+the rebuilt bytes no longer verify (`!ChecksumVerdict::allows_load()`), it
+offers to fix it right there — on a TTY, `confirm_checksum_refresh` asks
+`Update the recorded checksum? [Y/n]` (Enter means yes, unlike `plugin
+approve`'s no-defaulting confirm, since this just re-pins a hash to bytes
+the user built themselves rather than granting a new capability); `--yes`
+(`BuildArgs::yes`) does the same non-interactively.
+On a **non-TTY** run without `--yes` — the CI/script case — it deliberately
+does **neither**: no prompt, no rewrite, just `stale_checksum_notice`'s
+printed reminder, so a compromised local toolchain can't silently bless its
+own rebuilt output by re-pinning the checksum on its own. It stays quiet
+whenever no checksum is recorded or the bytes already match. For that
+non-TTY case, or a `plugin build` run before this refresh existed, the manual
+recovery still works: clear `[plugins.<name>].checksum` (opts that plugin
+back out of verification) or, if the plugin has a recorded `owner/repo`
+`source`, run `rustline plugin update <name>` — though that re-downloads the
+published release and overwrites your local rebuild rather than hashing it,
+so it's only the right recovery when you're fine reverting to what's
+published.
 
 **What checksum verification does and does not defend against.** It catches
 accidental swaps, truncated/corrupt downloads, stale build artifacts, and a

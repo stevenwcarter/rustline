@@ -151,8 +151,7 @@ struct PluginEntryJson<'a> {
     /// Whether the installed `.wasm` verifies against the recorded
     /// `checksum` — `"verified"`/`"unpinned"`/`"mismatch"`/`"malformed"`/
     /// `"missing"` (see `plugin_checksum::PluginChecksumStatus`). Additive
-    /// field (W? checksum visibility): every other field/shape here is
-    /// unchanged.
+    /// field: every other field/shape here is unchanged.
     checksum_status: &'static str,
 }
 

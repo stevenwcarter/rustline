@@ -1140,14 +1140,27 @@ on every build. It only warns on a bad checksum and still runs the plugin.
 Your actual status line, the daemon, and every other real load always
 enforce the check.
 
-**Hazard: rebuilding an installed plugin invalidates its checksum.** Only
-`plugin install`/`plugin update` ever write `[plugins.<name>].checksum`.
-`plugin build` (and `just build-plugin`) overwrite the `.wasm` in place but
-never touch that field, so if you `plugin install` a plugin and later rebuild
-it from source, the recorded digest no longer matches — the plugin fails the
-check on the next load and silently drops out of the bar. Recover by clearing
+**Rebuilding an installed plugin's stale checksum is handled for you.** Only
+`plugin install`/`plugin update` ever *record* `[plugins.<name>].checksum`;
+`plugin build` (and `just build-plugin`, which now routes through it) just
+installs the freshly built `.wasm`. If that plugin already has a recorded
+checksum and the rebuilt bytes no longer match it, `plugin build` notices and
+offers to fix it right there: on a terminal it asks `Update the recorded
+checksum? [Y/n]` (Enter means yes — refreshing a hash to match bytes you just
+built yourself isn't a new capability grant, unlike `plugin approve`'s
+confirm), and `--yes` does the same non-interactively. On a **non-TTY** run
+(CI, a script) without `--yes`, it deliberately does **not** prompt and does
+**not** rewrite the checksum — it prints a notice and leaves the stale digest
+in place, so the plugin keeps failing the load-time check until you refresh
+it explicitly. That's by design: silently re-pinning in a non-interactive
+context would let a compromised local toolchain bless its own output, which
+is exactly what checksum verification exists to catch. It stays completely
+quiet whenever there's no checksum recorded or the bytes already match.
+
+For that non-TTY case — or if you'd rather not go through `plugin build` at
+all — the manual recovery paths still work: clear
 `[plugins.<name>].checksum` in your config (opts that plugin back out of
-verification), or, if it has a recorded GitHub `source`, running `rustline
+verification), or, if it has a recorded GitHub `source`, run `rustline
 plugin update <name>` — though that re-downloads the published release and
 overwrites your local rebuild, so only use it if you're fine reverting to
 what's published.
