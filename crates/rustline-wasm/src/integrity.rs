@@ -47,10 +47,15 @@ impl ChecksumVerdict {
 }
 
 /// Normalize a recorded digest for comparison: trim, drop an optional
-/// `sha256:` prefix, lowercase. `None` when the result is not 64 hex digits.
+/// `sha256:` prefix (matched case-insensitively — `SHA256:`/`Sha256:` etc. all
+/// strip too), lowercase. `None` when the result is not 64 hex digits.
 fn normalize(recorded: &str) -> Option<String> {
     let trimmed = recorded.trim();
-    let trimmed = trimmed.strip_prefix("sha256:").unwrap_or(trimmed).trim();
+    const PREFIX: &str = "sha256:";
+    let trimmed = match trimmed.get(..PREFIX.len()) {
+        Some(head) if head.eq_ignore_ascii_case(PREFIX) => trimmed[PREFIX.len()..].trim(),
+        _ => trimmed,
+    };
     if trimmed.len() != 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
@@ -151,6 +156,32 @@ mod tests {
         assert_eq!(
             verify_checksum(Some(&prefixed), b"hello"),
             ChecksumVerdict::Match
+        );
+    }
+
+    #[test]
+    fn uppercase_sha256_prefix_is_accepted() {
+        // The prefix strip must be case-insensitive: `SHA256:` (and any other
+        // casing) should verify exactly like a lowercase `sha256:` prefix, not
+        // fall through to `Malformed` because the prefix wasn't recognized.
+        let prefixed = format!("SHA256:{HELLO_SHA256}");
+        assert_eq!(
+            verify_checksum(Some(&prefixed), b"hello"),
+            ChecksumVerdict::Match
+        );
+    }
+
+    #[test]
+    fn sha256_prefix_with_a_malformed_digest_is_still_malformed() {
+        // Proves prefix-stripping and digest validation compose: recognizing
+        // the prefix must not short-circuit into treating whatever follows it
+        // as automatically well-formed.
+        let prefixed = "sha256:not-a-real-digest".to_string();
+        assert_eq!(
+            verify_checksum(Some(&prefixed), b"hello"),
+            ChecksumVerdict::Malformed {
+                recorded: prefixed.clone()
+            }
         );
     }
 
