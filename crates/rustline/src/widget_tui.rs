@@ -345,16 +345,28 @@ impl EditorState {
     }
 
     /// True when the pending Space edit would touch CENTER — either removing
-    /// directly from it, or adding into it from AVAILABLE (when CENTER was
-    /// the last focused region before AVAILABLE). Both are refused; see
-    /// [`CENTER_FIXED_STATUS`].
+    /// directly from it, or adding into it from AVAILABLE. Both are refused;
+    /// see [`CENTER_FIXED_STATUS`].
+    ///
+    /// The AVAILABLE clause is **unreachable today**: `last_region` is only
+    /// ever written by `shift_column` (to the column being *left*), and the
+    /// sole path into AVAILABLE is from RIGHT — so it is always `Right` when
+    /// `column == Available`. It is kept, and pinned by
+    /// `placing_from_available_into_center_is_refused`, so the guard stays
+    /// correct however focus arrived: a future jump-to-column key or a
+    /// reordered `Column::ALL` would make the path live without anyone having
+    /// to rediscover that CENTER needs refusing here too.
     fn targets_center(&self) -> bool {
         self.column == Column::Center
             || (self.column == Column::Available && self.last_region == Column::Center)
     }
 
-    /// Space: AVAILABLE → append to the last focused region; a region → back
-    /// to AVAILABLE.
+    /// Space: AVAILABLE → append to **RIGHT**; a region → back to AVAILABLE.
+    ///
+    /// Placement targets `last_region`, which is always `Right` in practice
+    /// (see `targets_center`'s doc for why). Use `H`/`L` to move a placed
+    /// widget to another region — that, not Space, is how a widget reaches
+    /// LEFT.
     fn toggle_selected(&mut self) {
         let Some(name) = self.selected().map(str::to_string) else {
             return;
@@ -405,9 +417,9 @@ impl EditorState {
     /// **editable** layout region, via [`layout_move`]. This is the only
     /// path that can ever place a widget in LEFT — AVAILABLE→region
     /// (`toggle_selected`) always appends to `last_region`, which is
-    /// unconditionally RIGHT in practice (see `EditorState::new`'s doc and
-    /// the AVAILABLE `Column::ALL` adjacency), so LEFT was previously
-    /// unreachable from the editor entirely.
+    /// unconditionally RIGHT in practice (see `targets_center`'s doc for the
+    /// `shift_column`/`Column::ALL` adjacency argument), so LEFT was
+    /// previously unreachable from the editor entirely.
     ///
     /// CENTER sits between LEFT and RIGHT in `Region::ALL`'s (visual)
     /// order, but is never a valid H/L destination — [`adjacent_editable_region`]

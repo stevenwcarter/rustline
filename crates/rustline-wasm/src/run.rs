@@ -58,6 +58,16 @@ pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// escaped, never a hang. This is what makes [`EXEC_TIMEOUT`] the whole
 /// run's real bound: `EXEC_TIMEOUT` plus, at most, two of these grace
 /// periods (one per stream).
+///
+/// The trade this makes explicit: a reader thread whose writer escaped is
+/// *abandoned*, not stopped — it stays blocked in `read()`, holding that
+/// pipe's read end, for as long as the escaped descendant keeps the write
+/// end open. A properly daemonizing program closes its stdio (which closes
+/// the pipe and retires the thread); only something contrived — `setsid
+/// sleep 30`, as in this module's own test — holds it. Leaking a parked
+/// thread in that narrow case is strictly better than the alternative this
+/// grace replaced, which was blocking the render (and, under the daemon,
+/// its shared state lock) indefinitely.
 const OUTPUT_GRACE: Duration = Duration::from_millis(250);
 
 /// How the host runs a command. The `perform_exec*` gate decides *whether* to
