@@ -228,8 +228,11 @@ only region AVAILABLE placement appends into); `J`/`K` reorders it within
 its current region; `H`/`L` (shifted, mirroring `J`/`K`) move a placed
 widget directly to the other editable region (LEFT ↔ RIGHT — this is how
 you get a widget into LEFT). A live preview strip along
-the bottom shows the region you're editing, rendered exactly as it would
-appear in tmux, updating as you make changes — before you've saved anything.
+the bottom shows your layout in colour, rendered through the same pipeline
+tmux gets, updating as you make changes — before you've saved anything. It
+sits on one line when the regions fit side by side; if your terminal is too
+narrow, each region drops onto its own line (left-, centre-, and
+right-aligned as they are on the real bar) rather than being clipped.
 `w` writes your changes to `config.toml`; `q` quits (asking to confirm first
 if you have unsaved changes); `?` shows a help overlay.
 

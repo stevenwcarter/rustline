@@ -9,7 +9,7 @@ pub mod themes;
 pub mod widget;
 pub mod widgets;
 
-pub use ansi::tmux_to_ansi;
+pub use ansi::{StyledSpan, parse_markup, tmux_to_ansi};
 pub use assemble::{assign_palette, render_named_region, render_window, render_windows};
 pub use config::{
     ClickBinding, ClickBindings, ColorOverride, Config, Layout, LayoutChange, LayoutEditError,

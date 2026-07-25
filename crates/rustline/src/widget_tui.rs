@@ -29,15 +29,16 @@ use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::layout::{Constraint, Direction as LayoutDirection, Layout as UiLayout};
-use ratatui::style::{Modifier, Style as UiStyle};
+use ratatui::style::{Color as UiColor, Modifier, Style as UiStyle};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use rustline_core::{
-    Config, Layout, Region, Registry, Theme, WidgetPlacement, WidgetSource, layout_disable,
-    layout_enable, layout_move, layout_nudge, render_named_region, tmux_to_ansi,
+    Color, Config, Layout, Region, Registry, Style, Theme, WidgetPlacement, WidgetSource,
+    layout_disable, layout_enable, layout_move, layout_nudge, parse_markup, render_named_region,
 };
 use toml_edit::DocumentMut;
+use unicode_width::UnicodeWidthStr;
 
 /// The four focusable columns: the three layout regions plus the pool of
 /// widgets that aren't currently placed.
@@ -538,10 +539,16 @@ fn map_key(key: KeyEvent) -> KeyKind {
 /// those rebuilds, spamming the rotated log file at typing speed (M4). Only
 /// `cfg.color_overrides()` is still recomputed per draw — a pure, cheap
 /// projection over already-parsed config with no I/O or logging of its own.
-fn preview_line(state: &EditorState, cfg: &Config, theme: &Theme, registry: &Registry) -> String {
+fn preview_regions(
+    state: &EditorState,
+    cfg: &Config,
+    theme: &Theme,
+    registry: &Registry,
+) -> Vec<(Region, Line<'static>)> {
     let ctx = crate::sample_context::sample_context(false);
     let overrides = cfg.color_overrides();
-    let mut parts: Vec<String> = Vec::new();
+    let mut out: Vec<(Region, Line<'static>)> = Vec::new();
+
     for region in Region::ALL {
         let all = state.layout().get(region);
         // Only names the registry knows render for real; anything else (a
@@ -561,16 +568,115 @@ fn preview_line(state: &EditorState, cfg: &Config, theme: &Theme, registry: &Reg
             Region::Left | Region::Center => rustline_core::Direction::Left,
         };
         let markup = render_named_region(dir, &names, &ctx, registry, theme, &overrides);
-        let mut rendered = tmux_to_ansi(&markup);
+
+        // `parse_markup`, not `tmux_to_ansi`: ratatui writes cells and never
+        // interprets ANSI escapes, so escape bytes handed to it are drawn as
+        // literal text with no styling at all. See `ansi.rs`'s module doc.
+        let mut spans: Vec<Span<'static>> = parse_markup(&markup)
+            .into_iter()
+            .map(|s| Span::styled(s.text, to_ui_style(&s.style)))
+            .collect();
         if !chips.is_empty() {
-            rendered.push(' ');
-            rendered.push_str(&chips.join(" "));
+            spans.push(Span::raw(format!(" {}", chips.join(" "))));
         }
-        if !rendered.trim().is_empty() {
-            parts.push(rendered);
+        if spans.iter().any(|s| !s.content.trim().is_empty()) {
+            out.push((region, Line::from(spans)));
         }
     }
-    parts.join("   ")
+    out
+}
+
+/// Translate a rustline [`Style`] into ratatui's own. A `None` channel is the
+/// terminal's default (`Color::Reset`), not black — tmux's `fg=default` and an
+/// unstyled segment both mean "leave it alone".
+fn to_ui_style(style: &Style) -> UiStyle {
+    let mut ui = UiStyle::default()
+        .fg(style.fg.as_ref().map_or(UiColor::Reset, to_ui_color))
+        .bg(style.bg.as_ref().map_or(UiColor::Reset, to_ui_color));
+    if style.bold {
+        ui = ui.add_modifier(Modifier::BOLD);
+    }
+    ui
+}
+
+/// Map one rustline colour onto ratatui's palette. The named arm mirrors
+/// `ansi.rs`'s SGR mapping exactly: the basic eight are 30–37 (tmux `white` is
+/// SGR 37, which ratatui calls `Gray`) and `bright*` are 90–97 (tmux
+/// `brightwhite` is 97 — ratatui's `White`).
+fn to_ui_color(color: &Color) -> UiColor {
+    match color {
+        Color::Indexed(n) => UiColor::Indexed(*n),
+        Color::Rgb(r, g, b) => UiColor::Rgb(*r, *g, *b),
+        Color::Named(name) => match name.as_str() {
+            "black" => UiColor::Black,
+            "red" => UiColor::Red,
+            "green" => UiColor::Green,
+            "yellow" => UiColor::Yellow,
+            "blue" => UiColor::Blue,
+            "magenta" => UiColor::Magenta,
+            "cyan" => UiColor::Cyan,
+            "white" => UiColor::Gray,
+            "brightblack" => UiColor::DarkGray,
+            "brightred" => UiColor::LightRed,
+            "brightgreen" => UiColor::LightGreen,
+            "brightyellow" => UiColor::LightYellow,
+            "brightblue" => UiColor::LightBlue,
+            "brightmagenta" => UiColor::LightMagenta,
+            "brightcyan" => UiColor::LightCyan,
+            "brightwhite" => UiColor::White,
+            _ => UiColor::Reset,
+        },
+    }
+}
+
+/// Spaces between regions when they share one line.
+const PREVIEW_GAP: usize = 3;
+
+/// How the preview strip arranges the regions at a given terminal width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewLayout {
+    /// Everything fits: regions sit side by side on one line, as the real bar
+    /// does.
+    SideBySide,
+    /// Too narrow: one region per line, so nothing is silently clipped.
+    Stacked,
+}
+
+/// Decide how to arrange `widths` (one per non-empty region, in display
+/// columns) in `available` columns.
+///
+/// Side by side needs every region plus a [`PREVIEW_GAP`] between each
+/// adjacent pair; anything wider than the terminal stacks instead. Measured in
+/// *display width*, not bytes or chars — the bar is full of multi-byte
+/// powerline glyphs and Nerd Font icons, and some are double-width.
+pub fn preview_layout(widths: &[usize], available: usize) -> PreviewLayout {
+    if widths.len() < 2 {
+        return PreviewLayout::SideBySide;
+    }
+    let gaps = PREVIEW_GAP * (widths.len() - 1);
+    let total: usize = widths.iter().sum::<usize>() + gaps;
+    if total <= available {
+        PreviewLayout::SideBySide
+    } else {
+        PreviewLayout::Stacked
+    }
+}
+
+/// Rows the preview strip needs: one when side by side, else one per region
+/// (at least one, so the strip never collapses to nothing).
+fn preview_height(layout: PreviewLayout, regions: usize) -> u16 {
+    match layout {
+        PreviewLayout::SideBySide => 1,
+        PreviewLayout::Stacked => regions.max(1) as u16,
+    }
+}
+
+/// The display width of a rendered line, in terminal columns.
+fn line_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|s| s.content.as_ref().width())
+        .sum::<usize>()
 }
 
 /// Restores the terminal on every exit path — normal return, `?`, or a panic
@@ -619,11 +725,19 @@ fn draw(
     registry: &Registry,
 ) {
     let help_height = u16::from(state.show_help());
+
+    // The preview is measured before the vertical split, because how many rows
+    // it needs depends on whether the regions fit side by side at this width.
+    let regions = preview_regions(state, cfg, theme, registry);
+    let widths: Vec<usize> = regions.iter().map(|(_, line)| line_width(line)).collect();
+    let layout = preview_layout(&widths, frame.area().width as usize);
+    let preview_rows = preview_height(layout, regions.len());
+
     let rows = UiLayout::default()
         .direction(LayoutDirection::Vertical)
         .constraints([
             Constraint::Min(3),
-            Constraint::Length(1), // preview strip
+            Constraint::Length(preview_rows),
             Constraint::Length(help_height),
             Constraint::Length(1), // footer / status
         ])
@@ -667,10 +781,7 @@ fn draw(
         frame.render_stateful_widget(list, *area, &mut list_state);
     }
 
-    frame.render_widget(
-        Paragraph::new(preview_line(state, cfg, theme, registry)),
-        rows[1],
-    );
+    render_preview(frame, rows[1], regions, layout);
 
     if state.show_help() {
         frame.render_widget(Paragraph::new(HELP_DETAIL), rows[2]);
@@ -689,6 +800,47 @@ fn draw(
         HELP_LINE.to_string()
     };
     frame.render_widget(Paragraph::new(footer_text).style(footer_style), rows[3]);
+}
+
+/// Draw the preview strip into `area`.
+///
+/// Side by side, the regions share one line separated by [`PREVIEW_GAP`].
+/// Stacked, each gets its own row, aligned the way it sits on the real status
+/// line — LEFT left, CENTER centred, RIGHT right — so a narrow terminal still
+/// conveys where each region actually lives rather than reading as one
+/// left-packed list.
+fn render_preview(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    regions: Vec<(Region, Line<'static>)>,
+    layout: PreviewLayout,
+) {
+    match layout {
+        PreviewLayout::SideBySide => {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (i, (_, line)) in regions.into_iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw(" ".repeat(PREVIEW_GAP)));
+                }
+                spans.extend(line.spans);
+            }
+            frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        }
+        PreviewLayout::Stacked => {
+            let slots = UiLayout::default()
+                .direction(LayoutDirection::Vertical)
+                .constraints(vec![Constraint::Length(1); regions.len().max(1)])
+                .split(area);
+            for (slot, (region, line)) in slots.iter().zip(regions) {
+                let aligned = match region {
+                    Region::Left => line.left_aligned(),
+                    Region::Center => line.centered(),
+                    Region::Right => line.right_aligned(),
+                };
+                frame.render_widget(Paragraph::new(aligned), *slot);
+            }
+        }
+    }
 }
 
 /// Open the interactive widget editor. Requires a TTY; a non-interactive
@@ -1288,11 +1440,164 @@ mod tests {
         let cfg = Config::default();
         let registry = Registry::with_builtins(&cfg);
         let theme = Theme::default();
-        let line = preview_line(&state, &cfg, &theme, &registry);
+        let regions = preview_regions(&state, &cfg, &theme, &registry);
+        let text: String = regions
+            .iter()
+            .flat_map(|(_, line)| line.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
         // The built-in rendered its real text; the plugin is a placeholder chip and
         // was never instantiated.
-        assert!(line.contains("[weather]"), "plugin chip present: {line}");
-        assert!(!line.is_empty());
+        assert!(text.contains("[weather]"), "plugin chip present: {text}");
+        assert!(!text.is_empty());
+    }
+
+    /// The bug this module was reported for: the preview handed ratatui a
+    /// string full of ANSI escapes, which a cell buffer draws as literal
+    /// characters (it never interprets them) — so the bar appeared as raw
+    /// `[38;2;...m` noise with no colour. The preview must carry ratatui
+    /// styles instead, and no span's *text* may contain an ESC byte.
+    #[test]
+    fn preview_carries_ratatui_styles_and_never_literal_escape_bytes() {
+        let layout = Layout {
+            left: vec!["hostname".into()],
+            center: vec![],
+            right: vec![],
+        };
+        let catalog = vec![WidgetPlacement {
+            name: "hostname".into(),
+            summary: "host".into(),
+            source: WidgetSource::Builtin,
+            placement: None,
+        }];
+        let state = EditorState::new(layout, catalog);
+        let cfg = Config::default();
+        let registry = Registry::with_builtins(&cfg);
+        let theme = Theme::default();
+
+        let regions = preview_regions(&state, &cfg, &theme, &registry);
+        let spans: Vec<_> = regions
+            .iter()
+            .flat_map(|(_, line)| line.spans.iter())
+            .collect();
+        assert!(!spans.is_empty(), "the preview rendered something");
+
+        for span in &spans {
+            assert!(
+                !span.content.contains('\x1b'),
+                "no raw escape byte reaches a ratatui cell: {:?}",
+                span.content
+            );
+            assert!(
+                !span.content.contains("38;2;") && !span.content.contains("38;5;"),
+                "no SGR parameter text reaches a ratatui cell: {:?}",
+                span.content
+            );
+        }
+        // And the styling actually landed somewhere, rather than every span
+        // being unstyled text.
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.style.fg.is_some() || s.style.bg.is_some()),
+            "at least one span carries a real ratatui colour"
+        );
+    }
+
+    /// End-to-end at the level the bug was actually seen: render a real frame
+    /// and inspect the resulting cells. The unit test above pins the spans;
+    /// this pins that `draw` wires them through, so styling survives all the
+    /// way into the buffer and no escape text is ever drawn.
+    #[test]
+    fn drawn_frame_has_colored_preview_cells_and_no_escape_text() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let layout = Layout {
+            left: vec!["hostname".into()],
+            center: vec![],
+            right: vec!["cwd".into()],
+        };
+        let catalog = vec![
+            WidgetPlacement {
+                name: "hostname".into(),
+                summary: "host".into(),
+                source: WidgetSource::Builtin,
+                placement: None,
+            },
+            WidgetPlacement {
+                name: "cwd".into(),
+                summary: "cwd".into(),
+                source: WidgetSource::Builtin,
+                placement: None,
+            },
+        ];
+        let state = EditorState::new(layout, catalog);
+        let cfg = Config::default();
+        let registry = Registry::with_builtins(&cfg);
+        let theme = Theme::default();
+
+        let mut term = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        term.draw(|f| draw(f, &state, &cfg, &theme, &registry))
+            .unwrap();
+        let buf = term.backend().buffer();
+
+        let whole: String = (0..12)
+            .flat_map(|y| (0..120).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert!(
+            !whole.contains("38;2;") && !whole.contains("38;5;") && !whole.contains("[0m"),
+            "no SGR text was drawn into any cell"
+        );
+
+        // Some cell in the frame carries a real background colour — the
+        // powerline bar. Before the fix every cell was Color::Reset.
+        let colored = (0..12)
+            .flat_map(|y| (0..120).map(move |x| (x, y)))
+            .any(|(x, y)| {
+                let s = buf[(x, y)].style();
+                s.bg.is_some_and(|c| c != ratatui::style::Color::Reset)
+            });
+        assert!(colored, "the preview painted at least one colored cell");
+    }
+
+    #[test]
+    fn preview_stacks_only_when_the_regions_do_not_fit() {
+        // Three 10-wide regions need 30 + two 3-wide gaps = 36 columns.
+        let widths = vec![10, 10, 10];
+        assert_eq!(preview_layout(&widths, 36), PreviewLayout::SideBySide);
+        assert_eq!(preview_layout(&widths, 35), PreviewLayout::Stacked);
+        assert_eq!(preview_layout(&widths, 200), PreviewLayout::SideBySide);
+    }
+
+    #[test]
+    fn preview_single_region_never_stacks_and_needs_no_gap() {
+        // One region has no separator to pay for, so it stays side-by-side
+        // even when it overflows — stacking one line onto one line is no help.
+        assert_eq!(preview_layout(&[80], 20), PreviewLayout::SideBySide);
+        assert_eq!(preview_layout(&[], 20), PreviewLayout::SideBySide);
+    }
+
+    #[test]
+    fn preview_height_is_one_line_side_by_side_and_one_per_region_stacked() {
+        assert_eq!(preview_height(PreviewLayout::SideBySide, 3), 1);
+        assert_eq!(preview_height(PreviewLayout::Stacked, 3), 3);
+        assert_eq!(preview_height(PreviewLayout::Stacked, 2), 2);
+        // Never collapses to zero rows, even with nothing to show.
+        assert_eq!(preview_height(PreviewLayout::Stacked, 0), 1);
+    }
+
+    #[test]
+    fn preview_width_counts_display_columns_not_bytes() {
+        // A powerline separator is 3 bytes but one column; measuring bytes
+        // would stack a bar that fits perfectly well.
+        let line = Line::from(vec![Span::raw("ab"), Span::raw("\u{e0b0}")]);
+        assert_eq!(line_width(&line), 3);
+        assert!(
+            "ab\u{e0b0}".len() > line_width(&line),
+            "byte length really does overstate this"
+        );
     }
 
     /// I4: a layout can name a widget `widget_placements` doesn't otherwise

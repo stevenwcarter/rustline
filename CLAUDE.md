@@ -441,9 +441,21 @@ these shared types, not a design shortcut. Keep them serializable.
   candidate's own `WidgetSource` deciding its group — with its current
   placement if any; this is `widget list`/`widget edit`'s one source of truth
   for "what exists and where is it."
-- `ansi.rs` — `tmux_to_ansi(&str) -> String`: transcodes the tmux markup we emit
-  into ANSI SGR (`colourN` → 256-color, `#rrggbb` → truecolor, named → basic)
-  for the `--preview` flag.
+- `ansi.rs` — two renderers over one scanner, for the two kinds of sink that
+  consume tmux markup. `tmux_to_ansi(&str) -> String` transcodes it to ANSI SGR
+  (`colourN` → 256-color, `#rrggbb` → truecolor, named → basic) for a sink the
+  **terminal** interprets: `render … --preview`, `theme show`/`pick`.
+  `parse_markup(&str) -> Vec<StyledSpan>` resolves the same markup into
+  `StyledSpan { style: Style, text: String }` runs for a sink that carries its
+  own style type and never interprets escapes — a `ratatui` cell buffer draws
+  an ANSI escape as *literal visible characters* and applies no styling, so
+  `widget_tui.rs`'s preview strip uses this and maps each span onto a ratatui
+  `Style`. tmux directives are stateful (`#[bg=blue]` leaves an earlier
+  `fg=red` alone), which a terminal tracks for itself but a cell buffer can't,
+  so `parse_markup` accumulates the running style and snapshots it per run;
+  `fg=default`/`bg=default` reset that channel to `None` ("the terminal's own
+  default", not black). Both share a private `scan` so where a directive
+  starts/ends — and what an unterminated `#[` means — has one definition.
 
 `rustline-abi`:
 - `lib.rs` — `Segment { text, style }`, `Style { fg, bg, bold }`,
@@ -1105,10 +1117,19 @@ failure path via `rl_log` (W7) rather than staying silent:
   `config.toml` (same `read_layout`/`write_layout` as `widget_cmd.rs`), `q`
   quits (prompting to confirm first if there are unsaved changes — `dirty`
   tracking — else quitting immediately), and `?` toggles a help overlay. A
-  live ANSI preview strip along the bottom re-renders the region under focus
-  (via `render_named_region` + `tmux_to_ansi`, the exact pipeline `render
-  left`/`render right` use) against the **in-memory, possibly-unsaved**
-  layout, so a move/add/remove is visible immediately, before `w`. `Column::
+  live preview strip along the bottom re-renders the regions (via
+  `render_named_region` + `ansi.rs`'s `parse_markup`, mapped onto ratatui
+  `Style`s by `to_ui_style`/`to_ui_color`) against the **in-memory,
+  possibly-unsaved** layout, so a move/add/remove is visible immediately,
+  before `w`. It deliberately does NOT use `tmux_to_ansi`: ratatui writes
+  cells and never interprets ANSI escapes, so escape bytes handed to it are
+  drawn as literal text with no colour at all. The strip is one line when the
+  regions fit side by side and otherwise stacks one region per line —
+  `preview_layout(widths, available)` decides, measuring **display width**
+  (`unicode-width`, since the bar is full of multi-byte and double-width
+  glyphs) plus a 3-column gap per adjacent pair; stacked rows keep each
+  region's real alignment (LEFT left, CENTER centred, RIGHT right) so a
+  narrow terminal still conveys where each region sits. `Column::
   Center` stays focusable/visible (so a user can see the window list lives
   there) but every edit targeting it is refused outright with an
   explanatory status line (`CENTER_FIXED_STATUS`) — unlike `widget_cmd.rs`'s
@@ -1329,9 +1350,9 @@ config-file path for every subcommand that reads or writes it (default:
   (needs a TTY): four columns (LEFT/CENTER/RIGHT/AVAILABLE), arrow or vim
   keys to move focus, `space`/`Enter` to add/remove, `J`/`K` to reorder,
   `w` to write, `q` to quit (confirms first if there are unsaved changes),
-  `?` for a help overlay, plus a live ANSI preview strip of the region under
-  focus so an edit's effect is visible before you save. See `widget_tui.rs`
-  above.
+  `?` for a help overlay, plus a live colour preview strip of the layout so
+  an edit's effect is visible before you save — one line when the regions fit
+  side by side, otherwise one region per line. See `widget_tui.rs` above.
   `enable`/`move --region center` still write and exit `0` (with a stderr
   note) since nothing renders `[layout].center` — see the Config section's
   CENTER-region note below; `widget edit`'s TUI refuses a CENTER edit
@@ -2282,7 +2303,10 @@ branch on platform.
   (`widget_tui.rs`). Deliberately **not** feature-gated (unlike `bench`):
   `rustline init` emits the `prefix + W` `display-popup` binding
   unconditionally, so the subcommand it points at (`widget edit`) must
-  always exist in every build, not just an opt-in one.
+  always exist in every build, not just an opt-in one. `unicode-width` (also
+  already in the tree via `ratatui-core`, so no new node) measures the
+  preview strip's display width — byte or `char` length would both misjudge
+  the powerline/Nerd Font glyphs the bar is made of.
 - Must stay **clippy-clean** (`cargo clippy --all-targets -- -D warnings`) and
   **rustfmt-clean** (`cargo fmt --all --check`). There is **no pre-commit hook**
   in this repo — run `cargo fmt --all` yourself before committing.
@@ -2582,8 +2606,9 @@ branch on platform.
     `rustline widget edit` (`widget_tui.rs`), a full-screen `ratatui` editor
     (four columns, arrow/vim keys, `space` to add/remove, `J`/`K` to
     reorder, `w` to write, `q` to quit with an unsaved-changes confirm, `?`
-    for help, a live ANSI preview strip via the exact `render_named_region`
-    pipeline). `rustline init` gained a `prefix + W`
+    for help, a live colour preview strip via the same `render_named_region`
+    pipeline, resolved into ratatui styles by `ansi.rs`'s `parse_markup`).
+    `rustline init` gained a `prefix + W`
     `display-popup`-into-`widget edit` binding (tmux ≥ 3.2; `doctor` gained
     an advisory-only row for it), and `[layout].center`'s pre-existing
     inertness (nothing renders it — see the Config section above) is now
