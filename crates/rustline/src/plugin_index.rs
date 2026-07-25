@@ -9,8 +9,13 @@
 
 #![allow(dead_code)]
 
+use std::path::Path;
+
 use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
+
+use crate::plugin_install::Downloader;
+use crate::sample_store::{read_sample, write_sample};
 
 /// The index schema this build understands.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -97,6 +102,84 @@ pub fn filter_entries<'a>(index: &'a PluginIndex, query: Option<&str>) -> Vec<&'
 /// moved backwards counts as stale (refetch) rather than fresh forever.
 pub fn index_is_fresh(fetched_at: u64, now: u64, ttl_secs: u64) -> bool {
     now >= fetched_at && now.saturating_sub(fetched_at) < ttl_secs
+}
+
+/// An index plus whether it came from a cache we could not refresh.
+#[derive(Clone, Debug)]
+pub struct LoadedIndex {
+    pub index: PluginIndex,
+    /// True when a fetch failed and this is the last-known-good cached copy.
+    pub stale: bool,
+}
+
+/// The on-disk cache envelope: the index plus when it was fetched.
+#[derive(Serialize, Deserialize)]
+struct CachedIndex {
+    fetched_at: u64,
+    index: PluginIndex,
+}
+
+/// Read and parse the cache, or `None` if absent, unreadable, or corrupt.
+/// A corrupt cache is never fatal — it simply falls through to a fetch.
+fn read_cache(state_dir: &Path) -> Option<CachedIndex> {
+    let raw = read_sample(state_dir, INDEX_CACHE_FILE)?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Best-effort cache write; a failure is logged by `write_sample`, never fatal.
+fn write_cache(state_dir: &Path, index: &PluginIndex, now: u64) {
+    let cached = CachedIndex {
+        fetched_at: now,
+        index: index.clone(),
+    };
+    if let Ok(body) = serde_json::to_string(&cached) {
+        write_sample(state_dir, INDEX_CACHE_FILE, &body);
+    }
+}
+
+/// Load the plugin index: a fresh cache is served as-is; otherwise fetch,
+/// cache, and return. A failed fetch falls back to the last-known-good cache
+/// (flagged `stale`) and only errors when there is nothing cached at all.
+///
+/// `refresh` bypasses the TTL. `now` is injected so freshness is testable.
+pub fn load_index<D: Downloader>(
+    dl: &D,
+    state_dir: &Path,
+    url: &str,
+    refresh: bool,
+    now: u64,
+) -> anyhow::Result<LoadedIndex> {
+    let cached = read_cache(state_dir);
+
+    if !refresh
+        && let Some(c) = &cached
+        && index_is_fresh(c.fetched_at, now, INDEX_TTL_SECS)
+    {
+        return Ok(LoadedIndex {
+            index: c.index.clone(),
+            stale: false,
+        });
+    }
+
+    match dl.get_json(url).and_then(|v| parse_index_value(&v)) {
+        Ok(index) => {
+            write_cache(state_dir, &index, now);
+            Ok(LoadedIndex {
+                index,
+                stale: false,
+            })
+        }
+        Err(fetch_err) => match cached {
+            Some(c) => {
+                tracing::warn!(%url, error = %fetch_err, "plugin index fetch failed; serving the cached copy");
+                Ok(LoadedIndex {
+                    index: c.index,
+                    stale: true,
+                })
+            }
+            None => Err(fetch_err.context(format!("fetch plugin index from {url}"))),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -227,5 +310,142 @@ mod tests {
             assert_ne!(e.name, "window", "`window` is reserved");
             assert!(!e.description.is_empty(), "{}: needs a description", e.name);
         }
+    }
+
+    use std::cell::RefCell;
+
+    /// A `Downloader` that serves a canned body and counts calls, so a test can
+    /// assert the cache actually prevented a fetch.
+    struct FakeDownloader {
+        body: RefCell<Result<String, String>>,
+        calls: RefCell<usize>,
+    }
+
+    impl FakeDownloader {
+        fn ok(body: &str) -> Self {
+            Self {
+                body: RefCell::new(Ok(body.to_string())),
+                calls: RefCell::new(0),
+            }
+        }
+        fn failing() -> Self {
+            Self {
+                body: RefCell::new(Err("network down".to_string())),
+                calls: RefCell::new(0),
+            }
+        }
+        fn calls(&self) -> usize {
+            *self.calls.borrow()
+        }
+    }
+
+    impl crate::plugin_install::Downloader for FakeDownloader {
+        fn get_json(&self, _url: &str) -> anyhow::Result<serde_json::Value> {
+            *self.calls.borrow_mut() += 1;
+            match &*self.body.borrow() {
+                Ok(b) => Ok(serde_json::from_str(b)?),
+                Err(e) => anyhow::bail!("{e}"),
+            }
+        }
+        fn get_bytes(&self, _url: &str) -> anyhow::Result<Vec<u8>> {
+            unreachable!("the index is fetched as JSON")
+        }
+    }
+
+    #[test]
+    fn a_cold_cache_fetches_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let dl = FakeDownloader::ok(sample_json());
+
+        let loaded = load_index(&dl, dir.path(), "http://x", false, 1_000).expect("fetch");
+        assert_eq!(dl.calls(), 1);
+        assert!(!loaded.stale);
+        assert_eq!(loaded.index.plugins.len(), 2);
+        assert!(
+            dir.path().join(INDEX_CACHE_FILE).exists(),
+            "the fetch must be cached"
+        );
+    }
+
+    #[test]
+    fn a_fresh_cache_is_served_without_fetching() {
+        let dir = tempfile::tempdir().unwrap();
+        let dl = FakeDownloader::ok(sample_json());
+        load_index(&dl, dir.path(), "http://x", false, 1_000).unwrap();
+
+        let loaded = load_index(&dl, dir.path(), "http://x", false, 1_500).expect("cache hit");
+        assert_eq!(
+            dl.calls(),
+            1,
+            "a fresh cache must not hit the network again"
+        );
+        assert!(!loaded.stale);
+    }
+
+    #[test]
+    fn refresh_forces_a_fetch_past_a_fresh_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let dl = FakeDownloader::ok(sample_json());
+        load_index(&dl, dir.path(), "http://x", false, 1_000).unwrap();
+
+        load_index(&dl, dir.path(), "http://x", true, 1_500).expect("forced fetch");
+        assert_eq!(dl.calls(), 2, "--refresh must bypass the TTL");
+    }
+
+    #[test]
+    fn an_expired_cache_triggers_a_refetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let dl = FakeDownloader::ok(sample_json());
+        load_index(&dl, dir.path(), "http://x", false, 1_000).unwrap();
+
+        load_index(
+            &dl,
+            dir.path(),
+            "http://x",
+            false,
+            1_000 + INDEX_TTL_SECS + 1,
+        )
+        .unwrap();
+        assert_eq!(dl.calls(), 2);
+    }
+
+    #[test]
+    fn a_failed_fetch_serves_the_stale_cache_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        load_index(
+            &FakeDownloader::ok(sample_json()),
+            dir.path(),
+            "http://x",
+            false,
+            1_000,
+        )
+        .unwrap();
+
+        let dl = FakeDownloader::failing();
+        let loaded = load_index(&dl, dir.path(), "http://x", false, 9_999_999)
+            .expect("a stale cache beats no answer");
+        assert!(
+            loaded.stale,
+            "the caller must be able to warn that this is stale"
+        );
+        assert_eq!(loaded.index.plugins.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_fetch_with_no_cache_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let dl = FakeDownloader::failing();
+        assert!(load_index(&dl, dir.path(), "http://x", false, 1_000).is_err());
+    }
+
+    #[test]
+    fn a_corrupt_cache_file_is_ignored_rather_than_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(INDEX_CACHE_FILE), "{{{ not json").unwrap();
+        let dl = FakeDownloader::ok(sample_json());
+        let loaded = load_index(&dl, dir.path(), "http://x", false, 1_000)
+            .expect("a corrupt cache must fall through to a fetch");
+        assert_eq!(dl.calls(), 1);
+        assert!(!loaded.stale);
     }
 }
