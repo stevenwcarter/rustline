@@ -1,0 +1,9 @@
+# Capability manifest for the `cmdrun` example plugin.
+#
+# A manifest GRANTS NOTHING on its own — it is a declaration `rustline plugin
+# approve cmdrun` turns into exactly these `allowed_commands` entries, after
+# you confirm. Patterns match the whole canonical argv, so this one permits
+# `uname` with any arguments and nothing else.
+name = "cmdrun"
+version = "0.1.0"
+requested_commands = ["uname*"]
