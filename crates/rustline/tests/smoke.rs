@@ -2677,3 +2677,80 @@ fn widget_disable_from_non_center_region_prints_no_center_warning() {
         "no center warning for a non-center disable: {stderr}"
     );
 }
+
+/// Seed the plugin-index cache so `plugin search` answers from disk and never
+/// touches the network. Path mirrors `state_root()` under the `XDG_DATA_HOME`
+/// that `isolate` sets.
+fn seed_index_cache(tmp: &Path) {
+    let state = tmp.join("data/rustline/state");
+    fs::create_dir_all(&state).expect("state dir");
+    // A far-future `fetched_at` keeps the entry fresh regardless of the clock,
+    // so the command never attempts a fetch.
+    let body = r#"{"fetched_at":99999999999,"index":{"schema_version":1,"plugins":[
+        {"name":"weather","description":"Weather from wttr.in","source":"o/r","bundled":true,"capabilities":["http_cached"]},
+        {"name":"othertool","description":"Something else entirely","source":"o/r2","bundled":false,"capabilities":[]}
+    ]}}"#;
+    fs::write(state.join("plugin-index.json"), body).expect("seed index cache");
+}
+
+#[test]
+fn plugin_search_lists_the_index() {
+    let tmp = tempdir().unwrap();
+    seed_index_cache(tmp.path());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search"]);
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    assert!(out.status.success(), "plugin search should succeed");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("weather"), "index entries listed: {s}");
+    assert!(s.contains("othertool"), "{s}");
+    assert!(
+        s.contains("just build-plugin weather"),
+        "a bundled entry shows a build hint, not an install command: {s}"
+    );
+    assert!(
+        s.contains("rustline plugin install o/r2"),
+        "a non-bundled entry shows its install command: {s}"
+    );
+}
+
+#[test]
+fn plugin_search_filters_by_query() {
+    let tmp = tempdir().unwrap();
+    seed_index_cache(tmp.path());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search", "weath"]);
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("weather"), "{s}");
+    assert!(
+        !s.contains("othertool"),
+        "the query should exclude non-matches: {s}"
+    );
+}
+
+#[test]
+fn plugin_search_json_emits_an_array() {
+    let tmp = tempdir().unwrap();
+    seed_index_cache(tmp.path());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search", "--json"]);
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    let s = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&s)
+        .unwrap_or_else(|e| panic!("--json must emit valid JSON: {e}: {s}"));
+    let arr = v.as_array().expect("array");
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["name"], "weather");
+    assert_eq!(
+        arr[0]["installed"], false,
+        "nothing installed in the tempdir"
+    );
+    assert_eq!(arr[1]["source"], "o/r2");
+}

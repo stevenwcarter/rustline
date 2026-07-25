@@ -50,6 +50,11 @@ impl Kind {
 pub fn run(cmd: PluginCmd, config_path: &Path, plugin_dir: &Path) {
     match cmd {
         PluginCmd::List { json } => list(config_path, plugin_dir, json),
+        PluginCmd::Search {
+            query,
+            json,
+            refresh,
+        } => search(config_path, plugin_dir, query.as_deref(), json, refresh),
         PluginCmd::Url(pc) => pattern_cmd(pc, Kind::Url, config_path),
         PluginCmd::Path(pc) => pattern_cmd(pc, Kind::Path, config_path),
         PluginCmd::Cmd(pc) => pattern_cmd(pc, Kind::Command, config_path),
@@ -263,6 +268,76 @@ fn run_plugin(args: &RunArgs, config_path: &Path, plugin_dir: &Path) {
     let segments = widget.render(&sample_context());
     let denials = observer.snapshot();
     print!("{}", format_run_output(&segments, &denials));
+}
+
+/// `rustline plugin search [QUERY] [--json] [--refresh]` — browse the curated
+/// plugin index. Read-only: it touches neither the config nor the plugin dir,
+/// and finding a plugin here grants it nothing (only `plugin approve` or a hand
+/// edit ever widens an allowlist).
+fn search(config_path: &Path, plugin_dir: &Path, query: Option<&str>, json: bool, refresh: bool) {
+    let cfg = Config::load(config_path);
+    let url = cfg
+        .plugin_index_url
+        .as_deref()
+        .unwrap_or(crate::plugin_index::DEFAULT_INDEX_URL);
+    let state_dir = rustline_wasm::state_root();
+    let now = crate::sample_store::now_unix_secs();
+
+    let loaded = match crate::plugin_index::load_index(
+        &crate::plugin_install::UreqDownloader,
+        &state_dir,
+        url,
+        refresh,
+        now,
+    ) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("could not load the plugin index: {error:#}");
+            std::process::exit(1);
+        }
+    };
+
+    let entries = crate::plugin_index::filter_entries(&loaded.index, query);
+    let installed = rustline_wasm::discover_plugin_names(plugin_dir);
+
+    if json {
+        println!("{}", crate::plugin_index::search_json(&entries, &installed));
+        return;
+    }
+
+    if loaded.stale {
+        eprintln!("warning: could not refresh the plugin index; showing a cached copy");
+    }
+    if entries.is_empty() {
+        match query {
+            Some(q) => println!("no plugins in the index match {q:?}"),
+            None => println!("the plugin index is empty"),
+        }
+        return;
+    }
+
+    for entry in &entries {
+        let mark = if installed.iter().any(|n| n == &entry.name) {
+            "  [installed]"
+        } else {
+            ""
+        };
+        println!("{}{}", entry.name, mark);
+        if !entry.description.is_empty() {
+            println!("  {}", entry.description);
+        }
+        if !entry.capabilities.is_empty() {
+            println!("  capabilities: {}", entry.capabilities.join(", "));
+        }
+        match (entry.bundled, entry.source.as_deref()) {
+            (true, _) => println!("  build:   just build-plugin {}", entry.name),
+            (false, Some(source)) => {
+                println!("  install: rustline plugin install {source}");
+            }
+            (false, None) => {}
+        }
+        println!();
+    }
 }
 
 /// Print every configured plugin's source and allowlists/caps, noting any

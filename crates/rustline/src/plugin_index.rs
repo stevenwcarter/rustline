@@ -7,8 +7,6 @@
 //! `capabilities` field is advertising copy so a user can see what a plugin will
 //! ask for *before* installing it; the host never consults it.
 
-#![allow(dead_code)]
-
 use std::path::Path;
 
 use anyhow::{Context as _, bail};
@@ -70,7 +68,12 @@ fn validate(index: PluginIndex) -> anyhow::Result<PluginIndex> {
     Ok(index)
 }
 
-/// Parse an index document from JSON text.
+/// Parse an index document from JSON text. Only exercised by this module's own
+/// tests today (production always fetches/caches via
+/// [`Downloader::get_json`]'s already-deserialized `Value`, through
+/// `parse_index_value` below) — `#[cfg(test)]` reflects that honestly instead
+/// of masking it with a blanket `#[allow(dead_code)]`.
+#[cfg(test)]
 pub fn parse_index(body: &str) -> anyhow::Result<PluginIndex> {
     let index: PluginIndex = serde_json::from_str(body).context("parse plugin index JSON")?;
     validate(index)
@@ -180,6 +183,36 @@ pub fn load_index<D: Downloader>(
             None => Err(fetch_err.context(format!("fetch plugin index from {url}"))),
         },
     }
+}
+
+/// One row of `plugin search --json`. Mirrors the existing `--json` convention
+/// (`plugin_list_json`, `pattern_list_json`, `denials_json`): a local
+/// `Serialize` struct rendered as a pretty-printed array.
+#[derive(Serialize)]
+struct SearchEntryJson<'a> {
+    name: &'a str,
+    description: &'a str,
+    source: Option<&'a str>,
+    bundled: bool,
+    capabilities: &'a [String],
+    /// Whether a `<name>.wasm` is already present in the plugin dir.
+    installed: bool,
+}
+
+/// Render search results as a pretty-printed JSON array, `"[]"` on failure.
+pub fn search_json(entries: &[&IndexEntry], installed: &[String]) -> String {
+    let rows: Vec<SearchEntryJson<'_>> = entries
+        .iter()
+        .map(|e| SearchEntryJson {
+            name: &e.name,
+            description: &e.description,
+            source: e.source.as_deref(),
+            bundled: e.bundled,
+            capabilities: &e.capabilities,
+            installed: installed.iter().any(|n| n == &e.name),
+        })
+        .collect();
+    serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".to_string())
 }
 
 #[cfg(test)]
@@ -447,5 +480,31 @@ mod tests {
             .expect("a corrupt cache must fall through to a fetch");
         assert_eq!(dl.calls(), 1);
         assert!(!loaded.stale);
+    }
+
+    #[test]
+    fn search_json_shape_and_installed_marker() {
+        let idx = parse_index(sample_json()).unwrap();
+        let entries = filter_entries(&idx, None);
+        let installed = vec!["weather".to_string()];
+
+        let out = search_json(&entries, &installed);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON array");
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["name"], "weather");
+        assert_eq!(arr[0]["installed"], true);
+        assert_eq!(arr[0]["bundled"], true);
+        assert_eq!(arr[0]["capabilities"][0], "http_cached");
+        assert_eq!(arr[1]["name"], "cmdrun");
+        assert_eq!(arr[1]["installed"], false, "not present in the plugin dir");
+        assert_eq!(arr[1]["source"], "o/r2");
+    }
+
+    #[test]
+    fn search_json_of_nothing_is_an_empty_array() {
+        let idx = parse_index(sample_json()).unwrap();
+        let none: Vec<&IndexEntry> = filter_entries(&idx, Some("zzz"));
+        assert_eq!(search_json(&none, &[]).trim(), "[]");
     }
 }
