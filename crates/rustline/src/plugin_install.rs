@@ -633,4 +633,137 @@ mod tests {
         std::fs::write(&config_path, "not = = valid [[[").unwrap();
         assert!(read_doc(&config_path).is_err());
     }
+
+    /// The real install->load seam, unlike `rustline-wasm`'s e2e checksum
+    /// tests (which only ever exercise the *load* half): this one writes a
+    /// digest through the actual `write_install_record` used by `do_install`,
+    /// reads it back through the actual `Config::load`, and only then hands
+    /// the result to `verify_checksum` — the same function `register_plugins`
+    /// calls internally at load time. It traverses `sha256_hex` ->
+    /// `write_install_record`'s `toml_edit` serialization -> the file on disk
+    /// -> `Config::load`'s serde parse -> `verify_checksum`, so it *would*
+    /// catch a renamed config key, a serialization bug in
+    /// `write_install_record`, or the install side hashing different bytes
+    /// than the ones actually written to `<plugin_dir>/weather.wasm` — none of
+    /// which the load-only e2e tests can see. No valid `.wasm` bytes are
+    /// needed since the assertion is on the `ChecksumVerdict`, not on registry
+    /// membership, so this runs under a plain `cargo test --workspace` with no
+    /// `wasm-e2e` feature gate.
+    #[test]
+    fn write_install_record_then_config_load_verifies_the_real_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        // Arbitrary bytes staged where `do_install` would have written them;
+        // they need not be a valid wasm module for this test's purposes.
+        let bytes = b"arbitrary staged plugin bytes, not a real wasm module".to_vec();
+        std::fs::write(plugin_dir.join("weather.wasm"), &bytes).unwrap();
+
+        // The install side: hash the staged bytes, then persist through the
+        // real (private) `write_install_record` — no hand-written TOML.
+        let digest = sha256_hex(&bytes);
+        write_install_record(
+            &config_path,
+            "weather",
+            "steve/rustline-weather",
+            Some("v1.0.0"),
+            &digest,
+        )
+        .unwrap();
+
+        // The load side: the real `Config::load`, then the real verification
+        // gate `register_plugins` uses.
+        let cfg = Config::load(&config_path);
+        let pc = cfg
+            .plugins
+            .get("weather")
+            .expect("write_install_record recorded [plugins.weather]");
+        assert_eq!(
+            rustline_wasm::verify_checksum(pc.checksum.as_deref(), &bytes),
+            rustline_wasm::ChecksumVerdict::Match,
+            "the digest recorded by write_install_record must verify against \
+             the exact bytes staged at install time, read back through Config::load"
+        );
+    }
+
+    /// The negative direction of the seam test above: a digest recorded for
+    /// different bytes must NOT verify against these bytes, proving the chain
+    /// can actually fail rather than trivially agreeing with itself.
+    #[test]
+    fn write_install_record_then_config_load_rejects_swapped_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let recorded_for = b"the bytes that were installed and hashed".to_vec();
+        let digest = sha256_hex(&recorded_for);
+        write_install_record(
+            &config_path,
+            "weather",
+            "steve/rustline-weather",
+            None,
+            &digest,
+        )
+        .unwrap();
+
+        let cfg = Config::load(&config_path);
+        let pc = cfg
+            .plugins
+            .get("weather")
+            .expect("write_install_record recorded [plugins.weather]");
+
+        // A different file now sits at the plugin path (e.g. tampered/swapped
+        // after install) -> the recorded digest must disagree with it.
+        let swapped = b"a different file entirely, swapped in after install".to_vec();
+        assert!(
+            matches!(
+                rustline_wasm::verify_checksum(pc.checksum.as_deref(), &swapped),
+                rustline_wasm::ChecksumVerdict::Mismatch { .. }
+            ),
+            "swapped bytes must not verify against the digest recorded for the original bytes"
+        );
+    }
+
+    /// The full composition, real wasm included: stage the actual
+    /// `weather.wasm`, record its digest via the real `write_install_record`,
+    /// load it back via the real `Config::load`, and prove
+    /// `register_plugins` — the true load-time gate, not just
+    /// `verify_checksum` in isolation — accepts it. Gated behind `wasm-e2e`
+    /// (needs `just build-weather` first) so a plain `cargo test` stays
+    /// hermetic; the two tests above already cover the write->load seam
+    /// without needing a real wasm module at all.
+    #[cfg(feature = "wasm-e2e")]
+    #[test]
+    fn real_weather_wasm_installed_with_a_matching_checksum_still_registers() {
+        let wasm_src = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/weather/target/wasm32-unknown-unknown/release/weather.wasm"
+        );
+        let bytes = std::fs::read(wasm_src).expect("run `just build-weather` first");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("weather.wasm"), &bytes).unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let digest = sha256_hex(&bytes);
+        write_install_record(
+            &config_path,
+            "weather",
+            "steve/rustline-weather",
+            None,
+            &digest,
+        )
+        .unwrap();
+
+        let cfg = Config::load(&config_path);
+        let mut reg = rustline_core::Registry::new();
+        rustline_wasm::register_plugins(&mut reg, &cfg, &plugin_dir, &["weather".to_string()]);
+        assert!(
+            reg.contains("weather"),
+            "a plugin whose install-recorded digest matches its on-disk bytes must register"
+        );
+    }
 }

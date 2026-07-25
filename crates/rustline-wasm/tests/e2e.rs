@@ -270,21 +270,33 @@ fn plugin_with_a_malformed_checksum_does_not_register() {
     assert!(!reg.contains("weather"), "a malformed pin must fail closed");
 }
 
-/// Round-trip across the install -> load seam. This is what pins the two halves
-/// together: if either side ever changes its hex encoding, adds a `sha256:`
-/// prefix on write, or hashes something other than the raw file bytes, this
-/// fails loudly instead of silently disabling every pinned plugin.
+/// The load gate accepts a canonically-shaped digest: 64 lowercase hex chars,
+/// computed via `sha256_hex` over the exact bytes staged on disk.
+///
+/// NOTE on scope: this test calls `sha256_hex` from the same import the
+/// verification gate itself uses internally, so it does NOT span the real
+/// `plugin install` -> load seam — it cannot catch a bug where the install
+/// path hashes different bytes than it writes, or where `write_install_record`
+/// mangles the digest in transit to disk (`crates/rustline`'s
+/// `write_install_record` is a private fn of the bin crate, unreachable from
+/// this integration test — see that crate's module docs). It is
+/// functionally the load-side half of `plugin_with_a_matching_checksum_registers`
+/// above, plus the length pin. The real write -> load seam test — which
+/// drives the actual `write_install_record` and `rustline_core::Config::load`
+/// — lives in `crates/rustline/src/plugin_install.rs` as
+/// `write_install_record_then_config_load_verifies_the_real_bytes` (and its
+/// negative counterpart, `..._rejects_swapped_bytes`).
 #[test]
-fn a_digest_written_at_install_time_is_accepted_at_load_time() {
+fn a_canonically_shaped_digest_is_accepted_at_load_time() {
     let (dir, bytes) = staged_weather();
-    // Exactly what `plugin install` records: sha256_hex over the downloaded
-    // asset bytes, which are the same bytes written to <plugin_dir>/<name>.wasm.
+    // The shape `plugin install` would record: sha256_hex over the exact
+    // bytes staged at <plugin_dir>/<name>.wasm.
     let recorded = sha256_hex(&bytes);
     assert_eq!(recorded.len(), 64, "recorded digest shape must stay stable");
 
     let reg = register_weather(&cfg_with_checksum(Some(recorded)), dir.path());
     assert!(
         reg.contains("weather"),
-        "the install path's digest must satisfy the load path's verification"
+        "a digest of this shape matching the staged bytes must satisfy load-time verification"
     );
 }
