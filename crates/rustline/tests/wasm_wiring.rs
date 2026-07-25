@@ -71,6 +71,13 @@ api_base = "{base}"
         .args(["render", "right"])
         .env("XDG_CONFIG_HOME", &cfg_home)
         .env("XDG_DATA_HOME", &data_home)
+        // Isolate from any real `rustline daemon` the developer/CI box has
+        // running: `render` tries the daemon socket at
+        // `$XDG_RUNTIME_DIR/rustline/daemon.sock` first, and without this
+        // override it would find the REAL daemon and render the developer's
+        // production config instead of this test's fixture (see smoke.rs's
+        // `isolate` helper for the same rationale).
+        .env("XDG_RUNTIME_DIR", tmp.path().join("runtime"))
         .output()
         .unwrap();
 
@@ -125,6 +132,10 @@ right = ["weather"]
         .args(["render", "right"])
         .env("XDG_CONFIG_HOME", &cfg_home)
         .env("XDG_DATA_HOME", &data_home)
+        // See the isolation comment in the test above: without this, `render`
+        // would find a REAL daemon (if one is running) and never exercise
+        // this test's fixture at all.
+        .env("XDG_RUNTIME_DIR", tmp.path().join("runtime"))
         .output()
         .unwrap();
 
