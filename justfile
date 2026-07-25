@@ -84,3 +84,30 @@ build-plugin NAME:
 
 # Build the example weather WASM plugin and install it into the plugin dir
 build-weather: (build-plugin "weather")
+
+# Lint the excluded example plugins (host + wasm32 targets).
+#
+# plugins/* are EXCLUDED workspace members, so `cargo fmt --all`, `cargo clippy`
+# and `cargo test --workspace` at the root never see them. The wasm32 pass is
+# load-bearing, not redundant: each plugin's guest code lives behind
+# `#[cfg(target_arch = "wasm32")] mod guest`, so a host-only lint compiles just
+# the pure logic and never checks the half that actually runs in the sandbox.
+lint-plugins:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rustup target add wasm32-unknown-unknown >/dev/null 2>&1 || true
+    for p in weather counter filewatch httpget cmdrun; do
+        echo "== $p =="
+        cargo fmt --check --manifest-path "plugins/$p/Cargo.toml"
+        cargo clippy --manifest-path "plugins/$p/Cargo.toml" --all-targets -- -D warnings
+        cargo clippy --manifest-path "plugins/$p/Cargo.toml" --target wasm32-unknown-unknown -- -D warnings
+    done
+
+# Run the excluded example plugins' host-side unit tests (their pure logic).
+test-plugins:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for p in weather counter filewatch httpget cmdrun; do
+        echo "== $p =="
+        cargo test --manifest-path "plugins/$p/Cargo.toml"
+    done
