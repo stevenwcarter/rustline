@@ -218,8 +218,11 @@ refused with an explanation and writes nothing.
 `rustline widget edit` opens a full-screen `ratatui` editor (needs a
 terminal): four columns — LEFT, CENTER, RIGHT, and AVAILABLE (everything not
 currently placed) — navigated with arrow keys or vim keys (`h`/`j`/`k`/`l`).
-`space`/`Enter` moves the selected widget between AVAILABLE and a region;
-`J`/`K` reorders it within its current region; a live preview strip along
+`space`/`Enter` moves the selected widget between AVAILABLE and RIGHT (the
+only region AVAILABLE placement appends into); `J`/`K` reorders it within
+its current region; `H`/`L` (shifted, mirroring `J`/`K`) move a placed
+widget directly to the other editable region (LEFT ↔ RIGHT — this is how
+you get a widget into LEFT). A live preview strip along
 the bottom shows the region you're editing, rendered exactly as it would
 appear in tmux, updating as you make changes — before you've saved anything.
 `w` writes your changes to `config.toml`; `q` quits (asking to confirm first
@@ -970,7 +973,7 @@ whole command line:
 right = ["cmdrun", "cwd", "datetime"]
 
 [plugins.cmdrun]
-allowed_commands = ["uname*"]
+allowed_commands = ["uname", "uname *"]  # program "uname", any args (globs match "*" literally, not a prefix)
 
 [plugins.cmdrun.options]
 program = "uname"
@@ -991,7 +994,7 @@ rustline plugin list
 rustline plugin list --json                        # same info as a JSON array, for scripting
 rustline plugin url add weather "https://wttr.in/*"
 rustline plugin url list weather --json             # its allowed_urls as a JSON array of strings
-rustline plugin cmd add cmdrun "uname*"              # allowed_commands works the same way
+rustline plugin cmd add cmdrun "uname *"             # allowed_commands works the same way
 ```
 
 A plugin can also declare a capability *manifest* — a sidecar

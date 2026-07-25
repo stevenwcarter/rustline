@@ -259,18 +259,31 @@ pub struct WidgetPlacement {
 /// Every widget a user could put in a layout, with its current placement.
 ///
 /// Ordering is built-ins (in registration order) → instances (sorted) →
-/// plugin stems (sorted), which is also the order `widget list` prints and the
+/// plugin stems (sorted) → placed-but-unrecognized names (sorted), which is
+/// also the order `widget list` prints and the
 /// TUI's AVAILABLE column shows. This is enforced by partitioning on each
-/// candidate's [`WidgetSource`] rather than by which of the three inputs
+/// candidate's [`WidgetSource`] rather than by which of the four inputs
 /// below it arrived through — a candidate's `source` (trustworthy since
 /// `Registry::with_builtins` labels every `[instances.<name>]` descriptor
 /// `WidgetSource::Instance`, not `Builtin`) decides its group, and only
-/// group order is fixed; within the instance/plugin groups, names are always
-/// sorted regardless of `descriptors`' own order (which for instances
+/// group order is fixed; within the instance/plugin/unknown groups, names are
+/// always sorted regardless of `descriptors`' own order (which for instances
 /// reflects a `Registry`'s `HashMap<String, Value>` iteration over
 /// `cfg.instances`, itself unspecified). An `[instances.<name>]` entry whose
 /// name collides with a built-in is skipped — built-in always wins, the same
 /// precedence `Registry::with_builtins` and `is_builtin_widget_name` enforce.
+///
+/// The fourth group, [`WidgetSource::Unknown`], is populated differently from
+/// the other three: instead of scanning a catalog and looking up its
+/// placement, it scans `cfg.layout` itself for any name the first three
+/// passes never classified (e.g. a plugin whose `.wasm` is no longer present,
+/// or a stale name left behind after `plugin remove`) — so `widget_placements`
+/// always accounts for every name actually sitting in `[layout]`, not just
+/// the ones a live registry/plugin-dir scan currently recognizes. This is
+/// what lets `widget list`/`widget edit` show — and `widget disable`/`widget
+/// move` operate on — a placed widget the catalog doesn't otherwise know
+/// about; only `widget enable` (adding a *new*, unplaced name) still requires
+/// catalog membership, since an unplaced name never reaches this scan.
 pub fn widget_placements(
     cfg: &Config,
     descriptors: &[WidgetDescriptor],
@@ -278,15 +291,16 @@ pub fn widget_placements(
 ) -> Vec<WidgetPlacement> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     // Built-ins keep the order they're first seen in (a `Registry`'s
-    // registration order); instances and plugins are sorted by name below,
-    // so their intake order here doesn't matter.
+    // registration order); instances, plugins, and unknowns are sorted by
+    // name below, so their intake order here doesn't matter.
     let mut builtins: Vec<(String, String, WidgetSource)> = Vec::new();
     let mut instances: Vec<(String, String, WidgetSource)> = Vec::new();
     let mut plugins: Vec<(String, String, WidgetSource)> = Vec::new();
+    let mut unknown: Vec<(String, String, WidgetSource)> = Vec::new();
 
     // First candidate for a name wins (a later duplicate, e.g. a name
     // appearing in both `descriptors` and `plugin_names`, is dropped);
-    // deduped entries are then sorted into one of the three ordering groups
+    // deduped entries are then sorted into one of the four ordering groups
     // by their own `source`, never by which pass produced them.
     let mut classify = |name: String, summary: String, source: WidgetSource| {
         if !seen.insert(name.clone()) {
@@ -296,6 +310,7 @@ pub fn widget_placements(
             WidgetSource::Builtin => builtins.push((name, summary, source)),
             WidgetSource::Instance { .. } => instances.push((name, summary, source)),
             WidgetSource::Plugin => plugins.push((name, summary, source)),
+            WidgetSource::Unknown => unknown.push((name, summary, source)),
         }
     };
 
@@ -330,14 +345,28 @@ pub fn widget_placements(
             WidgetSource::Plugin,
         );
     }
+    // Anything still placed in the layout after the three catalog passes
+    // above is a name none of them recognized — surface it rather than
+    // silently dropping it (see the doc comment above).
+    for region in Region::ALL {
+        for name in cfg.layout.get(region) {
+            classify(
+                name.clone(),
+                "placed but not a recognized widget (unknown)".to_string(),
+                WidgetSource::Unknown,
+            );
+        }
+    }
 
     instances.sort_by(|a, b| a.0.cmp(&b.0));
     plugins.sort_by(|a, b| a.0.cmp(&b.0));
+    unknown.sort_by(|a, b| a.0.cmp(&b.0));
 
     builtins
         .into_iter()
         .chain(instances)
         .chain(plugins)
+        .chain(unknown)
         .map(|(name, summary, source)| {
             let placement = cfg.layout.find(&name);
             WidgetPlacement {
@@ -3331,5 +3360,99 @@ mount = "/data"
             names, expected,
             "built-ins (registration order), then instances (sorted), then plugins (sorted)"
         );
+    }
+
+    /// I4: a layout can name a widget none of the three catalog inputs
+    /// recognize — e.g. a plugin whose `.wasm` is no longer present. That
+    /// name must still show up, flagged `WidgetSource::Unknown`, with its
+    /// real placement, rather than silently vanishing from the list.
+    #[test]
+    fn placements_surface_a_placed_but_unrecognized_widget_as_unknown() {
+        let cfg = Config {
+            layout: Layout {
+                left: vec!["pane_id".into()],
+                center: vec![],
+                right: vec!["cwd".into(), "ghostwidget".into()],
+            },
+            ..Default::default()
+        };
+        let descriptors = vec![
+            WidgetDescriptor {
+                name: "pane_id".into(),
+                summary: "pane id".into(),
+                configurable: true,
+                source: WidgetSource::Builtin,
+            },
+            WidgetDescriptor {
+                name: "cwd".into(),
+                summary: "current directory".into(),
+                configurable: true,
+                source: WidgetSource::Builtin,
+            },
+        ];
+        let out = widget_placements(&cfg, &descriptors, &[]);
+        let ghost = out
+            .iter()
+            .find(|p| p.name == "ghostwidget")
+            .expect("placed-but-unrecognized name is still offered");
+        assert_eq!(ghost.source, WidgetSource::Unknown);
+        assert_eq!(ghost.placement, Some((Region::Right, 1)));
+    }
+
+    /// The unknown-scan must never re-classify (or duplicate) a name the
+    /// earlier catalog passes already recognized — a `cfg.layout` scan alone
+    /// can't tell a built-in/instance/plugin apart from an unrecognized name,
+    /// so it must defer to `classify`'s existing dedup rather than blindly
+    /// re-adding every placed name as `Unknown`.
+    #[test]
+    fn placements_unknown_scan_does_not_reclassify_an_already_known_name() {
+        let cfg = Config {
+            layout: Layout {
+                left: vec!["pane_id".into()],
+                center: vec![],
+                right: vec!["weather".into()],
+            },
+            ..Default::default()
+        };
+        let descriptors = vec![WidgetDescriptor {
+            name: "pane_id".into(),
+            summary: "pane id".into(),
+            configurable: true,
+            source: WidgetSource::Builtin,
+        }];
+        let out = widget_placements(&cfg, &descriptors, &["weather".to_string()]);
+        let matches: Vec<_> = out.iter().filter(|p| p.name == "pane_id").collect();
+        assert_eq!(matches.len(), 1, "no duplicate entry for pane_id");
+        assert_eq!(matches[0].source, WidgetSource::Builtin);
+        let weather = out.iter().find(|p| p.name == "weather").unwrap();
+        assert_eq!(
+            weather.source,
+            WidgetSource::Plugin,
+            "still a plugin, not Unknown"
+        );
+        assert!(out.iter().all(|p| p.source != WidgetSource::Unknown));
+    }
+
+    /// Ordering: the unknown group sorts after built-ins/instances/plugins,
+    /// by name.
+    #[test]
+    fn placements_unknown_group_is_sorted_and_ordered_last() {
+        let cfg = Config {
+            layout: Layout {
+                left: vec![],
+                center: vec![],
+                right: vec!["zghost".into(), "cwd".into(), "aghost".into()],
+            },
+            ..Default::default()
+        };
+        let descriptors = vec![WidgetDescriptor {
+            name: "cwd".into(),
+            summary: "current directory".into(),
+            configurable: true,
+            source: WidgetSource::Builtin,
+        }];
+        let out = widget_placements(&cfg, &descriptors, &[]);
+        let names: Vec<&str> = out.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["cwd", "aghost", "zghost"]);
     }
 }

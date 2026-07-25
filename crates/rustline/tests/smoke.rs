@@ -2461,6 +2461,190 @@ fn widget_disable_from_center_still_writes_and_warns() {
     );
 }
 
+/// I4: `disable` must operate on a placed name regardless of whether the
+/// widget catalog (built-ins + instances + discovered plugins) recognizes
+/// it — a layout can name a plugin whose `.wasm` is no longer present (a
+/// fresh clone, an empty plugin dir, `plugin remove` without cleaning up
+/// the layout), and the CLI must still be able to remove it.
+#[test]
+fn widget_disable_removes_a_placed_but_unknown_entry_and_exits_ok() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\", \"ghostwidget\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "disable", "ghostwidget"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "disable of a placed-but-unrecognized name must succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    assert!(!after.contains("ghostwidget"), "removed: {after}");
+    assert!(after.contains("cwd"), "cwd still present: {after}");
+}
+
+/// `move` must have the same "operates on what's placed, regardless of
+/// catalog membership" behavior as `disable`.
+#[test]
+fn widget_move_relocates_a_placed_but_unknown_entry() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "[layout]\nleft = [\"pane_id\", \"ghostwidget\"]\nright = [\"cwd\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "move", "ghostwidget", "--region", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "move of a placed-but-unrecognized name must succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    let left_line = after
+        .lines()
+        .find(|l| l.trim_start().starts_with("left"))
+        .expect("left line present");
+    assert!(
+        !left_line.contains("ghostwidget"),
+        "removed from its old region: {left_line}"
+    );
+    let right_line = after
+        .lines()
+        .find(|l| l.trim_start().starts_with("right"))
+        .expect("right line present");
+    assert!(
+        right_line.contains("ghostwidget"),
+        "present in its new region: {right_line}"
+    );
+}
+
+/// `enable` is the one verb that can introduce a name not already in the
+/// layout, so it alone must still refuse an unrecognized name — otherwise a
+/// typo would silently write garbage into `[layout]`.
+#[test]
+fn widget_enable_of_an_unknown_name_still_refuses() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    let original = "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\"]\n";
+    fs::write(&cfg, original).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "enable", "totally-bogus"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        !out.status.success(),
+        "enable of a name that isn't placed anywhere and isn't in the \
+         catalog must still be refused"
+    );
+    assert_eq!(
+        fs::read_to_string(&cfg).unwrap(),
+        original,
+        "config file left unchanged"
+    );
+}
+
+/// Skipping the catalog check for `disable`/`move` (RequireKnown::No) must
+/// not weaken their existing refusal of a name that isn't placed *anywhere*
+/// (not even as an unrecognized layout entry) — `layout_disable`'s own
+/// `LayoutEditError::NotPresent` is still the backstop.
+#[test]
+fn widget_disable_of_a_name_placed_nowhere_still_refuses_and_writes_nothing() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    let original = "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\"]\n";
+    fs::write(&cfg, original).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "disable", "never-placed-anywhere"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        !out.status.success(),
+        "disable of a name that was never placed anywhere must be refused"
+    );
+    assert_eq!(
+        fs::read_to_string(&cfg).unwrap(),
+        original,
+        "config file left unchanged"
+    );
+}
+
+/// `widget list`/`widget list --json` must surface a placed-but-unrecognized
+/// entry, clearly flagged, rather than silently under-reporting the layout.
+#[test]
+fn widget_list_surfaces_a_placed_but_unknown_entry() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\", \"ghostwidget\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "list"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ghostwidget"),
+        "the placed-but-unrecognized name is listed: {stdout}"
+    );
+    assert!(
+        stdout.contains("unknown"),
+        "it's clearly flagged as unknown: {stdout}"
+    );
+
+    let mut json_cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    json_cmd
+        .args(["widget", "list", "--json"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut json_cmd, tmp.path());
+    let json_out = json_cmd.output().unwrap();
+    assert!(json_out.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&json_out.stdout).unwrap();
+    let rows = parsed.as_array().expect("top-level array");
+    let ghost = rows
+        .iter()
+        .find(|r| r["name"] == "ghostwidget")
+        .expect("ghostwidget present in --json output");
+    assert_eq!(ghost["source"], "unknown");
+    assert_eq!(ghost["region"], "right");
+}
+
 /// A disable out of `left`/`right` must NOT print the center warning — guards
 /// against a version of the fix that warns unconditionally on every disable.
 #[test]

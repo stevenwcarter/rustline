@@ -240,7 +240,8 @@ impl EditorState {
 ```
 
 `KeyKind` is rustline's own small enum (`Up`, `Down`, `Left`, `Right`,
-`Space`, `NudgeUp`, `NudgeDown`, `Write`, `Quit`, `Other`) mapped from
+`Space`, `NudgeUp`, `NudgeDown`, `RegionPrev`, `RegionNext`, `Write`, `Quit`,
+`Help`, `Other`) mapped from
 crossterm's `KeyEvent` by one thin `fn map_key(KeyEvent) -> KeyKind`. Tests
 drive `on_key` with `KeyKind` values directly — no terminal, no crossterm
 event loop, the same "make the interesting part I/O-free" move
@@ -252,11 +253,20 @@ Bindings:
 |---|---|
 | `←` / `→` / `h` / `l` | move focus between the four columns |
 | `↑` / `↓` / `k` / `j` | move the cursor within the focused column |
-| `space` / `enter` | AVAILABLE → append to last-focused region; a region column → back to AVAILABLE |
+| `space` / `enter` | AVAILABLE → append to RIGHT (the only region AVAILABLE placement appends into); a region column → back to AVAILABLE |
 | `J` / `K` | nudge the selected widget down/up within its region |
+| `H` / `L` | move the selected *placed* widget directly to the other editable region (LEFT ↔ RIGHT, skipping over the fixed CENTER region in between) — this is the only way to place a widget in LEFT; refused with an explanation if the widget is currently in CENTER |
 | `w` | write `config.toml` and stay open (clears dirty, reports in the footer) |
 | `q` / `esc` | quit; if dirty, one `y/N` confirm line before discarding |
 | `?` | toggle an expanded help/legend |
+
+Note: an earlier revision of this spec described `space`/`enter` as appending
+into the "last-focused region." In practice `Column::ALL`'s fixed adjacency
+(`[Left, Center, Right, Available]`) means normal focus navigation always
+passes through RIGHT immediately before reaching AVAILABLE, overwriting
+`last_region` to RIGHT every time — so AVAILABLE placement always lands in
+RIGHT. `H`/`L` (added after a whole-branch review caught this) are what make
+LEFT reachable at all.
 
 **Live preview.** Below the columns, one line rendering the current (unsaved)
 layout: `sample_context(false)` + the resolved theme + `render_named_region`,

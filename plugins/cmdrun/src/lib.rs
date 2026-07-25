@@ -217,9 +217,21 @@ mod tests {
 
     #[test]
     fn snippet_caps_on_characters_not_bytes() {
-        let long = "é".repeat(500);
+        // A uniform repeat of any single multi-byte character can't actually
+        // exercise the byte-vs-char distinction here: MAX_SNIPPET_CHARS (60)
+        // is evenly divisible by every possible UTF-8 character width (1-4),
+        // so a byte offset of 60 always lands on a character boundary
+        // regardless of which fixed-width character is repeated -- a
+        // byte-based `&s[..60]` would never panic, and an assertion of only
+        // `out.chars().count() <= MAX_SNIPPET_CHARS` (an upper bound, not an
+        // exact one) would pass even if the byte-based version silently
+        // under-counted (e.g. 30 two-byte chars, not 60). 59 single-byte
+        // characters followed by a 3-byte one straddles byte offset 60
+        // exactly: a byte-based slice there cuts the 60th character in half
+        // and panics, while `.chars().take(60)` must not.
+        let long = format!("{}{}", "a".repeat(59), "€".repeat(500));
         let out = extract_snippet(&long);
-        assert!(out.chars().count() <= MAX_SNIPPET_CHARS);
+        assert_eq!(out.chars().count(), MAX_SNIPPET_CHARS);
     }
 
     #[test]

@@ -14,8 +14,8 @@ use crate::state;
 
 /// The kind of capability a denied request was for, carried to a
 /// [`DenialObserver`] alongside the plugin name and the denied target.
-/// `Serialize`/`Deserialize` (`snake_case`: `url`/`path`) so it rides
-/// [`crate::denials::Denial`]'s JSONL record.
+/// `Serialize`/`Deserialize` (`snake_case`: `url`/`path`/`command`) so it
+/// rides [`crate::denials::Denial`]'s JSONL record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DenialKind {
@@ -35,7 +35,7 @@ pub enum DenialKind {
 pub trait DenialObserver {
     /// `plugin` is always the observing instance's own name (invariant N4 —
     /// an observer never sees another plugin's denials); `target` is the
-    /// denied URL or path string, verbatim.
+    /// denied URL, path, or canonical argv string, verbatim.
     fn observe(&self, plugin: &str, kind: DenialKind, target: &str);
 }
 

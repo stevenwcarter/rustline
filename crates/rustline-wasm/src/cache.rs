@@ -1,6 +1,10 @@
-//! Pure helpers for the host-managed HTTP response cache: cache-file path
-//! derivation (FNV-1a of the URL), RFC3339 freshness, and quota-bounded
-//! entry read/write. Used by `perform_http_get_cached`.
+//! Pure helpers for the host-managed TTL caches: cache-file path derivation
+//! (FNV-1a of the cache key), RFC3339 freshness, and quota-bounded entry
+//! read/write. Used by both `perform_http_get_cached` (the HTTP response
+//! cache, keyed on the URL) and `perform_exec_cached` (the exec-result
+//! cache, keyed on the canonical argv) — see [`HTTP_NAMESPACE`]/
+//! [`EXEC_NAMESPACE`] for how the two stay in separate subdirectories so
+//! their keys can never collide.
 
 use std::path::{Path, PathBuf};
 
@@ -9,8 +13,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::check_cap;
 
-/// A cached HTTP response. `status` is the (2xx) status the body was fetched
-/// under; `fetched_at` is the RFC3339 instant, used for freshness.
+/// A cached entry, shared by both TTL caches. For the HTTP cache `status` is
+/// the (2xx) status the body was fetched under and `body` is the response
+/// body; for the exec cache `status` is the process exit code and `body` is
+/// captured stdout (see `perform_exec_cached`'s doc for that cache's
+/// round-trip limitations — stderr and the `truncated` flag aren't
+/// persisted). `fetched_at` is the RFC3339 instant either way, used for
+/// freshness.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CacheEntry {
     pub fetched_at: String,
@@ -18,8 +27,9 @@ pub struct CacheEntry {
     pub body: String,
 }
 
-/// FNV-1a (64-bit) of the URL — a deterministic, dependency-free key for a
-/// disposable cache file. Not cryptographic; collisions only mean a cache miss.
+/// FNV-1a (64-bit) of the cache key (a URL or a canonical argv string) — a
+/// deterministic, dependency-free key for a disposable cache file. Not
+/// cryptographic; collisions only mean a cache miss.
 fn fnv1a(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.as_bytes() {
@@ -63,8 +73,9 @@ pub fn read_entry(path: &Path) -> Option<CacheEntry> {
     serde_json::from_str(&raw).ok()
 }
 
-/// Quota-checked write of `content` to `path` (creating `__http_cache__/`).
-/// `check_cap` accounts against the whole `state_dir` (invariant N3).
+/// Quota-checked write of `content` to `path` (creating the namespace
+/// directory `path` sits in — `HTTP_NAMESPACE`/`EXEC_NAMESPACE`, per the
+/// caller). `check_cap` accounts against the whole `state_dir` (invariant N3).
 pub fn write_entry(state_dir: &Path, path: &Path, content: &str, cap: u64) -> Result<(), String> {
     check_cap(state_dir, path, content.len() as u64, cap)?;
     if let Some(parent) = path.parent() {

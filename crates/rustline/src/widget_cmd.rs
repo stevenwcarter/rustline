@@ -154,7 +154,11 @@ fn warn_if_center(region: Region) {
 /// Ask tmux to redraw the status line, so an edit is visible immediately.
 /// Best-effort: outside tmux, or if the spawn fails, this is a silent no-op —
 /// a failed refresh must never turn a successful config write into an error.
-fn refresh_tmux() {
+/// `pub(crate)` so `widget_tui.rs`'s `w` (write) key reuses this exact
+/// helper instead of duplicating it — the TUI's primary entry point is a
+/// tmux popup (`prefix + W`), exactly where `$TMUX` is set and a refresh is
+/// both possible and most visible.
+pub(crate) fn refresh_tmux() {
     if std::env::var_os("TMUX").is_none() {
         return;
     }
@@ -186,9 +190,13 @@ pub fn run(cmd: WidgetCmd, config_path: &Path, plugin_dir: &Path) -> i32 {
                     return 1;
                 }
             };
-            let code = mutate(config_path, plugin_dir, &name, |layout| {
-                layout_enable(layout, &name, region, index)
-            });
+            let code = mutate(
+                config_path,
+                plugin_dir,
+                &name,
+                RequireKnown::Yes,
+                |layout| layout_enable(layout, &name, region, index),
+            );
             if code == 0 {
                 warn_if_center(region);
             }
@@ -196,7 +204,7 @@ pub fn run(cmd: WidgetCmd, config_path: &Path, plugin_dir: &Path) -> i32 {
         }
         WidgetCmd::Disable { name } => {
             let mut removed_from = None;
-            let code = mutate(config_path, plugin_dir, &name, |layout| {
+            let code = mutate(config_path, plugin_dir, &name, RequireKnown::No, |layout| {
                 let change = layout_disable(layout, &name)?;
                 removed_from = change.from.map(|(region, _)| region);
                 Ok(change)
@@ -220,7 +228,7 @@ pub fn run(cmd: WidgetCmd, config_path: &Path, plugin_dir: &Path) -> i32 {
                     return 1;
                 }
             };
-            let code = mutate(config_path, plugin_dir, &name, |layout| {
+            let code = mutate(config_path, plugin_dir, &name, RequireKnown::No, |layout| {
                 layout_move(layout, &name, region, index.unwrap_or(usize::MAX))
             });
             if code == 0 {
@@ -232,19 +240,41 @@ pub fn run(cmd: WidgetCmd, config_path: &Path, plugin_dir: &Path) -> i32 {
     }
 }
 
-/// Load → validate the name → apply `edit` → write + report. Any failure
-/// short-circuits before the write, so `config.toml` is untouched.
+/// Whether [`mutate`] must validate `name` against the widget catalog before
+/// applying its edit. `enable` needs this — it is the only verb that can
+/// introduce a name not already in the layout, so it's the one place "don't
+/// let a user add garbage" applies. `disable`/`move` operate on a name the
+/// layout already contains (built-in, instance, plugin, *or* an unrecognized
+/// placed name — see `widget_placements`'s `WidgetSource::Unknown` group);
+/// gating them on catalog membership would refuse to remove/relocate exactly
+/// the placed-but-unrecognized widgets those verbs most need to reach (e.g. a
+/// layout naming a plugin whose `.wasm` is gone). Their own edit function
+/// (`layout_disable`/`layout_move`) already refuses a name that isn't placed
+/// anywhere, via `LayoutEditError::NotPresent` — that's the only validation
+/// they need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequireKnown {
+    Yes,
+    No,
+}
+
+/// Load → validate the name (iff `require_known`) → apply `edit` → write +
+/// report. Any failure short-circuits before the write, so `config.toml` is
+/// untouched.
 fn mutate(
     config_path: &Path,
     plugin_dir: &Path,
     name: &str,
+    require_known: RequireKnown,
     edit: impl FnOnce(&mut Layout) -> Result<LayoutChange, rustline_core::LayoutEditError>,
 ) -> i32 {
     let cfg = Config::load(config_path);
-    let known = known_names(&cfg, plugin_dir);
-    if let Err(message) = resolve_name(name, &known) {
-        eprintln!("{message}");
-        return 1;
+    if require_known == RequireKnown::Yes {
+        let known = known_names(&cfg, plugin_dir);
+        if let Err(message) = resolve_name(name, &known) {
+            eprintln!("{message}");
+            return 1;
+        }
     }
     let text = std::fs::read_to_string(config_path).unwrap_or_default();
     let mut doc = match text.parse::<DocumentMut>() {
@@ -298,6 +328,7 @@ fn list(config_path: &Path, plugin_dir: &Path, json: bool) {
             WidgetSource::Builtin => "builtin".to_string(),
             WidgetSource::Plugin => "plugin".to_string(),
             WidgetSource::Instance { kind } => format!("instance of {kind}"),
+            WidgetSource::Unknown => "unknown".to_string(),
         };
         let _ = writeln!(
             out,
@@ -319,6 +350,7 @@ fn placements_json(rows: &[WidgetPlacement]) -> String {
                     WidgetSource::Builtin => "builtin".to_string(),
                     WidgetSource::Plugin => "plugin".to_string(),
                     WidgetSource::Instance { kind } => format!("instance:{kind}"),
+                    WidgetSource::Unknown => "unknown".to_string(),
                 },
                 "region": r.placement.map(|(reg, _)| reg.as_str()),
                 "index": r.placement.map(|(_, i)| i),

@@ -34,8 +34,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use rustline_core::{
-    Config, Layout, Region, Registry, WidgetPlacement, WidgetSource, layout_disable, layout_enable,
-    layout_nudge, render_named_region, tmux_to_ansi,
+    Config, Layout, Region, Registry, Theme, WidgetPlacement, WidgetSource, layout_disable,
+    layout_enable, layout_move, layout_nudge, render_named_region, tmux_to_ansi,
 };
 use toml_edit::DocumentMut;
 
@@ -106,6 +106,8 @@ pub enum KeyKind {
     Space,
     NudgeUp,
     NudgeDown,
+    RegionPrev,
+    RegionNext,
     Write,
     Quit,
     Help,
@@ -286,6 +288,14 @@ impl EditorState {
                 self.nudge(1);
                 EditorAction::Redraw
             }
+            KeyKind::RegionPrev => {
+                self.move_region(-1);
+                EditorAction::Redraw
+            }
+            KeyKind::RegionNext => {
+                self.move_region(1);
+                EditorAction::Redraw
+            }
             KeyKind::Write => EditorAction::Write,
             KeyKind::Help => {
                 self.show_help = !self.show_help;
@@ -391,6 +401,56 @@ impl EditorState {
         }
     }
 
+    /// `H`/`L`: move the selected *placed* widget to the previous/next
+    /// **editable** layout region, via [`layout_move`]. This is the only
+    /// path that can ever place a widget in LEFT — AVAILABLE→region
+    /// (`toggle_selected`) always appends to `last_region`, which is
+    /// unconditionally RIGHT in practice (see `EditorState::new`'s doc and
+    /// the AVAILABLE `Column::ALL` adjacency), so LEFT was previously
+    /// unreachable from the editor entirely.
+    ///
+    /// CENTER sits between LEFT and RIGHT in `Region::ALL`'s (visual)
+    /// order, but is never a valid H/L destination — [`adjacent_editable_region`]
+    /// skips over it, so a single `H`/`L` moves directly between LEFT and
+    /// RIGHT rather than getting stuck refusing at CENTER, which would make
+    /// LEFT unreachable from RIGHT again. CENTER *is* still refused as a
+    /// **source**: focus a widget in the CENTER column and press `H`/`L`
+    /// (as well as `space`/`J`/`K`) and it's refused with
+    /// [`CENTER_FIXED_STATUS`] — the same explanatory status `nudge`/
+    /// `toggle_selected` already use, now reachable via H/L too. A move
+    /// past either end (nothing before LEFT, nothing after RIGHT) is a
+    /// silent boundary no-op, mirroring [`Self::nudge`]'s boundary
+    /// handling. On success, focus follows the widget into its new
+    /// region's column.
+    fn move_region(&mut self, delta: i32) {
+        let Some(region) = self.column.region() else {
+            return; // AVAILABLE: nothing placed to move between regions.
+        };
+        if region == Region::Center {
+            self.status = CENTER_FIXED_STATUS.to_string();
+            return;
+        }
+        let Some(name) = self.selected().map(str::to_string) else {
+            return;
+        };
+        let Some(target_region) = adjacent_editable_region(region, delta) else {
+            return;
+        };
+        if let Ok(change) = layout_move(&mut self.layout, &name, target_region, usize::MAX) {
+            self.dirty = true;
+            self.status = String::new();
+            if let Some(column) = Column::ALL
+                .into_iter()
+                .find(|c| c.region() == Some(target_region))
+            {
+                self.column = column;
+            }
+            if let Some((_, index)) = change.to {
+                self.set_cursor(index);
+            }
+        }
+    }
+
     fn clamp_cursor(&mut self) {
         let len = self.column_items(self.column).len();
         let clamped = self.cursor().min(len.saturating_sub(1));
@@ -398,9 +458,26 @@ impl EditorState {
     }
 }
 
+/// The next region from `from` in `delta`'s direction (`Region::ALL`'s
+/// visual order), skipping CENTER — never a real H/L destination, see
+/// [`EditorState::move_region`] — and stopping at either end. `None` at a
+/// boundary (nothing further in that direction), mirroring
+/// [`layout_nudge`]'s boundary `NoOp`.
+fn adjacent_editable_region(from: Region, delta: i32) -> Option<Region> {
+    let mut index = Region::ALL.iter().position(|r| *r == from)? as i32;
+    loop {
+        index += delta.signum();
+        let next = *Region::ALL.get(usize::try_from(index).ok()?)?;
+        if next != Region::Center {
+            return Some(next);
+        }
+    }
+}
+
 /// Map a crossterm key event onto the editor's own [`KeyKind`]. Arrow keys and
 /// their vim equivalents are interchangeable; `J`/`K` (shifted, however the
-/// terminal reports it) reorder.
+/// terminal reports it) reorder within a region, and `H`/`L` (same shifted
+/// convention) move a placed widget to the previous/next region.
 fn map_key(key: KeyEvent) -> KeyKind {
     match key.code {
         KeyCode::Up => KeyKind::Up,
@@ -411,8 +488,12 @@ fn map_key(key: KeyEvent) -> KeyKind {
         KeyCode::Esc => KeyKind::Quit,
         KeyCode::Char('J') => KeyKind::NudgeDown,
         KeyCode::Char('K') => KeyKind::NudgeUp,
+        KeyCode::Char('H') => KeyKind::RegionPrev,
+        KeyCode::Char('L') => KeyKind::RegionNext,
         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::SHIFT) => KeyKind::NudgeDown,
         KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::SHIFT) => KeyKind::NudgeUp,
+        KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::SHIFT) => KeyKind::RegionPrev,
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::SHIFT) => KeyKind::RegionNext,
         KeyCode::Char('j') => KeyKind::Down,
         KeyCode::Char('k') => KeyKind::Up,
         KeyCode::Char('h') => KeyKind::Left,
@@ -437,10 +518,16 @@ fn map_key(key: KeyEvent) -> KeyKind {
 /// dedicated path — see `assemble.rs`), so this preview treats it like `Left`
 /// purely for a stable, readable strip; it is not meant to match tmux's actual
 /// window-pill rendering.
-fn preview_line(state: &EditorState, cfg: &Config) -> String {
-    let theme = crate::resolve_theme(cfg);
+///
+/// `theme`/`registry` are built once by [`run`] and passed in, not rebuilt
+/// here — this function is called on every draw (so, every keystroke); a
+/// `Registry::with_builtins` rebuild that expensive-per-keystroke would also
+/// `warn!` once per malformed `[instances.<name>]` on *every single one* of
+/// those rebuilds, spamming the rotated log file at typing speed (M4). Only
+/// `cfg.color_overrides()` is still recomputed per draw — a pure, cheap
+/// projection over already-parsed config with no I/O or logging of its own.
+fn preview_line(state: &EditorState, cfg: &Config, theme: &Theme, registry: &Registry) -> String {
     let ctx = crate::sample_context::sample_context(false);
-    let registry = Registry::with_builtins(cfg);
     let overrides = cfg.color_overrides();
     let mut parts: Vec<String> = Vec::new();
     for region in Region::ALL {
@@ -461,7 +548,7 @@ fn preview_line(state: &EditorState, cfg: &Config) -> String {
             Region::Right => rustline_core::Direction::Right,
             Region::Left | Region::Center => rustline_core::Direction::Left,
         };
-        let markup = render_named_region(dir, &names, &ctx, &registry, &theme, &overrides);
+        let markup = render_named_region(dir, &names, &ctx, registry, theme, &overrides);
         let mut rendered = tmux_to_ansi(&markup);
         if !chips.is_empty() {
             rendered.push(' ');
@@ -498,20 +585,27 @@ impl Drop for TerminalGuard {
 }
 
 /// The key-hint footer shown when there's no status message.
-const HELP_LINE: &str = "←→ region  ↑↓ select  space add/remove  J/K reorder  w write  q quit";
+const HELP_LINE: &str =
+    "←→ region  ↑↓ select  space add/remove  J/K reorder  H/L move region  w write  q quit";
 
 /// The fuller hint shown while `?` help is toggled on, appended above the
 /// footer.
-const HELP_DETAIL: &str =
-    "vim keys: h j k l   Enter also adds/removes   Esc also quits   ? toggles this line";
+const HELP_DETAIL: &str = "vim keys: h j k l (shift: H/L move region, J/K reorder)   Enter also adds/removes   Esc also quits   ? toggles this line";
 
-/// Render one frame. Pure with respect to `state`/`cfg` — it reads
+/// Render one frame. Pure with respect to its arguments — it reads
 /// [`EditorState::columns`], [`EditorState::column`],
 /// [`EditorState::cursor_index`], [`EditorState::status`],
 /// [`EditorState::show_help`], [`EditorState::confirming_quit`], and
 /// [`EditorState::is_dirty`] (for the footer's `[modified]` marker), and
-/// never mutates anything.
-fn draw(frame: &mut ratatui::Frame, state: &EditorState, cfg: &Config) {
+/// never mutates anything. `theme`/`registry` are built once by [`run`] and
+/// threaded through to [`preview_line`] — see its doc for why (M4).
+fn draw(
+    frame: &mut ratatui::Frame,
+    state: &EditorState,
+    cfg: &Config,
+    theme: &Theme,
+    registry: &Registry,
+) {
     let help_height = u16::from(state.show_help());
     let rows = UiLayout::default()
         .direction(LayoutDirection::Vertical)
@@ -541,6 +635,7 @@ fn draw(frame: &mut ratatui::Frame, state: &EditorState, cfg: &Config) {
                 let tag = match state.source_of(name) {
                     Some(WidgetSource::Plugin) => " (plugin)",
                     Some(WidgetSource::Instance { .. }) => " (instance)",
+                    Some(WidgetSource::Unknown) => " (unknown)",
                     _ => "",
                 };
                 ListItem::new(Line::from(Span::raw(format!("{name}{tag}"))))
@@ -560,7 +655,10 @@ fn draw(frame: &mut ratatui::Frame, state: &EditorState, cfg: &Config) {
         frame.render_stateful_widget(list, *area, &mut list_state);
     }
 
-    frame.render_widget(Paragraph::new(preview_line(state, cfg)), rows[1]);
+    frame.render_widget(
+        Paragraph::new(preview_line(state, cfg, theme, registry)),
+        rows[1],
+    );
 
     if state.show_help() {
         frame.render_widget(Paragraph::new(HELP_DETAIL), rows[2]);
@@ -602,9 +700,16 @@ pub fn run(config_path: &Path, plugin_dir: &Path) -> i32 {
         }
     };
     let layout = crate::widget_cmd::read_layout(&doc);
+    // Built once for the whole session, not per draw (M4): neither `cfg` nor
+    // the resolved theme changes while the editor is open, so rebuilding
+    // `Registry::with_builtins` on every keystroke was pure waste — and,
+    // worse, re-`warn!`ed for every malformed `[instances.<name>]` on each
+    // of those rebuilds, spamming the rotated log file at typing speed.
+    let registry = Registry::with_builtins(&cfg);
+    let theme = crate::resolve_theme(&cfg);
     let catalog = rustline_core::widget_placements(
         &cfg,
-        Registry::with_builtins(&cfg).descriptors(),
+        registry.descriptors(),
         &rustline_wasm::discover_plugin_names(plugin_dir),
     );
     let mut state = EditorState::new(layout, catalog);
@@ -622,10 +727,27 @@ pub fn run(config_path: &Path, plugin_dir: &Path) -> i32 {
     };
 
     loop {
-        if terminal.draw(|frame| draw(frame, &state, &cfg)).is_err() {
+        if terminal
+            .draw(|frame| draw(frame, &state, &cfg, &theme, &registry))
+            .is_err()
+        {
             return 1;
         }
-        let Ok(Event::Key(key)) = event::read() else {
+        // An `Err` here (as opposed to `Ok` of a non-key event, e.g. a
+        // resize or mouse event, which is legitimate and just redraws) means
+        // the terminal itself is no longer readable -- e.g. stdin closed out
+        // from under raw mode (the popup's pty torn down while this process
+        // lingers). That can't self-heal by looping: continuing would spin
+        // this loop at 100% CPU forever, since `event::read()` keeps failing
+        // the same way on every subsequent call. Bail instead.
+        let event = match event::read() {
+            Ok(event) => event,
+            Err(error) => {
+                eprintln!("terminal event stream closed; exiting: {error}");
+                return 1;
+            }
+        };
+        let Event::Key(key) = event else {
             continue;
         };
         if key.kind != KeyEventKind::Press {
@@ -635,10 +757,28 @@ pub fn run(config_path: &Path, plugin_dir: &Path) -> i32 {
             EditorAction::Redraw | EditorAction::ConfirmQuit => {}
             EditorAction::Write => {
                 match crate::widget_cmd::write_layout(&mut doc, state.layout()) {
-                    Ok(()) => match std::fs::write(config_path, doc.to_string()) {
-                        Ok(()) => state.mark_written(),
-                        Err(error) => state.mark_write_failed(&error.to_string()),
-                    },
+                    Ok(()) => {
+                        // Mirrors `widget_cmd.rs`'s `mutate`: a config directory
+                        // that doesn't exist yet (e.g. a machine with no prior
+                        // `rustline` config) must not turn a successful in-memory
+                        // edit into an unrecoverable "No such file or directory"
+                        // at save time. Best-effort: a failure here still
+                        // surfaces through the `std::fs::write` below.
+                        if let Some(parent) = config_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        match std::fs::write(config_path, doc.to_string()) {
+                            Ok(()) => {
+                                state.mark_written();
+                                // Same refresh `widget_cmd.rs`'s CLI mutations
+                                // trigger — this editor's primary entry point is
+                                // a tmux popup, exactly where it's both possible
+                                // and most visible (M3).
+                                crate::widget_cmd::refresh_tmux();
+                            }
+                            Err(error) => state.mark_write_failed(&error.to_string()),
+                        }
+                    }
                     Err(error) => state.mark_write_failed(&error),
                 }
             }
@@ -792,6 +932,88 @@ mod tests {
         assert!(!s.is_dirty());
     }
 
+    /// I2: `H`/`L` must be able to place a widget in LEFT — previously no key
+    /// sequence could. A single `H` from RIGHT lands directly on LEFT,
+    /// skipping over the fixed CENTER region in between rather than getting
+    /// stuck refusing there (which would make LEFT unreachable from RIGHT
+    /// all over again).
+    #[test]
+    fn region_move_moves_a_placed_widget_directly_from_right_to_left() {
+        let mut s = state();
+        s.on_key(KeyKind::Right); // Left -> Center
+        s.on_key(KeyKind::Right); // Center -> Right, cursor on "cwd"
+        assert_eq!(s.column(), Column::Right);
+        assert_eq!(s.selected(), Some("cwd"));
+        s.on_key(KeyKind::RegionPrev);
+        assert_eq!(s.layout().left, ["pane_id", "cwd"]);
+        assert_eq!(s.layout().right, ["cpu"]);
+        assert_eq!(s.column(), Column::Left, "focus follows the moved widget");
+        assert_eq!(s.selected(), Some("cwd"));
+        assert!(s.is_dirty());
+    }
+
+    #[test]
+    fn region_move_moves_a_placed_widget_directly_from_left_to_right() {
+        let mut s = state();
+        assert_eq!(s.column(), Column::Left);
+        assert_eq!(s.selected(), Some("pane_id"));
+        s.on_key(KeyKind::RegionNext);
+        assert!(s.layout().left.is_empty());
+        assert_eq!(s.layout().right, ["cwd", "cpu", "pane_id"]);
+        assert_eq!(s.column(), Column::Right, "focus follows the moved widget");
+        assert!(s.is_dirty());
+    }
+
+    #[test]
+    fn region_move_past_either_end_is_a_noop_and_does_not_dirty() {
+        let mut s = state();
+        // LEFT: nothing before it.
+        s.on_key(KeyKind::RegionPrev);
+        assert_eq!(s.layout().left, ["pane_id"]);
+        assert!(!s.is_dirty());
+
+        // RIGHT: nothing after it.
+        s.on_key(KeyKind::Right);
+        s.on_key(KeyKind::Right);
+        s.on_key(KeyKind::RegionNext);
+        assert_eq!(s.layout().right, ["cwd", "cpu"]);
+        assert!(!s.is_dirty());
+    }
+
+    #[test]
+    fn region_move_sourced_from_center_is_refused_leaves_layout_unchanged_and_does_not_dirty() {
+        let mut s = state();
+        s.on_key(KeyKind::Right); // Left -> Center, cursor on "windows"
+        assert_eq!(s.column(), Column::Center);
+        let before = s.layout().clone();
+
+        s.on_key(KeyKind::RegionPrev);
+        assert_eq!(s.layout(), &before);
+        assert!(!s.is_dirty());
+        assert!(
+            !s.status().is_empty(),
+            "status explains why: {}",
+            s.status()
+        );
+
+        s.on_key(KeyKind::RegionNext);
+        assert_eq!(s.layout(), &before);
+        assert!(!s.is_dirty());
+    }
+
+    #[test]
+    fn region_move_in_the_available_column_is_ignored() {
+        let mut s = state();
+        for _ in 0..3 {
+            s.on_key(KeyKind::Right);
+        }
+        assert_eq!(s.column(), Column::Available);
+        s.on_key(KeyKind::RegionPrev);
+        assert!(!s.is_dirty());
+        s.on_key(KeyKind::RegionNext);
+        assert!(!s.is_dirty());
+    }
+
     #[test]
     fn write_requests_a_write_and_clears_dirty_when_confirmed() {
         let mut s = state();
@@ -874,6 +1096,45 @@ mod tests {
         assert_eq!(
             map_key(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE)),
             KeyKind::NudgeDown
+        );
+    }
+
+    #[test]
+    fn map_key_distinguishes_shifted_region_moves_from_plain_motion() {
+        // Terminals report Shift+h either as 'H' or as 'h' with the SHIFT
+        // modifier — both must map to a region move, not plain focus motion.
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT)),
+            KeyKind::RegionPrev
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT)),
+            KeyKind::RegionNext
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::NONE)),
+            KeyKind::RegionPrev
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE)),
+            KeyKind::RegionNext
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::SHIFT)),
+            KeyKind::RegionPrev
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::SHIFT)),
+            KeyKind::RegionNext
+        );
+        // Bare (unshifted) lowercase still means plain focus movement.
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            KeyKind::Left
+        );
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+            KeyKind::Right
         );
     }
 
@@ -1012,10 +1273,61 @@ mod tests {
             },
         ];
         let state = EditorState::new(layout, catalog);
-        let line = preview_line(&state, &Config::default());
+        let cfg = Config::default();
+        let registry = Registry::with_builtins(&cfg);
+        let theme = Theme::default();
+        let line = preview_line(&state, &cfg, &theme, &registry);
         // The built-in rendered its real text; the plugin is a placeholder chip and
         // was never instantiated.
         assert!(line.contains("[weather]"), "plugin chip present: {line}");
         assert!(!line.is_empty());
+    }
+
+    /// I4: a layout can name a widget `widget_placements` doesn't otherwise
+    /// recognize (e.g. a plugin whose `.wasm` is gone) — `widget_placements`
+    /// now surfaces it as `WidgetSource::Unknown` in the catalog the TUI is
+    /// built from, rather than silently omitting it. This pins the editor's
+    /// decision for what happens to it: removing it returns it to AVAILABLE
+    /// (never lost) tagged `(unknown)`, and from there it can be re-placed
+    /// exactly like any other widget — `layout_enable` never checks catalog
+    /// membership.
+    #[test]
+    fn removing_a_placed_but_unknown_widget_returns_it_to_available_for_re_placement() {
+        let layout = Layout {
+            left: vec!["pane_id".into()],
+            center: vec!["windows".into()],
+            right: vec!["ghostwidget".into()],
+        };
+        let mut catalog = vec![placement("pane_id"), placement("windows")];
+        catalog.push(WidgetPlacement {
+            name: "ghostwidget".to_string(),
+            summary: "placed but not a recognized widget (unknown)".to_string(),
+            source: WidgetSource::Unknown,
+            placement: Some((Region::Right, 0)),
+        });
+        let mut s = EditorState::new(layout, catalog);
+
+        s.on_key(KeyKind::Right); // Left -> Center
+        s.on_key(KeyKind::Right); // Center -> Right, cursor on "ghostwidget"
+        assert_eq!(s.selected(), Some("ghostwidget"));
+
+        s.on_key(KeyKind::Space); // remove it
+        assert!(s.layout().right.is_empty(), "removed from its region");
+        assert_eq!(
+            s.column_items(Column::Available),
+            ["ghostwidget"],
+            "not lost -- back in AVAILABLE"
+        );
+        assert_eq!(
+            s.source_of("ghostwidget"),
+            Some(&WidgetSource::Unknown),
+            "still tagged unknown, not silently reclassified"
+        );
+
+        // And it can be re-placed exactly like any other AVAILABLE widget.
+        s.on_key(KeyKind::Right); // Right -> Available
+        assert_eq!(s.selected(), Some("ghostwidget"));
+        s.on_key(KeyKind::Space);
+        assert_eq!(s.layout().right, ["ghostwidget"]);
     }
 }

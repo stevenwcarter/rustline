@@ -554,12 +554,20 @@ these shared types, not a design shortcut. Keep them serializable.
   stdin is closed (`Stdio::null()`, so a child reading stdin gets EOF instead
   of hanging), stdout/stderr are piped and capped at `MAX_OUTPUT_BYTES` (64
   KiB per stream, flagging `truncated`), and the whole run is bounded by
-  `EXEC_TIMEOUT` (5 s, comfortably under Extism's 10 s plugin timeout). The
-  child runs in its own process group (`process_group(0)`, the file's one
+  `EXEC_TIMEOUT` (5 s, comfortably under Extism's 10 s plugin timeout) plus,
+  at most, two short `OUTPUT_GRACE` periods (250 ms each) spent collecting
+  output afterward. The child runs in its own process group
+  (`process_group(0)`, the file's one
   `unsafe`) so a timeout/output-collection deadline kills the **group**, not
   just the immediate pid — otherwise a backgrounded descendant (`sh -c "long
   &"`) could keep the piped stdout/stderr open indefinitely and hang the
-  render even after its immediate parent exits cleanly.
+  render even after its immediate parent exits cleanly. `kill_group` only
+  reaches that group, though: a descendant that escapes it via
+  `setsid`/`setpgid` (a properly-daemonizing program, e.g. `emacs --daemon`,
+  `ssh -f`, `tmux new-session -d`) keeps the piped fds open past the kill —
+  `OUTPUT_GRACE` is what keeps that case bounded (the escaped descendant's
+  own output is dropped, empty, rather than hanging the render thread and,
+  transitively, the daemon's shared render lock).
 - `perform.rs` — the eight capability-checked effect functions
   (`perform_http_get`, `perform_http_get_cached` — the TTL-cached GET:
   gate-first, 2xx-only caching, serve-stale — `perform_state_read/write`,
@@ -708,7 +716,9 @@ failure path via `rl_log` (W7) rather than staying silent:
   contrast — and renders the first line of stdout (capped at 60 chars). A
   denial, spawn failure, timeout, or non-zero exit is `rl_log`ged and falls
   back to `down_format` (same convention). Ships a sidecar `cmdrun.toml`
-  manifest requesting `["uname*"]`, so `rustline plugin approve cmdrun`
+  manifest requesting `["uname", "uname *"]` (program `uname`, with or
+  without arguments — not a `uname*` prefix glob, which would also match a
+  program named `unamex`), so `rustline plugin approve cmdrun`
   demonstrates the exec-specific approval warning end to end.
 
 `rustline` (bin):
@@ -1079,9 +1089,19 @@ failure path via `rl_log` (W7) rather than staying silent:
   a hint toward `widget list` on a non-interactive invocation). Four
   `Column`s (`Left`, `Center`, `Right`, `Available`) are drawn side by side;
   arrow keys or vim keys (`h`/`j`/`k`/`l`) move focus/cursor, `space`/`Enter`
-  adds a selected AVAILABLE widget to the last-used region or removes a
-  placed one back to AVAILABLE, `J`/`K` nudge a widget's position within its
-  region (via `layout_nudge`), `w` writes the in-memory `Layout` to
+  adds a selected AVAILABLE widget to RIGHT (the only region AVAILABLE
+  placement ever appends into — `last_region` is unconditionally RIGHT once
+  focus reaches AVAILABLE, since `Column::ALL`'s `[Left, Center, Right,
+  Available]` adjacency always passes through RIGHT immediately beforehand)
+  or removes a placed one back to AVAILABLE, `J`/`K` nudge a widget's
+  position within its region (via `layout_nudge`), `H`/`L` (shifted,
+  mirroring `J`/`K`; both the `Char('H')` and `Char('h')`+SHIFT reporting
+  forms) move a *placed* widget directly to the other editable region (via
+  `layout_move` + the free `adjacent_editable_region` helper, which skips
+  over CENTER rather than stopping there — the only way LEFT is reachable
+  from RIGHT at all) — CENTER is still refused as a source (focus a widget
+  in CENTER and press `H`/`L`, same as `space`/`J`/`K`, and it's refused
+  with `CENTER_FIXED_STATUS`), `w` writes the in-memory `Layout` to
   `config.toml` (same `read_layout`/`write_layout` as `widget_cmd.rs`), `q`
   quits (prompting to confirm first if there are unsaved changes — `dirty`
   tracking — else quitting immediately), and `?` toggles a help overlay. A
@@ -2086,7 +2106,10 @@ explicit rather than implicit:
   (`Stdio::null()`, so a command that tries to read stdin gets EOF instead of
   hanging). The child runs in its own process group so a backgrounded
   descendant (e.g. `sh -c "long_thing &"`) can't hold the piped output open
-  past the timeout and hang the render.
+  past the timeout and hang the render — and even a descendant that escapes
+  that group entirely (`setsid`/`setpgid`) is bounded by a short output-
+  collection grace period afterward, so its own output is dropped rather than
+  hanging the render (`rustline-wasm::run`'s `OUTPUT_GRACE`).
 - **Environment and working directory are inherited from the host process —
   plainly, not as a footnote.** This is why `playerctl`/`git`/etc. work
   without extra plumbing, and it's a real part of what you're granting: an
