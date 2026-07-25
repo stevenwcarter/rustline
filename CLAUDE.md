@@ -685,9 +685,9 @@ these shared types, not a design shortcut. Keep them serializable.
   `CollectingObserver`. It deliberately runs the checksum gate **warn-only**:
   a bad verdict is logged but the plugin still instantiates and runs, because
   this harness is used right after rebuilding a plugin, where a recorded
-  digest legitimately mismatches on every build. The real gate — the bar, the
-  daemon, and `plugin list`'s discovery — always goes through
-  `register_plugins` above, which does not bypass it.
+  digest legitimately mismatches on every build. The real gate — the bar and
+  the daemon — always goes through `register_plugins` above, which does not
+  bypass it.
 
 `rustline-plugin-sdk`:
 - `lib.rs` — the guest-side SDK (W39). Typed host-capability wrappers
@@ -2223,9 +2223,12 @@ honor, not evidence the plugin is unpinned. `rustline plugin run`
 (`instantiate_named`) is the one deliberate exception: it's **warn-only** on
 a bad verdict — it logs and still runs the plugin — since that dev harness is
 used right after rebuilding a plugin, where a recorded digest legitimately
-mismatches every build; the bar, the daemon (which rebuilds its registry via
-this same `register_plugins` on a config-file mtime change), and `plugin
-list`'s discovery all go through the real, non-bypassable gate.
+mismatches every build; the bar and the daemon (which rebuilds its registry
+via this same `register_plugins` on a config-file mtime change) both go
+through the real, non-bypassable gate. `plugin list` does **not** — it reads
+only the config's `[plugins.*]` entries and never opens a `.wasm`, so it
+lists a checksum-failing (or entirely missing) plugin exactly like a healthy
+one; use `plugin run` or the log to see a verdict.
 
 **Exec capability (`allowed_commands`):** a plugin can ask the host to run a
 program on its behalf via `rl_exec` (plain, every render) or `rl_exec_cached`

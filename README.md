@@ -1110,7 +1110,9 @@ recorded and forgotten.** Before a discovered `.wasm` is handed to the
 sandbox, `rustline` hashes its bytes and checks them against
 `[plugins.<name>].checksum`:
 
-- No checksum recorded → loads exactly as before (nothing to check).
+- No checksum recorded — the key is absent, or set to an empty/whitespace
+  value → loads exactly as before (nothing to check). Clearing the field is
+  how you opt a plugin back out of verification.
 - Recorded and matching → loads normally.
 - Recorded but the bytes don't match → **skipped**, with a warning in the
   log — the file on disk changed since the digest was recorded, which is
