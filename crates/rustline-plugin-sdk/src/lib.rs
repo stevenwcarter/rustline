@@ -4,14 +4,15 @@
 //! than hand-rolling the Extism glue:
 //!
 //! - **Typed host-capability wrappers** ([`http_get`], [`http_get_cached`],
-//!   [`state_read`], [`state_write`], [`file_read`], [`file_write`], [`log`])
-//!   that call the host functions and decode their JSON responses into typed
-//!   result structs, returning a [`Result`] instead of an untyped
-//!   `serde_json::Value` the plugin must walk by hand.
+//!   [`state_read`], [`state_write`], [`file_read`], [`file_write`], [`exec`],
+//!   [`exec_cached`], [`log`]) that call the host functions and decode their
+//!   JSON responses into typed result structs, returning a [`Result`] instead
+//!   of an untyped `serde_json::Value` the plugin must walk by hand.
 //! - **Re-exports of the shared wire types** ([`GuestRender`], [`WireContext`],
-//!   [`Segment`], [`Style`], [`Color`], and the four host-effect result types
-//!   [`HttpResult`], [`CachedHttpResult`], [`ReadResult`], [`WriteResult`])
-//!   from `rustline-abi` (W51 hoisted these off a duplicate SDK-local copy).
+//!   [`Segment`], [`Style`], [`Color`], and the six host-effect result types
+//!   [`HttpResult`], [`CachedHttpResult`], [`ReadResult`], [`WriteResult`],
+//!   [`ExecResult`], [`CachedExecResult`]) from `rustline-abi` (W51 hoisted the
+//!   original four off a duplicate SDK-local copy).
 //! - The **[`active_format`]** toggle helper (which format string is live given
 //!   the click-toggle set).
 //! - The **[`export_plugin!`]** macro, which wires a plugin's `name()`,
@@ -23,8 +24,8 @@
 
 pub use rustline_abi;
 pub use rustline_abi::{
-    CachedHttpResult, Color, GuestRender, HttpResult, ReadResult, Segment, Style, WireContext,
-    WriteResult,
+    CachedExecResult, CachedHttpResult, Color, ExecResult, GuestRender, HttpResult, ReadResult,
+    Segment, Style, WireContext, WriteResult,
 };
 
 // Re-exported so [`export_plugin!`]'s expansion can name the Extism PDK without
@@ -197,6 +198,13 @@ mod raw {
         fn rl_state_write(relpath: String, contents: String) -> String;
         fn rl_file_read(path: String) -> String;
         fn rl_file_write(path: String, contents: String) -> String;
+        fn rl_exec(program: String, args_json: String) -> String;
+        fn rl_exec_cached(
+            program: String,
+            args_json: String,
+            ttl_secs: String,
+            now: String,
+        ) -> String;
         fn rl_log(level: String, msg: String) -> String;
     }
 
@@ -228,6 +236,26 @@ mod raw {
         call(unsafe { rl_file_write(path.to_string(), contents.to_string()) })
     }
 
+    pub fn exec(program: &str, args_json: &str) -> Result<String, HostError> {
+        call(unsafe { rl_exec(program.to_string(), args_json.to_string()) })
+    }
+
+    pub fn exec_cached(
+        program: &str,
+        args_json: &str,
+        ttl_secs: &str,
+        now: &str,
+    ) -> Result<String, HostError> {
+        call(unsafe {
+            rl_exec_cached(
+                program.to_string(),
+                args_json.to_string(),
+                ttl_secs.to_string(),
+                now.to_string(),
+            )
+        })
+    }
+
     pub fn log(level: &str, msg: &str) {
         let _ = unsafe { rl_log(level.to_string(), msg.to_string()) };
     }
@@ -256,6 +284,17 @@ mod raw {
         Err(HostError::Unavailable)
     }
     pub fn file_write(_path: &str, _contents: &str) -> Result<String, HostError> {
+        Err(HostError::Unavailable)
+    }
+    pub fn exec(_program: &str, _args_json: &str) -> Result<String, HostError> {
+        Err(HostError::Unavailable)
+    }
+    pub fn exec_cached(
+        _program: &str,
+        _args_json: &str,
+        _ttl_secs: &str,
+        _now: &str,
+    ) -> Result<String, HostError> {
         Err(HostError::Unavailable)
     }
     pub fn log(_level: &str, _msg: &str) {}
@@ -298,6 +337,37 @@ pub fn file_read(path: &str) -> Result<ReadResult, HostError> {
 /// `allowed_paths`).
 pub fn file_write(path: &str, contents: &str) -> Result<WriteResult, HostError> {
     decode(&raw::file_write(path, contents)?)
+}
+
+/// Run a command through the host, if the plugin's `allowed_commands` permits
+/// it. The host spawns the program directly — there is no shell — so `args`
+/// are passed through verbatim and never re-parsed.
+///
+/// `Ok(result)` with `result.ok == false` means the host refused or the spawn
+/// failed; check `result.error`. A non-zero exit is `ok == true` with a
+/// non-zero `status`.
+pub fn exec(program: &str, args: &[&str]) -> Result<ExecResult, HostError> {
+    let args_json = serde_json::to_string(args).map_err(|e| HostError::Decode(e.to_string()))?;
+    decode(&raw::exec(program, &args_json)?)
+}
+
+/// [`exec`] with a host-managed TTL cache keyed on the whole command line, so
+/// a slow command isn't re-run on every status-line refresh. `now` is an
+/// RFC3339 instant (the host uses it for freshness). Only a zero-exit run is
+/// cached; a failed refresh serves the last good result with `stale = true`.
+pub fn exec_cached(
+    program: &str,
+    args: &[&str],
+    ttl_secs: u64,
+    now: &str,
+) -> Result<CachedExecResult, HostError> {
+    let args_json = serde_json::to_string(args).map_err(|e| HostError::Decode(e.to_string()))?;
+    decode(&raw::exec_cached(
+        program,
+        &args_json,
+        &ttl_secs.to_string(),
+        now,
+    )?)
 }
 
 /// Emit a log line through the host's `tracing` subscriber via the
@@ -460,5 +530,42 @@ mod tests {
         assert_eq!(LogLevel::Info.as_str(), "info");
         assert_eq!(LogLevel::Debug.as_str(), "debug");
         assert_eq!(LogLevel::Trace.as_str(), "trace");
+    }
+
+    #[test]
+    fn exec_on_the_host_target_is_unavailable_not_a_panic() {
+        // On non-wasm there is no host to call; the wrappers degrade so a
+        // plugin's pure logic still compiles and unit-tests under `cargo test`.
+        assert!(matches!(exec("echo", &["hi"]), Err(HostError::Unavailable)));
+        assert!(matches!(
+            exec_cached("echo", &["hi"], 60, "2026-07-24T00:00:00Z"),
+            Err(HostError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn exec_result_decodes_a_host_json_response() {
+        let json =
+            r#"{"ok":true,"status":0,"stdout":"hi\n","stderr":"","error":"","truncated":false}"#;
+        let out: ExecResult = serde_json::from_str(json).unwrap();
+        assert!(out.ok);
+        assert_eq!(out.stdout, "hi\n");
+    }
+
+    #[test]
+    fn exec_result_decode_tolerates_a_host_that_omits_fields() {
+        // Forward-compat: struct-level #[serde(default)] (invariant #2).
+        let out: ExecResult = serde_json::from_str(r#"{"ok":true}"#).unwrap();
+        assert!(out.ok);
+        assert_eq!(out.status, 0);
+        assert!(out.stdout.is_empty());
+    }
+
+    #[test]
+    fn cached_exec_result_decodes_the_stale_fields() {
+        let json = r#"{"ok":true,"status":0,"stdout":"x","stale":true,"age_secs":42}"#;
+        let out: CachedExecResult = serde_json::from_str(json).unwrap();
+        assert!(out.stale);
+        assert_eq!(out.age_secs, 42);
     }
 }
