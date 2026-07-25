@@ -31,8 +31,12 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-apple-darwin
             os: macos-14
-          - target: x86_64-apple-darwin
-            os: macos-13
+          # No x86_64-apple-darwin leg: the `macos-13` runner label no longer
+          # gets picked up (a dry run sat queued indefinitely while the other
+          # three legs finished), and because `publish` needs every leg, that
+          # would hang the whole release rather than fail it. Intel Macs build
+          # from source — an aarch64 binary will not run there. Revisit if a
+          # supported Intel runner label reappears.
     steps:
       - uses: actions/checkout@v4
 

@@ -2897,11 +2897,17 @@ branch on platform.
     `.github/workflows/ci.yml` runs `lint`/`test`/`plugins`/`wasm-e2e` as
     four independent jobs on every PR and `main` push, each routed through an
     existing `just` recipe (see the Development section above).
-    `.github/workflows/release.yml` builds four native targets
-    (`x86_64-unknown-linux-{gnu,musl}`, `{aarch64,x86_64}-apple-darwin`) on a
+    `.github/workflows/release.yml` builds three native targets
+    (`x86_64-unknown-linux-{gnu,musl}`, `aarch64-apple-darwin`) on a
     `v*` tag push and publishes a GitHub pre-release with a per-target
     tarball (binary + shell completions + README + LICENSE) plus a
-    `SHA256SUMS` file.
+    `SHA256SUMS` file. A `workflow_dispatch` trigger allows a dry run; the
+    publish step is gated on a real tag push so a dispatch builds and uploads
+    artifacts without creating a release. There is deliberately **no**
+    `x86_64-apple-darwin` leg — GitHub's `macos-13` label no longer picks up
+    jobs (a dry run sat queued indefinitely while the other legs finished),
+    and since `publish` declares `needs: build`, a never-scheduled leg would
+    hang the entire release rather than fail it.
 - Per-widget richer customization; naming the widget in the panic-guard `warn!`.
 - Range-on-binding — today a `run`/`open_url` click binding only fires on a
   widget that already emits a clickable range (i.e. has a non-empty

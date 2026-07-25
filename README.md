@@ -69,12 +69,15 @@ pane, window, host, and system info, with zero required configuration.
 
 ### Prebuilt release binary
 
-Each tagged release publishes prebuilt tarballs for four targets on GitHub:
+Each tagged release publishes prebuilt tarballs for three targets on GitHub:
 
 - `x86_64-unknown-linux-gnu`
 - `x86_64-unknown-linux-musl` (static; no glibc dependency)
 - `aarch64-apple-darwin` (Apple Silicon)
-- `x86_64-apple-darwin` (Intel Mac)
+
+There is no Intel Mac (`x86_64-apple-darwin`) build: GitHub's `macos-13` runner
+label no longer picks up jobs, and an Apple Silicon binary will not run on an
+Intel Mac. On an Intel Mac, [build from source](#build-from-source) instead.
 
 Each `rustline-<version>-<target>.tar.gz` contains the `rustline` binary,
 shell-completion scripts under `completions/` (`rustline.bash`, `_rustline`,
