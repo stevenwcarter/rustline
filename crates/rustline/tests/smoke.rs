@@ -1794,6 +1794,110 @@ fn doctor_runs_and_prints_resolved_paths() {
     );
 }
 
+/// `doctor`'s "plugin checksums" row is purely advisory: a plugin with a
+/// checksum that no longer matches its installed `.wasm` is named in the
+/// report, but never flips `doctor`'s own pass/fail exit code. Proven by
+/// comparing the exit code of a run with no plugins configured against one
+/// with a deliberately mismatched checksum — equal either way, regardless of
+/// what tmux/mouse/etc. happen to report in this environment.
+#[test]
+fn doctor_checksum_mismatch_is_advisory_and_never_affects_exit_code() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+
+    let baseline = isolated_cmd(&home, &data, &config)
+        .arg("doctor")
+        .output()
+        .unwrap();
+
+    // Now configure a plugin whose recorded checksum can never match: no
+    // .wasm file is even installed for it, so `plugin_checksum::status_for`
+    // reports "missing" rather than reading real bytes -- but the mismatch
+    // case below is the one that actually exercises `verify_checksum`'s
+    // comparison, so set that up precisely.
+    let plugin_dir = data.join("rustline/plugins");
+    fs::create_dir_all(&plugin_dir).unwrap();
+    fs::write(plugin_dir.join("weather.wasm"), b"the real installed bytes").unwrap();
+    let cfgdir = config.join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    fs::write(
+        cfgdir.join("config.toml"),
+        format!(
+            "[plugins.weather]\nchecksum = \"{}\"\n",
+            rustline_wasm::sha256_hex(b"a completely different set of bytes")
+        ),
+    )
+    .unwrap();
+
+    let with_mismatch = isolated_cmd(&home, &data, &config)
+        .arg("doctor")
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        baseline.status.code(),
+        with_mismatch.status.code(),
+        "a checksum mismatch must not change doctor's exit code: baseline stderr={} \
+         mismatch stderr={}",
+        String::from_utf8_lossy(&baseline.stderr),
+        String::from_utf8_lossy(&with_mismatch.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&with_mismatch.stdout);
+    assert!(
+        stdout.contains("plugin checksums"),
+        "checksum row present: {stdout}"
+    );
+    assert!(
+        stdout.contains("weather") && stdout.contains("mismatch"),
+        "names the mismatched plugin: {stdout}"
+    );
+    // The row itself must be `[warn]`, never `[fail]` -- the exit-code
+    // equality above already proves this behaviorally, but pin the visible
+    // label too since that's what a human actually reads.
+    let checksum_line = stdout
+        .lines()
+        .find(|l| l.contains("plugin checksums"))
+        .unwrap();
+    assert!(
+        checksum_line.contains("[warn"),
+        "checksum row is advisory (warn), not fail: {checksum_line}"
+    );
+}
+
+/// An install with no plugins configured at all gets a clean, unambiguous
+/// "no plugins configured" row rather than an empty/confusing one.
+#[test]
+fn doctor_checksum_row_reports_no_plugins_configured() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    let out = isolated_cmd(&home, &data, &config)
+        .arg("doctor")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let checksum_line = stdout
+        .lines()
+        .find(|l| l.contains("plugin checksums"))
+        .unwrap();
+    assert!(
+        checksum_line.contains("no plugins configured"),
+        "{checksum_line}"
+    );
+    assert!(
+        checksum_line.contains("[ok"),
+        "no plugins configured is a clean pass: {checksum_line}"
+    );
+}
+
 /// `plugin approve <name> --yes` resolves the plugin's sidecar manifest and
 /// writes exactly its requested urls/paths into `[plugins.<name>]`, preserving
 /// comments, and is idempotent.
@@ -1887,6 +1991,314 @@ fn plugin_approve_declined_writes_nothing() {
         fs::read_to_string(&cfg).unwrap(),
         original,
         "declined approval leaves config untouched"
+    );
+}
+
+/// `plugin list --json` surfaces a per-plugin `checksum_status`, computed the
+/// same way `doctor`'s row is: read the installed `.wasm`, verify it via
+/// `rustline_wasm::verify_checksum`.
+#[test]
+fn plugin_list_json_reports_checksum_status() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("cfg/rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let plugin_dir = tmp.path().join("data/rustline/plugins");
+    fs::create_dir_all(&plugin_dir).unwrap();
+
+    let bytes = b"a real installed plugin binary";
+    fs::write(plugin_dir.join("weather.wasm"), bytes).unwrap();
+    fs::write(
+        cfgdir.join("config.toml"),
+        format!(
+            "[plugins.weather]\nchecksum = \"{}\"\n",
+            rustline_wasm::sha256_hex(bytes)
+        ),
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "list", "--json"])
+        .env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let w = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "weather")
+        .unwrap();
+    assert_eq!(w["checksum_status"], "verified");
+    // Additive: the previously-existing fields are all still there, unchanged.
+    assert!(w.get("allowed_urls").is_some());
+    assert!(w.get("has_manifest").is_some());
+}
+
+/// `plugin list` (human, non-JSON) prints a `checksum:` status line matching
+/// the same computation.
+#[test]
+fn plugin_list_human_output_shows_checksum_status() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("cfg/rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let plugin_dir = tmp.path().join("data/rustline/plugins");
+    fs::create_dir_all(&plugin_dir).unwrap();
+
+    // Deliberately no .wasm installed for this one: "missing" must show up as
+    // a plain status value, never an error that aborts the listing.
+    fs::write(
+        cfgdir.join("config.toml"),
+        "[plugins.ghost]\nchecksum = \"deadbeef\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "list"])
+        .env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("checksum: missing"), "{stdout}");
+}
+
+/// Scaffold a minimal, fast-to-build WASM guest crate at `dir/<name>` — no
+/// dependencies, just enough for `cargo build --target wasm32-unknown-unknown`
+/// to produce a `.wasm` artifact — so `plugin build` smoke tests don't pay for
+/// compiling a real plugin (e.g. `weather`) on every run.
+fn scaffold_minimal_plugin_crate(dir: &Path, name: &str) {
+    let crate_dir = dir.join(name);
+    fs::create_dir_all(crate_dir.join("src")).unwrap();
+    fs::write(
+        crate_dir.join("Cargo.toml"),
+        format!(
+            "[workspace]\n\n[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n"
+        ),
+    )
+    .unwrap();
+    fs::write(crate_dir.join("src/lib.rs"), "").unwrap();
+}
+
+/// Run `cmd` (already `spawn`-able, e.g. with `Stdio::piped()`/`Stdio::null()`
+/// stdio configured) and wait up to `timeout`, panicking loudly instead of
+/// blocking forever if it doesn't exit in time — the load-bearing proof that
+/// a supposedly non-interactive path never blocks on a stdin read. Draining
+/// stdout/stderr happens on a background thread via `wait_with_output`
+/// (which reads both concurrently), so a chatty child can't deadlock the wait
+/// the way polling `try_wait` without draining could.
+fn wait_with_timeout(mut cmd: Command, timeout: std::time::Duration) -> std::process::Output {
+    let child = cmd.spawn().expect("failed to spawn");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result.expect("failed to wait on child"),
+        Err(_) => panic!(
+            "process did not exit within {timeout:?} -- looks hung (a non-interactive stdin \
+             read likely blocked waiting for input)"
+        ),
+    }
+}
+
+/// `plugin build`'s happy path end to end: build a fresh crate, install its
+/// `.wasm`, and — since no checksum is recorded at all — print nothing extra
+/// about checksums (the common case must stay quiet).
+#[test]
+fn plugin_build_installs_and_is_quiet_with_no_checksum_recorded() {
+    let tmp = tempdir().unwrap();
+    scaffold_minimal_plugin_crate(tmp.path(), "minibuild");
+    let plugin_dir = tmp.path().join("plugins");
+    let cfg = tmp.path().join("config.toml");
+    fs::write(&cfg, "").unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args([
+        "--config",
+        cfg.to_str().unwrap(),
+        "plugin",
+        "build",
+        tmp.path().join("minibuild").to_str().unwrap(),
+        "--plugin-dir",
+        plugin_dir.to_str().unwrap(),
+    ]);
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(plugin_dir.join("minibuild.wasm").is_file());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.to_lowercase().contains("checksum"), "{stdout}");
+    assert_eq!(
+        fs::read_to_string(&cfg).unwrap(),
+        "",
+        "no checksum was ever recorded, so nothing should be written"
+    );
+}
+
+/// `plugin build` also stays quiet when a recorded checksum still matches the
+/// rebuilt bytes (a no-op rebuild).
+#[test]
+fn plugin_build_is_quiet_when_checksum_already_matches() {
+    let tmp = tempdir().unwrap();
+    scaffold_minimal_plugin_crate(tmp.path(), "minibuild");
+    let plugin_dir = tmp.path().join("plugins");
+    fs::create_dir_all(&plugin_dir).unwrap();
+    let cfg = tmp.path().join("config.toml");
+
+    // First build (no checksum recorded yet) establishes the real installed
+    // artifact bytes, so we can pre-record their exact checksum -- avoids
+    // hoping a fixed byte string happens to match whatever cargo emits.
+    fs::write(&cfg, "").unwrap();
+    let mut first_cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    first_cmd.args([
+        "--config",
+        cfg.to_str().unwrap(),
+        "plugin",
+        "build",
+        tmp.path().join("minibuild").to_str().unwrap(),
+        "--plugin-dir",
+        plugin_dir.to_str().unwrap(),
+    ]);
+    isolate(&mut first_cmd, tmp.path());
+    let first = first_cmd.output().unwrap();
+    assert!(
+        first.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let bytes = fs::read(plugin_dir.join("minibuild.wasm")).unwrap();
+    fs::write(
+        &cfg,
+        format!(
+            "[plugins.minibuild]\nchecksum = \"{}\"\n",
+            rustline_wasm::sha256_hex(&bytes)
+        ),
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args([
+        "--config",
+        cfg.to_str().unwrap(),
+        "plugin",
+        "build",
+        tmp.path().join("minibuild").to_str().unwrap(),
+        "--plugin-dir",
+        plugin_dir.to_str().unwrap(),
+    ]);
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.to_lowercase().contains("stale") && !stdout.to_lowercase().contains("note:"),
+        "already-matching checksum must stay quiet: {stdout}"
+    );
+}
+
+/// `plugin build --yes` refreshes a stale recorded checksum non-interactively
+/// -- the explicit, scripted opt-in `--yes` covers.
+#[test]
+fn plugin_build_yes_flag_refreshes_a_stale_checksum() {
+    let tmp = tempdir().unwrap();
+    scaffold_minimal_plugin_crate(tmp.path(), "minibuild");
+    let plugin_dir = tmp.path().join("plugins");
+    let cfg = tmp.path().join("config.toml");
+    let stale = rustline_wasm::sha256_hex(b"stale bytes from a previous install");
+    fs::write(
+        &cfg,
+        format!("[plugins.minibuild]\nchecksum = \"{stale}\"\n"),
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args([
+        "--config",
+        cfg.to_str().unwrap(),
+        "plugin",
+        "build",
+        tmp.path().join("minibuild").to_str().unwrap(),
+        "--plugin-dir",
+        plugin_dir.to_str().unwrap(),
+        "--yes",
+    ]);
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let installed = fs::read(plugin_dir.join("minibuild.wasm")).unwrap();
+    let expected = rustline_wasm::sha256_hex(&installed);
+    let text = fs::read_to_string(&cfg).unwrap();
+    assert!(
+        text.contains(&expected),
+        "checksum refreshed to match the new build: {text}"
+    );
+    assert!(!text.contains(&stale), "{text}");
+}
+
+/// The load-bearing non-interactive proof: a stale checksum with NO `--yes`
+/// and stdin that is not a terminal (here, `Stdio::null()`, matching a CI
+/// runner or `< /dev/null`) must (a) complete promptly rather than hang
+/// waiting on a prompt no one can answer, (b) leave the recorded checksum
+/// untouched (never silently re-pinning it), and (c) print a clear notice
+/// naming the plugin and how to fix it.
+#[test]
+fn plugin_build_noninteractive_stale_checksum_does_not_hang_and_does_not_rewrite() {
+    let tmp = tempdir().unwrap();
+    scaffold_minimal_plugin_crate(tmp.path(), "minibuild");
+    let plugin_dir = tmp.path().join("plugins");
+    let cfg = tmp.path().join("config.toml");
+    let stale = rustline_wasm::sha256_hex(b"stale bytes from a previous install");
+    fs::write(
+        &cfg,
+        format!("[plugins.minibuild]\nchecksum = \"{stale}\"\n"),
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args([
+        "--config",
+        cfg.to_str().unwrap(),
+        "plugin",
+        "build",
+        tmp.path().join("minibuild").to_str().unwrap(),
+        "--plugin-dir",
+        plugin_dir.to_str().unwrap(),
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    isolate(&mut cmd, tmp.path());
+
+    let out = wait_with_timeout(cmd, std::time::Duration::from_secs(30));
+
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = fs::read_to_string(&cfg).unwrap();
+    assert!(
+        text.contains(&stale),
+        "non-interactive run must leave the stale checksum alone: {text}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("minibuild") && stdout.to_lowercase().contains("checksum"),
+        "prints a clear notice naming the plugin: {stdout}"
     );
 }
 

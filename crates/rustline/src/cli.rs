@@ -270,6 +270,13 @@ pub struct BuildArgs {
     /// used elsewhere — config `plugin_dir`, or the XDG default).
     #[arg(long)]
     pub plugin_dir: Option<String>,
+    /// If the freshly built `.wasm` no longer matches a recorded
+    /// `[plugins.<name>].checksum`, refresh it without prompting (for
+    /// scripts/CI). Interactive runs are asked instead (Enter = yes); a
+    /// non-interactive run without this flag leaves the stale checksum alone
+    /// and prints how to refresh it.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// Arguments for `rustline plugin run`.

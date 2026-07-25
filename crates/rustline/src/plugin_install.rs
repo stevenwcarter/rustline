@@ -274,6 +274,21 @@ fn write_install_record(
     Ok(())
 }
 
+/// Rewrite just `[plugins.<name>].checksum`, preserving everything else in the
+/// config (comments, formatting, other keys). Used by `plugin build` when the
+/// user (or `--yes`) consents to refreshing a stale recorded digest after a
+/// rebuild — sharing `read_doc`/`plugin_table` with [`write_install_record`]
+/// so the write itself can never drift from that path's formatting
+/// guarantees.
+pub(crate) fn write_checksum(config_path: &Path, name: &str, checksum: &str) -> anyhow::Result<()> {
+    let mut doc = read_doc(config_path)?;
+    let table = plugin_table(&mut doc, name)?;
+    table["checksum"] = value(checksum);
+    std::fs::write(config_path, doc.to_string())
+        .with_context(|| format!("write config {}", config_path.display()))?;
+    Ok(())
+}
+
 /// Remove `[plugins.<name>]` from the config, if present. Leaves the rest of
 /// the document untouched.
 fn remove_config_entry(config_path: &Path, name: &str) -> anyhow::Result<()> {
@@ -624,6 +639,47 @@ mod tests {
         let cfg: Config = toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         assert!(!cfg.plugins.contains_key("weather"));
         assert!(cfg.plugins.contains_key("counter"));
+    }
+
+    #[test]
+    fn write_checksum_updates_only_that_key_preserving_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "# keep me\n[plugins.weather]\nsource = \"o/r\"\ntag = \"v1\"\nchecksum = \"old\"\nallowed_urls = [\"https://a/*\"]\n",
+        )
+        .unwrap();
+
+        write_checksum(&config_path, "weather", "newsum").unwrap();
+
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert!(text.contains("# keep me"), "comment preserved: {text}");
+        assert!(text.contains("checksum = \"newsum\""), "{text}");
+        assert!(!text.contains("\"old\""), "{text}");
+        let cfg: Config = toml::from_str(&text).unwrap();
+        let pc = cfg.plugins.get("weather").unwrap();
+        assert_eq!(
+            pc.source.as_ref().map(ToString::to_string).as_deref(),
+            Some("o/r")
+        );
+        assert_eq!(pc.tag.as_deref(), Some("v1"));
+        assert_eq!(pc.allowed_urls, vec!["https://a/*".to_string()]);
+    }
+
+    #[test]
+    fn write_checksum_creates_plugin_table_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+
+        write_checksum(&config_path, "weather", "abc123").unwrap();
+
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(
+            cfg.plugins.get("weather").unwrap().checksum.as_deref(),
+            Some("abc123")
+        );
     }
 
     #[test]
