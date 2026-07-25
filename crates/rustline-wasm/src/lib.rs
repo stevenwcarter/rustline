@@ -92,7 +92,8 @@ pub fn discover_plugin_names(plugin_dir: &Path) -> Vec<String> {
 /// Discover `*.wasm` in `plugin_dir` and register each **needed** plugin as a
 /// widget. Only plugins whose filename stem appears in `needed` are
 /// instantiated (avoids wasm cold-start for unused plugins). A stem colliding
-/// with a built-in, a `name()` export that disagrees with the stem, or any
+/// with a built-in, a checksum that fails to verify against the recorded
+/// digest, a `name()` export that disagrees with the stem, or any
 /// instantiation error is logged and skipped — never fatal.
 pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, needed: &[String]) {
     let root = state_root();
@@ -245,12 +246,14 @@ pub fn instantiate_named(
 mod tests {
     use std::sync::Arc;
 
-    use rustline_core::PluginConfig;
+    use rustline_core::{Config, PluginConfig, Registry};
 
     use super::{
         AbiDecision, DenialObserver, abi_decision, discover_plugin_names, instantiate_named,
+        register_plugins,
     };
     use crate::capability::NoopObserver;
+    use crate::integrity::sha256_hex;
 
     #[test]
     fn abi_decision_matrix() {
@@ -290,5 +293,177 @@ mod tests {
     #[test]
     fn discover_plugin_names_on_a_missing_dir_is_empty_not_an_error() {
         assert!(discover_plugin_names(std::path::Path::new("/nonexistent-plugin-dir")).is_empty());
+    }
+
+    // --- W19 position guard: the checksum gate must run before `host::build_plugin`.
+    //
+    // `perform.rs`'s `log_tests` module already has a minimal tracing-event
+    // capture harness (`RecordingSubscriber` + `capture`), but it and every
+    // item in it are private to that module — reaching it from here would
+    // mean widening visibility on several test-only items purely to serve
+    // this one call site, which reads as restructuring production code for a
+    // test's convenience. Reimplemented locally instead, following its exact
+    // pattern (same `Subscriber` shape, same "record everything via
+    // `record_debug`" trick) rather than diverging from it.
+    use std::sync::Mutex;
+
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Level, Metadata, Subscriber};
+
+    type CapturedEvent = (Level, Vec<(String, String)>);
+
+    #[derive(Default)]
+    struct FieldVisitor(Vec<(String, String)>);
+
+    impl Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+    }
+
+    /// A subscriber that accepts and records every event, purely so a test
+    /// can assert what `register_plugins` logged.
+    struct RecordingSubscriber(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    impl Subscriber for RecordingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .unwrap()
+                .push((*event.metadata().level(), visitor.0));
+        }
+
+        fn enter(&self, _span: &Id) {}
+        fn exit(&self, _span: &Id) {}
+    }
+
+    /// Run `f` under a scoped recording subscriber and return every event it
+    /// emitted, in order. Scoped via `tracing::subscriber::with_default`, so
+    /// it can never race or interfere with any other test's subscriber
+    /// regardless of test execution order.
+    fn capture(f: impl FnOnce()) -> Vec<CapturedEvent> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = RecordingSubscriber(events.clone());
+        tracing::subscriber::with_default(subscriber, f);
+        events.lock().unwrap().clone()
+    }
+
+    fn field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        fields
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// A plugin dir containing one stub (deliberately not-real-wasm) file, so
+    /// a test can drive `register_plugins` without a real `.wasm` at all.
+    fn stage_stub(dir: &std::path::Path, bytes: &[u8]) {
+        std::fs::write(dir.join("stub.wasm"), bytes).unwrap();
+    }
+
+    fn cfg_with_stub_checksum(checksum: Option<String>) -> Config {
+        let mut cfg = Config::default();
+        cfg.plugins.insert(
+            "stub".to_string(),
+            PluginConfig {
+                checksum,
+                ..Default::default()
+            },
+        );
+        cfg
+    }
+
+    /// This is the test the position of the W19 gate lives or dies by. A
+    /// mismatched checksum and a failed instantiation both leave the
+    /// registry empty on a stub file, so registry state alone can't tell
+    /// them apart — but the *message* `register_plugins` warns with can: if
+    /// the checksum gate ran, it's "plugin checksum mismatch, skipping"; if
+    /// it were missing, or moved to after `host::build_plugin`, the stub's
+    /// garbage bytes would fail to instantiate and we'd see "failed to
+    /// instantiate plugin, skipping" instead. (Verified empirically during
+    /// development by moving the gate after `build_plugin` and watching this
+    /// test fail with exactly that message — see the task report.)
+    #[test]
+    fn register_plugins_reports_checksum_mismatch_not_instantiation_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        stage_stub(dir.path(), b"not a real wasm module, just filler bytes");
+
+        // Well-formed sha256, but not this stub's real digest.
+        let cfg = cfg_with_stub_checksum(Some(sha256_hex(b"something else entirely")));
+
+        let mut reg = Registry::new();
+        let events = capture(|| {
+            register_plugins(&mut reg, &cfg, dir.path(), &["stub".to_string()]);
+        });
+
+        assert!(
+            !reg.contains("stub"),
+            "a checksum-mismatched plugin must never register"
+        );
+
+        let messages: Vec<&str> = events
+            .iter()
+            .filter_map(|(_, fields)| field(fields, "message"))
+            .collect();
+        assert!(
+            messages.contains(&"plugin checksum mismatch, skipping"),
+            "expected the checksum-mismatch warning, got: {messages:?}"
+        );
+        assert!(
+            !messages.contains(&"failed to instantiate plugin, skipping"),
+            "instantiation must never be attempted once the checksum gate has \
+             already rejected the plugin (gate ran too late, or not at all): {messages:?}"
+        );
+    }
+
+    /// Complementary case: a malformed (not-a-valid-sha256) recorded checksum
+    /// also fails closed before instantiation, proving the gate handles both
+    /// its rejection paths ahead of `build_plugin`, not just a mismatch.
+    #[test]
+    fn register_plugins_reports_malformed_checksum_not_instantiation_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        stage_stub(dir.path(), b"filler bytes, never read as wasm");
+
+        let cfg = cfg_with_stub_checksum(Some("not-a-digest".to_string()));
+
+        let mut reg = Registry::new();
+        let events = capture(|| {
+            register_plugins(&mut reg, &cfg, dir.path(), &["stub".to_string()]);
+        });
+
+        assert!(
+            !reg.contains("stub"),
+            "a malformed-checksum plugin must never register"
+        );
+
+        let messages: Vec<&str> = events
+            .iter()
+            .filter_map(|(_, fields)| field(fields, "message"))
+            .collect();
+        assert!(
+            messages.contains(&"recorded plugin checksum is not a valid sha256 digest, skipping"),
+            "expected the malformed-checksum warning, got: {messages:?}"
+        );
+        assert!(
+            !messages.contains(&"failed to instantiate plugin, skipping"),
+            "instantiation must never be attempted once the checksum gate has \
+             already rejected the plugin (gate ran too late, or not at all): {messages:?}"
+        );
     }
 }
