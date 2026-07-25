@@ -56,6 +56,29 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p rustline
 
+      # Nothing else ties the pushed tag to the version compiled into the
+      # binary: tarballs are named from GITHUB_REF_NAME while the binary
+      # reports CARGO_PKG_VERSION, so a `v0.2.0` tag would happily ship a
+      # binary that identifies itself as 0.1.0. Ask the freshly built binary
+      # what it thinks it is rather than re-reading Cargo.toml -- that checks
+      # the artifact actually being shipped, and every target is native to its
+      # runner (the Package step below already runs it to emit completions).
+      #
+      # Only meaningful on a tag: a `workflow_dispatch` dry run is on a branch,
+      # whose name is not a version, so it is skipped rather than failed.
+      - name: Verify tag matches binary version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/rustline"
+          binary_version="$("$bin" --version | awk '{print $2}')"
+          if [ "${GITHUB_REF_NAME}" != "v${binary_version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match binary version ${binary_version} (expected tag v${binary_version}); bump [workspace.package] version in Cargo.toml or retag"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches binary version ${binary_version}"
+
       - name: Package
         shell: bash
         run: |
