@@ -634,6 +634,23 @@ these shared types, not a design shortcut. Keep them serializable.
   `rustline plugin denials <name>`. NOTE: the record has no quota/rotation yet
   — a guest that varies its `target` defeats the dedup and grows the file
   unbounded (a follow-up; see WHATS-NEXT).
+- `integrity.rs` — plugin binary integrity (W19): `sha256_hex(bytes: &[u8]) ->
+  String`, the single definition of the digest both `plugin_install.rs` (at
+  install time) and `register_plugins` (at load time) now share — the prior
+  duplicate copy in `plugin_install.rs` is gone, so the two can never drift
+  apart. `ChecksumVerdict { NotRecorded, Match, Mismatch { expected, actual },
+  Malformed { recorded } }` and `verify_checksum(recorded: Option<&str>,
+  bytes: &[u8]) -> ChecksumVerdict` accept 64 hex chars (case-insensitive), an
+  optional `sha256:` prefix, and surrounding whitespace; an absent or blank
+  `recorded` is `NotRecorded` (nothing to verify, loads as before), not a
+  refusal. `ChecksumVerdict::allows_load()` is the one predicate
+  `register_plugins` consults: `NotRecorded`/`Match` permit registration;
+  `Mismatch`/`Malformed` don't — a value this build cannot even parse as a
+  digest **fails closed** (treated as a rejection, the same as a proven
+  mismatch, never as "effectively unpinned"). Pure and I/O-free, so every
+  rejection path is unit-tested without touching a real `.wasm`. Re-exported
+  at the crate root as `rustline_wasm::{sha256_hex, verify_checksum,
+  ChecksumVerdict}`.
 - `lib.rs::{abi_decision, register_plugins, instantiate_named,
   discover_plugin_names}` — `pub fn discover_plugin_names(plugin_dir: &Path)
   -> Vec<String>` is the discovery half of `register_plugins` split out on its
@@ -649,16 +666,28 @@ these shared types, not a design shortcut. Keep them serializable.
   mismatched version is **skipped, never registered**. `register_plugins`
   discovers `*.wasm` in the plugin dir, and for
   each name in the caller's `needed` list (i.e. actually referenced by a
-  layout region — avoids paying wasm cold-start for unused plugins):
-  instantiates it, runs `abi_decision`, verifies the exported `name()` equals
-  the filename stem (mismatch → `warn!` + skip), and registers a `WasmWidget`
-  factory (each instance getting its own `FileDenialObserver`). A stem
-  colliding with a built-in is skipped (built-in wins). A stem longer than 15
-  bytes gets a one-time `warn!` (not click-toggleable) but still registers.
+  layout region — avoids paying wasm cold-start for unused plugins): skips a
+  stem colliding with a built-in (built-in wins) or an unreadable file, then
+  — right after reading the file's bytes and before building a
+  `CapabilityCtx` or handing anything to wasmtime — verifies those bytes
+  against `[plugins.<name>].checksum` (W19, `integrity::verify_checksum`): a
+  `Mismatch` or `Malformed` verdict skips with a `warn!`, exactly like every
+  other skip site here (a rejected plugin never reaches `build_plugin`,
+  invariant N1); `NotRecorded`/`Match` proceed. Only then does it instantiate
+  the plugin, run `abi_decision`, and verify the exported `name()` equals the
+  filename stem (mismatch → `warn!` + skip), before registering a
+  `WasmWidget` factory (each instance getting its own `FileDenialObserver`).
+  A stem longer than 15 bytes gets a one-time `warn!` (not click-toggleable)
+  but still registers.
   `instantiate_named(plugin_dir, name, &PluginConfig, observer)` builds a
   single named plugin (reusing `build_plugin` + `with_observer`) for the
   read-only `rustline plugin run` dev harness, capturing denials via a
-  `CollectingObserver`.
+  `CollectingObserver`. It deliberately runs the checksum gate **warn-only**:
+  a bad verdict is logged but the plugin still instantiates and runs, because
+  this harness is used right after rebuilding a plugin, where a recorded
+  digest legitimately mismatches on every build. The real gate — the bar, the
+  daemon, and `plugin list`'s discovery — always goes through
+  `register_plugins` above, which does not bypass it.
 
 `rustline-plugin-sdk`:
 - `lib.rs` — the guest-side SDK (W39). Typed host-capability wrappers
@@ -977,10 +1006,35 @@ failure path via `rl_log` (W7) rather than staying silent:
   `range` value (invariant #4).
 - `plugin_install.rs` — `plugin install/update/remove` (W38): a `Downloader`
   seam (`UreqDownloader`, rustls, redirect-limited, User-Agent) over the GitHub
-  releases API, pure `parse_owner_repo`/`select_wasm_asset`/`sha256_hex`.
-  Install downloads a repo's `.wasm` into the plugin dir and records
-  `source`/`tag`/`checksum` — granting **no** capabilities (TOFU: it records
-  the hash, doesn't verify against a pin).
+  releases API, pure `parse_owner_repo`/`select_wasm_asset`. `sha256_hex`
+  itself now lives in `rustline-wasm::integrity` (W19); this module re-exports
+  it (`pub use rustline_wasm::sha256_hex;`) so existing `plugin_install::
+  sha256_hex` call sites keep resolving, rather than keeping its own
+  duplicate copy as before. Install downloads a repo's `.wasm` into the plugin
+  dir and records `source`/`tag`/`checksum` — granting **no** capabilities
+  (TOFU at write time: it records the hash of what it downloaded, doesn't
+  verify against an external pin; that recorded digest IS verified later, at
+  load time, by `register_plugins` — see `integrity.rs`/Config below).
+- `plugin_index.rs` — the curated plugin index (W49) backing `rustline
+  plugin search`: the wire types (`PluginIndex { schema_version, plugins:
+  Vec<IndexEntry> }`, `IndexEntry { name, description, source, bundled,
+  capabilities }` — `capabilities` is advertising copy only, consulted by
+  nothing in the host and granting nothing), `parse_index_value`/`validate`
+  (rejects a `schema_version` this build doesn't understand rather than
+  misreading it; checked identically on both the fresh-fetch path and the
+  cache-read path, so a cache written by a different-schema build can never
+  be served unvalidated), `filter_entries` (case-insensitive substring match
+  over name + description; no/blank query returns every entry),
+  `index_is_fresh` (24h TTL via `INDEX_TTL_SECS`; a clock that moved
+  backwards counts as stale, not fresh forever), `read_cache`/`write_cache`
+  (best-effort, atomic, via `sample_store::{read_sample, write_sample}`),
+  `load_index` (a fresh cache is served as-is; otherwise fetch, cache, and
+  return; a failed fetch falls back to the last-known-good cache flagged
+  `stale`, erroring only when nothing is cached at all), and `search_json`/
+  `LoadedIndex`. `DEFAULT_INDEX_URL` points at `registry/index.json` on this
+  repo's `main` branch (overridable via `Config.plugin_index_url`);
+  `INDEX_CACHE_FILE` is `plugin-index.json` under the state root (see the
+  host-owned state-file names list under Config below).
 - `build_context.rs` — builds `Context` from args + `gethostname`,
   `libc::getloadavg` (the only `unsafe` in this file — `disk.rs`'s `statvfs`
   call is its own `unsafe`, isolated there — guarded on `n == 3`),
@@ -1070,7 +1124,11 @@ failure path via `rl_log` (W7) rather than staying silent:
   `cargo_build_args`/`package_name`), `run` (W34, the read-only dev harness via
   `rustline_wasm::instantiate_named` + `format_run_output`, printing segments
   and captured denials), `denials` (W28, read-only over
-  `rustline_wasm::denials::read_denials`), and delegates
+  `rustline_wasm::denials::read_denials`), `search` (W49, thin CLI wiring
+  only: resolves `cfg.plugin_index_url`/the state root, calls
+  `plugin_index::load_index`, filters via `plugin_index::filter_entries`, and
+  prints human text or `plugin_index::search_json`; the fetch/parse/cache
+  logic itself lives in `plugin_index.rs` above), and delegates
   `install`/`update`/`remove` to `plugin_install.rs`.
 - `widget_cmd.rs` — `rustline widget …`: `read_layout`/`write_layout` are a
   `toml_edit` reader/writer pair over `[layout]` (handling both a standard
@@ -1422,6 +1480,20 @@ config-file path for every subcommand that reads or writes it (default:
   source, allowlists, and state quota; `--json` emits a JSON array of
   `{name, source, tag, allowed_urls, allowed_paths, allowed_commands,
   max_state_bytes, has_manifest}` instead of human text.
+- `rustline plugin search [QUERY] [--json] [--refresh]` — browse the curated
+  plugin index (W49) for widgets you can install; omitting `QUERY` lists
+  every entry, otherwise a case-insensitive substring filter over name and
+  description. Fetches `plugin_index_url` (default: `registry/index.json` on
+  this repo's `main` branch) into a 24h-TTL cache at
+  `<state_root>/plugin-index.json`; `--refresh` bypasses the cache. A fetch
+  failure serves the last-known-good cached copy with a staleness warning on
+  stderr (so `--json`'s stdout stays clean); a fetch failure with nothing
+  cached is a hard error. Each row marks whether the plugin is already
+  installed (via `discover_plugin_names`, without instantiating anything)
+  and shows a `just build-plugin <name>` hint for a bundled entry or
+  `rustline plugin install <owner/repo>` for an installable one. `--json`
+  follows the repo's existing convention (a pretty-printed array). Strictly
+  read-only — writes neither config nor the toggles file.
 - `rustline plugin url|path|cmd list [--json]|add|remove <plugin> [pattern]`
   — read or edit a plugin's `allowed_urls`/`allowed_paths`/`allowed_commands`
   (`add`/`remove` rewrite the config file in place via `toml_edit`, preserving
@@ -2016,7 +2088,9 @@ of which would collide with a plugin's own same-named state directory:
 one file for the aggregate read, one per named interface once multiple
 `throughput` instances exist, W46/W47), `wasmtime-cache`/
 `wasmtime-cache.toml` (the WASM compile cache dir + its config, W43 — kept
-deliberately distinct from any plugin state subdir), and `daemon.sock` (the
+deliberately distinct from any plugin state subdir), `plugin-index.json` (the
+24h-TTL cached copy of the curated plugin index, W49 — see
+`plugin_index.rs` above), and `daemon.sock` (the
 optional persistent daemon's Unix socket under `$XDG_RUNTIME_DIR/rustline/`,
 falling back to `<state_root>/daemon.sock`, W48). Every collision degrades
 gracefully (a failed create/rename is `warn!`-logged, never panics), but is
@@ -2079,12 +2153,16 @@ for the full layering rules, the six themes' exact color values, and the
 threshold-badge contrast rationale.
 
 **Plugins:** an optional top-level `plugin_dir` (default
-`$XDG_DATA_HOME/rustline/plugins`, `~/` expanded) plus a typed
+`$XDG_DATA_HOME/rustline/plugins`, `~/` expanded), an optional top-level
+`plugin_index_url` (W49 — overrides where `rustline plugin search` fetches
+the curated plugin index from; default: `registry/index.json` on this
+repo's `main` branch, via raw.githubusercontent.com), plus a typed
 `[plugins.<name>]` table per plugin, keyed by the plugin's name (the `.wasm`
 filename stem):
 
 ```toml
-plugin_dir = "~/.local/share/rustline/plugins"   # optional
+plugin_dir       = "~/.local/share/rustline/plugins"     # optional
+plugin_index_url = "https://example.com/my-index.json"   # optional; overrides the built-in default
 
 [plugins.weather]
 source = "steve/rustline-weather"          # owner/repo; consumed by `plugin update`
@@ -2093,7 +2171,7 @@ allowed_paths = []
 allowed_commands = []                       # glob/"re:", matched against the WHOLE argv (see below)
 max_state_bytes = 52428800                  # default: 50 MB
 # tag = "v1.2.0"                            # recorded by `plugin install/update`
-# checksum = "<sha256-hex>"                 # recorded by `plugin install/update` (TOFU)
+# checksum = "<sha256-hex>"                 # recorded by `plugin install/update`; VERIFIED at load time (W19, see below)
 
 [plugins.weather.options]
 zip = "48183"
@@ -2123,9 +2201,31 @@ string; `rustline plugin install <owner/repo>` (W38) downloads the plugin's
 `.wasm` from its GitHub release into the plugin dir and records
 `source`/`tag`/`checksum` here — but grants **no** capabilities (the same
 allowlist-widening rule: run `approve` or `url|path|cmd add` afterward). The
-recorded `checksum` is TOFU (trust-on-first-use — noted, not verified against a
-pin). `plugin update` re-resolves the latest release for that `source` and
-refreshes `checksum`/`tag`.
+recorded `checksum` is TOFU at write time (trust-on-first-use: it records the
+hash of what it downloaded, not verified against any external pin). `plugin
+update` re-resolves the latest release for that `source` and refreshes
+`checksum`/`tag`.
+
+**The recorded `checksum` is verified at load time (W19) — it is no longer
+"recorded, never checked."** `register_plugins` (`rustline-wasm::integrity::
+verify_checksum`) hashes a discovered `.wasm`'s bytes and compares them
+against `[plugins.<name>].checksum` right after reading the file and before
+the plugin ever reaches `CapabilityCtx`/wasmtime (invariant N1: a rejected
+plugin never receives a capability object). Three outcomes: an **absent** (or
+blank) checksum loads exactly as before — nothing recorded means nothing to
+verify, so this is fully backward compatible; a well-formed digest that
+**mismatches** the bytes on disk is skipped with a `warn!` (a swapped or
+tampered `.wasm` can no longer load silently); and a **malformed** value —
+anything other than 64 hex chars, tolerating an optional `sha256:` prefix and
+surrounding whitespace — **fails closed**, also skipped, on the reasoning
+that a checksum we can't even parse is a verification request we cannot
+honor, not evidence the plugin is unpinned. `rustline plugin run`
+(`instantiate_named`) is the one deliberate exception: it's **warn-only** on
+a bad verdict — it logs and still runs the plugin — since that dev harness is
+used right after rebuilding a plugin, where a recorded digest legitimately
+mismatches every build; the bar, the daemon (which rebuilds its registry via
+this same `register_plugins` on a config-file mtime change), and `plugin
+list`'s discovery all go through the real, non-bypassable gate.
 
 **Exec capability (`allowed_commands`):** a plugin can ask the host to run a
 program on its behalf via `rl_exec` (plain, every render) or `rl_exec_cached`
@@ -2295,7 +2395,15 @@ branch on platform.
   `rustline-wasm` e2e test and the bin's `wasm_wiring` test — needs the wasm
   target; `just test` never requires it), `just bench [ARGS]` (builds the
   weather plugin, then runs the real `rustline bench` tool via `cargo run
-  --release --features bench -- bench {{ARGS}}`).
+  --release --features bench -- bench {{ARGS}}`), `just lint-plugins` (the
+  five excluded `plugins/*` are invisible to the root `cargo fmt`/`clippy`/
+  `cargo test --workspace`, so this loops over them: `cargo fmt --check` +
+  host clippy + a **wasm32** clippy pass — load-bearing, not redundant, since
+  each plugin's guest code sits behind `#[cfg(target_arch = "wasm32")] mod
+  guest`, invisible to a host-only pass), `just test-plugins` (per-plugin
+  `cargo test` over the same five, 22 tests total). Both share one `plugins`
+  justfile variable so the two loops can't drift out of sync when a plugin
+  is added.
 - Toolchain: Rust 1.97, **edition 2024** in every crate (incl. `rustline-abi`
   and the excluded `plugins/weather`, `plugins/counter`, `plugins/filewatch`,
   `plugins/httpget`, `plugins/cmdrun`); `rustfmt.toml` is edition 2024. Keep
@@ -2313,6 +2421,21 @@ branch on platform.
 - Must stay **clippy-clean** (`cargo clippy --all-targets -- -D warnings`) and
   **rustfmt-clean** (`cargo fmt --all --check`). There is **no pre-commit hook**
   in this repo — run `cargo fmt --all` yourself before committing.
+- **CI** (`.github/workflows/ci.yml`, greenfield — the repo had no CI before
+  this branch): runs on every pull request and on a push to `main`, cancelling
+  a superseded run on the same ref. Four independent jobs, each just a thin
+  wrapper around an existing `just` recipe so the gate and the documented
+  local command can't drift apart: `lint` → `just lint`, `test` → `just test`,
+  `plugins` → `just lint-plugins` + `just test-plugins`, and `wasm-e2e` →
+  `just test-wasm`. Toolchain via `dtolnay/rust-toolchain@stable` +
+  `Swatinem/rust-cache@v2`; `just` itself via `extractions/setup-just@v3`.
+  Deliberately no `rust-toolchain.toml` (would change every developer's local
+  toolchain resolution) and no workspace-level `RUSTFLAGS: -D warnings`
+  (redundant — `just lint`'s own clippy `-D warnings` already enforces the
+  zero-warning bar). A `v*` tag push instead triggers
+  `.github/workflows/release.yml` — see the Roadmap entry below for what it
+  builds/publishes and README's install section for verifying a downloaded
+  tarball against `SHA256SUMS`.
 - Commit `Cargo.lock` alongside any dependency change.
 - Tests are TDD unit tests in each core module (incl. the powerline renderer and
   the ANSI transcoder) plus `crates/rustline/tests/smoke.rs` integration tests.
@@ -2641,6 +2764,54 @@ branch on platform.
     `plugins/cmdrun`, the fifth example plugin (joining `weather`, `counter`,
     `filewatch`, `httpget`), demonstrating exec with a sidecar `cmdrun.toml`
     manifest.
+- Done (branch `feat/2026-07-25-plugin-integrity-registry-ci` — see the
+  [design spec](docs/superpowers/specs/2026-07-25-rustline-plugin-integrity-registry-ci-design.md)
+  / [plan](docs/superpowers/plans/2026-07-25-rustline-plugin-integrity-registry-ci.md)):
+  - **Plugin checksum verification at load time (W19).**
+    `rustline-wasm::integrity` — `sha256_hex`, `ChecksumVerdict { NotRecorded,
+    Match, Mismatch, Malformed }`, `verify_checksum` — plus a
+    `register_plugins` gate that hashes a discovered `.wasm`'s bytes and
+    checks them against `[plugins.<name>].checksum` right after the file read
+    and before any `CapabilityCtx`/wasmtime involvement (invariant N1: a
+    rejected plugin never receives a capability object). No recorded
+    checksum loads exactly as before (fully backward compatible); a
+    well-formed mismatch skips with a `warn!`; a malformed value **fails
+    closed** (also skipped) rather than being treated as unpinned.
+    `instantiate_named` (the `plugin run` dev harness) is deliberately
+    warn-only on a bad verdict — it still runs the plugin, since that command
+    is used right after rebuilding a plugin, where a recorded digest
+    legitimately mismatches every build; the bar and the daemon (which
+    rebuilds its registry via this same `register_plugins` on a config-file
+    mtime change) always go through the real, non-bypassable gate.
+    `sha256_hex`'s prior duplicate in `plugin_install.rs` is gone — the bin
+    now re-exports the one definition from `rustline-wasm`, so the digest
+    written at install time and the one checked at load time can never drift
+    apart.
+  - **Curated plugin index + `rustline plugin search` (W49).** A committed,
+    schema-versioned `registry/index.json` (seeded with the five bundled
+    example plugins, each `bundled: true`) plus `plugin_index.rs` (wire
+    types, parse/filter/freshness logic, a 24h-TTL cache at
+    `<state_root>/plugin-index.json`) backs `rustline plugin search [QUERY]
+    [--json] [--refresh]` — a case-insensitive filter over name/description,
+    marking already-installed entries and printing a build or install hint
+    per row. A fetch failure serves the last-known-good cache with a stderr
+    staleness warning; a corrupt cache, or one whose `schema_version` this
+    build can't read, falls through to a fetch rather than being fatal. A new
+    top-level `plugin_index_url` config key overrides the built-in default
+    URL (which points at `registry/index.json` on `main`). `capabilities` in
+    an index entry is advertising copy only — informational, granting
+    nothing; only `plugin approve`/a hand edit ever widens an allowlist.
+    Strictly read-only: `search` never writes config or the toggle state.
+  - **Greenfield CI and release workflows** — not previously tracked here as
+    a roadmap item, since the repo had no CI at all before this branch.
+    `.github/workflows/ci.yml` runs `lint`/`test`/`plugins`/`wasm-e2e` as
+    four independent jobs on every PR and `main` push, each routed through an
+    existing `just` recipe (see the Development section above).
+    `.github/workflows/release.yml` builds four native targets
+    (`x86_64-unknown-linux-{gnu,musl}`, `{aarch64,x86_64}-apple-darwin`) on a
+    `v*` tag push and publishes a GitHub pre-release with a per-target
+    tarball (binary + shell completions + README + LICENSE) plus a
+    `SHA256SUMS` file.
 - Per-widget richer customization; naming the widget in the panic-guard `warn!`.
 - Range-on-binding — today a `run`/`open_url` click binding only fires on a
   widget that already emits a clickable range (i.e. has a non-empty
@@ -2676,3 +2847,5 @@ branch on platform.
 - Plan (batched window render): `docs/superpowers/plans/2026-07-24-rustline-batched-window-render.md`
 - Spec (widget manager + exec capability): `docs/superpowers/specs/2026-07-24-rustline-widget-manager-and-exec-capability-design.md`
 - Plan (widget manager + exec capability): `docs/superpowers/plans/2026-07-24-rustline-widget-manager-and-exec-capability.md`
+- Spec (plugin integrity, registry, CI/CD): `docs/superpowers/specs/2026-07-25-rustline-plugin-integrity-registry-ci-design.md`
+- Plan (plugin integrity, registry, CI/CD): `docs/superpowers/plans/2026-07-25-rustline-plugin-integrity-registry-ci.md`

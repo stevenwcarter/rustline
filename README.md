@@ -42,10 +42,12 @@ pane, window, host, and system info, with zero required configuration.
   theme, widget registry, and WASM plugins warm across tmux refreshes;
   renders fall back to the normal in-process path automatically whenever
   it's not running.
-- Install third-party WASM plugins straight from GitHub
+- Browse a curated plugin index (`rustline plugin search`) and install
+  third-party WASM plugins straight from GitHub
   (`rustline plugin install owner/repo`), then grant only the capabilities they
   need — including, if you choose to, running a local command
-  (`allowed_commands`). See [Plugins](#plugins) below.
+  (`allowed_commands`). A plugin's recorded checksum is verified every time it
+  loads, not just recorded at install time. See [Plugins](#plugins) below.
 - Seven built-in themes (a `default` plus six multi-accent, truecolor curated
   themes) selectable via `rustline theme use`, browsable interactively with
   `rustline theme pick`, plus a `theme new` scaffolder for tweaking your own
@@ -61,6 +63,34 @@ pane, window, host, and system info, with zero required configuration.
   shell-completion script.
 
 ## Install
+
+### Prebuilt release binary
+
+Each tagged release publishes prebuilt tarballs for four targets on GitHub:
+
+- `x86_64-unknown-linux-gnu`
+- `x86_64-unknown-linux-musl` (static; no glibc dependency)
+- `aarch64-apple-darwin` (Apple Silicon)
+- `x86_64-apple-darwin` (Intel Mac)
+
+Each `rustline-<version>-<target>.tar.gz` contains the `rustline` binary,
+shell-completion scripts under `completions/` (`rustline.bash`, `_rustline`,
+`rustline.fish`), `README.md`, and `LICENSE`. A `SHA256SUMS` file alongside the
+tarballs lets you verify your download before extracting it:
+
+```bash
+# From the release's asset directory, with both files downloaded:
+sha256sum -c --ignore-missing SHA256SUMS
+# rustline-v0.1.0-x86_64-unknown-linux-gnu.tar.gz: OK
+
+tar xzf rustline-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+cp rustline-v0.1.0-x86_64-unknown-linux-gnu/rustline ~/.local/bin/rustline
+```
+
+Releases are marked as GitHub **pre-releases** while the project is under
+`v0.x`.
+
+### Build from source
 
 ```bash
 cargo build --release
@@ -720,7 +750,9 @@ inside tmux, and sample values otherwise:
 just preview
 ```
 
-Other recipes: `just build`, `just test`, `just lint`.
+Other recipes: `just build`, `just test`, `just lint`, `just lint-plugins` and
+`just test-plugins` (fmt/clippy/tests for the excluded example plugins under
+`plugins/*`, which the root `cargo` commands never see).
 
 ## Benchmarking
 
@@ -1020,6 +1052,43 @@ rustline plugin approve cmdrun         # commands get an extra, explicit warning
 `[plugins.<name>]`'s allowlists (never more than what's declared), and does
 nothing if the plugin has no manifest.
 
+Not sure what plugins exist yet? Browse the curated index:
+
+```bash
+rustline plugin search                 # list every entry in the index
+rustline plugin search weather         # case-insensitive filter over name + description
+rustline plugin search --json          # machine-readable, for scripting
+rustline plugin search --refresh       # bypass the 24h cache and fetch now
+```
+
+Sample output:
+
+```
+weather
+  Nerd-Font condition icon + °F for a configured zip code, via wttr.in
+  capabilities: http_cached
+  build:   just build-plugin weather
+```
+
+The index is a small, versioned JSON document fetched over HTTPS and cached
+for 24h at `<state_root>/plugin-index.json`; a fetch failure serves the
+last-known-good cached copy (with a warning) rather than failing outright, as
+long as something has been cached before. Each entry marks whether it's
+already present in your plugin dir, and shows either a `just build-plugin
+<name>` hint (for a bundled example) or an `rustline plugin install
+<owner/repo>` hint (for an installable one). Point `search` at a different
+index — your own fork, or a self-hosted mirror — with `plugin_index_url` in
+`config.toml`:
+
+```toml
+plugin_index_url = "https://example.com/my-index.json"   # optional; overrides the built-in default
+```
+
+Each entry's `capabilities` list is advertising copy only — it tells you what
+a plugin will *ask* for before you install it, but grants nothing on its own;
+only `plugin approve` (or a hand edit) ever widens an allowlist. `search` is
+entirely read-only: it never touches your config or the plugin dir.
+
 Install a published plugin straight from a GitHub release instead of building
 it yourself:
 
@@ -1035,6 +1104,27 @@ in `[plugins.<name>]`, and grants **no** capabilities — you still run
 plugin is ever denied something it asked for, `rustline plugin denials
 <name>` lists every capability it was refused, so you can decide whether to
 grant it — add `--json` for a machine-readable `{kind, target}` array.
+
+**That recorded checksum is verified every time the plugin loads, not just
+recorded and forgotten.** Before a discovered `.wasm` is handed to the
+sandbox, `rustline` hashes its bytes and checks them against
+`[plugins.<name>].checksum`:
+
+- No checksum recorded → loads exactly as before (nothing to check).
+- Recorded and matching → loads normally.
+- Recorded but the bytes don't match → **skipped**, with a warning in the
+  log — the file on disk changed since the digest was recorded, which is
+  exactly the case this feature exists to catch.
+- Recorded but not a valid sha256 digest (wrong length, non-hex characters,
+  etc.) → also **skipped** — a checksum this build can't even parse is
+  treated as a failed check, not as "no checksum," so a typo can't silently
+  disable verification.
+
+The one exception is `rustline plugin run`, the dev harness you use right
+after rebuilding a plugin — where a recorded digest legitimately goes stale
+on every build. It only warns on a bad checksum and still runs the plugin.
+Your actual status line, the daemon, and every other real load always
+enforce the check.
 
 Scaffold a new plugin crate instead of copying `weather` by hand:
 
@@ -1063,10 +1153,13 @@ version with the host, so a plugin built against an incompatible future ABI is
 skipped rather than loaded — existing plugins keep working.
 
 See the [design spec](docs/superpowers/specs/2026-07-20-rustline-wasm-plugins-design.md)
-for the full capability model, config schema, and plugin ABI, and the
+for the full capability model, config schema, and plugin ABI, the
 [widget manager + exec capability design
 spec](docs/superpowers/specs/2026-07-24-rustline-widget-manager-and-exec-capability-design.md)
-for the exec capability's gating/bounds detail and the layout-editing CLI/TUI.
+for the exec capability's gating/bounds detail and the layout-editing CLI/TUI,
+and the [plugin integrity + registry design
+spec](docs/superpowers/specs/2026-07-25-rustline-plugin-integrity-registry-ci-design.md)
+for the checksum-verification policy and the curated-index schema.
 
 [extism-pdk]: https://github.com/extism/rust-pdk
 
@@ -1080,7 +1173,8 @@ See the full design specs:
 [click-to-toggle widgets](docs/superpowers/specs/2026-07-21-rustline-click-toggle-widgets-design.md),
 [themes/theme picker](docs/superpowers/specs/2026-07-21-rustline-themes-theme-picker-design.md),
 [whats-next bundle](docs/superpowers/specs/2026-07-22-rustline-whatsnext-bundle-design.md),
-[widget manager + exec capability](docs/superpowers/specs/2026-07-24-rustline-widget-manager-and-exec-capability-design.md).
+[widget manager + exec capability](docs/superpowers/specs/2026-07-24-rustline-widget-manager-and-exec-capability-design.md),
+[plugin integrity + registry + CI/CD](docs/superpowers/specs/2026-07-25-rustline-plugin-integrity-registry-ci-design.md).
 
 ## License
 

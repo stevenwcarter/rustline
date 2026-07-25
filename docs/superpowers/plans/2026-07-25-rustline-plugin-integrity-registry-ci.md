@@ -578,6 +578,25 @@ fn a_digest_written_at_install_time_is_accepted_at_load_time() {
 }
 ```
 
+> **Implementation note (added after execution, plan left otherwise as
+> originally written):** the test above,
+> `a_digest_written_at_install_time_is_accepted_at_load_time`, was renamed to
+> `write_install_record_then_config_load_verifies_the_real_bytes` and moved to
+> `crates/rustline/src/plugin_install.rs` during implementation. As written
+> here it only ever computed `sha256_hex` in-memory and fed it straight to
+> `register_plugins` — the same thing the mismatch/malformed tests above
+> already do — so despite its name and doc comment, it never actually
+> exercised the *install* half of the seam: `plugin_install`'s own
+> `write_install_record` (the real `toml_edit` serialization `do_install`
+> uses) and `Config::load`'s real deserialization. The real seam test now
+> lives next to `write_install_record` itself, writes a digest through it,
+> reads it back through `Config::load`, and only then calls
+> `verify_checksum` — with a sibling negative-direction test
+> (`write_install_record_then_config_load_rejects_swapped_bytes`) proving the
+> chain can actually fail. This note documents the rename rather than editing
+> the snippet above, so the plan stays a record of what was originally
+> proposed.
+
 - [ ] **Step 2: Build the weather plugin and run the tests to verify they fail**
 
 ```bash
