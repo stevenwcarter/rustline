@@ -31,9 +31,10 @@ Cargo **workspace**, edition 2024, `resolver = "2"`:
   `Context` from CLI args + local system reads, discovers/registers WASM
   plugins, calls the core, and prints.
 - `crates/rustline-wasm` — the **WASM plugin host**: an Extism (wasmtime)
-  runtime with seven host functions — six capability-gated (TTL-cached + raw
-  network + state + arbitrary-file read/write) plus one capability-free guest
-  logger, `rl_log` — per-plugin allowlists and a sandboxed/quota-bounded state
+  runtime with **nine** host functions — **eight** capability-gated
+  (TTL-cached + raw network + state + arbitrary-file read/write + **command
+  exec, cached and uncached**) plus one capability-free guest logger,
+  `rl_log` — per-plugin allowlists and a sandboxed/quota-bounded state
   dir, and discovery of `*.wasm` files into `Widget` registrations. Zero
   ambient authority — guests run with wasi off and no built-in Extism
   HTTP/FS; every effect is host-checked (`rl_log` is the sole intentional
@@ -49,7 +50,7 @@ Cargo **workspace**, edition 2024, `resolver = "2"`:
   `abi_version` Extism exports in one line). Links the real Extism host imports
   **only on `wasm32`**; on the host target the wrappers degrade to
   `HostError::Unavailable` so a plugin's pure logic still compiles and
-  unit-tests under `cargo test`. All four example plugins depend on it.
+  unit-tests under `cargo test`. All five example plugins depend on it.
 
 `plugins/` holds example/third-party plugin sources, each an **excluded**
 workspace member (own `Cargo.lock`, built for `wasm32-unknown-unknown`):
@@ -70,6 +71,10 @@ workspace member (own `Cargo.lock`, built for `wasm32-unknown-unknown`):
   configured URL and renders a snippet of the body, contrasting with
   `weather`'s TTL-cached path; a non-2xx status or transport error logs why
   via `rl_log` and falls back to `down_format`.
+- `plugins/cmdrun` — runs a configured `program` + `args` via the host's
+  `rl_exec`/`rl_exec_cached` and renders a snippet of stdout, demonstrating
+  the capability-gated exec capability; a denial, timeout, or non-zero exit
+  logs why via `rl_log` and falls back to `down_format`.
 
 ### Render pipeline
 
@@ -199,13 +204,17 @@ these shared types, not a design shortcut. Keep them serializable.
   `Widget::range_name(&self)
   -> Option<&str>` defaults to `None`; a clickable widget returns `Some(name)`.
   `WidgetDescriptor { name, summary, configurable, source: WidgetSource }`
-  (`WidgetSource::{Builtin, Plugin}`) describes a registered widget
-  independent of building an instance; `Registry::register_described`
-  registers a factory alongside its descriptor (`register` still works,
-  recording a minimal built-in/non-configurable one), and
-  `descriptors()`/`available_names()` enumerate them in registration order
-  (W22) — the enabling abstraction for a future widget-listing command, not
-  itself exposed as a CLI subcommand yet. The twelve clickable/format-bearing
+  (`WidgetSource::{Builtin, Plugin, Instance { kind: String }}` — the third
+  variant, added for the widget manager, labels a `[instances.<name>]`
+  descriptor with its declared kind so `widget list`/`widget edit` can show
+  "instance of cpu" rather than lumping it in with `Builtin`) describes a
+  registered widget independent of building an instance;
+  `Registry::register_described` registers a factory alongside its
+  descriptor (`register` still works, recording a minimal
+  built-in/non-configurable one), and `descriptors()`/`available_names()`
+  enumerate them in registration order (W22) — the enabling abstraction the
+  widget manager's `widget_placements` (see `config.rs` below) builds on.
+  The twelve clickable/format-bearing
   widget structs (see `toggle.rs` below) each now carry a `name: String`
   field (W46) — their range/toggle identity (invariant #7) — instead of
   hardcoding their kind name in `range_name()`/`active_format`; a base
@@ -410,7 +419,28 @@ these shared types, not a design shortcut. Keep them serializable.
   `color_overrides()`/`click_map()` (previously widgets-only) now also
   project each non-colliding instance via `instance_meta`, keyed by the
   instance name, so instance color overrides and click bindings flow through
-  `render_named_region`/`resolve_click` unchanged.
+  `render_named_region`/`resolve_click` unchanged. `PluginConfig` also gains
+  `allowed_commands: Vec<String>` (the exec capability's allowlist, same
+  glob-or-`re:` shape as `allowed_urls`/`allowed_paths`, matched against the
+  **canonical argv string** — see `rustline-wasm`'s `argv.rs` below — not just
+  the program name; empty denies by default like the other two). The widget
+  manager's pure layout algebra lives here too: `Region { Left, Center,
+  Right }` (`Region::ALL`, `as_str`/`parse`); `Layout::{get, get_mut, find}`
+  (`find` locates a name's current `(Region, usize)`, since a widget may sit
+  in at most one region — invariant #7); `LayoutEditError { AlreadyPresent,
+  NotPresent, NoOp }` (every variant means nothing was mutated) and
+  `LayoutChange { name, from, to }` (`from`/`to` are `None` for an add/remove
+  respectively); `layout_enable`/`layout_disable`/`layout_move`/`layout_nudge`
+  are the four pure mutators (insert/remove/relocate/shift-in-place), each
+  returning a `LayoutChange` or refusing with a `LayoutEditError` — the one
+  definition of a legal edit shared by `widget_cmd.rs` (CLI) and
+  `widget_tui.rs` (the interactive editor). `WidgetPlacement { name, summary,
+  source, placement }` and `widget_placements(cfg, descriptors, plugin_names)
+  -> Vec<WidgetPlacement>` enumerate every widget a user could place — built-ins
+  (registration order) → instances (sorted) → plugin stems (sorted), a
+  candidate's own `WidgetSource` deciding its group — with its current
+  placement if any; this is `widget list`/`widget edit`'s one source of truth
+  for "what exists and where is it."
 - `ansi.rs` — `tmux_to_ansi(&str) -> String`: transcodes the tmux markup we emit
   into ANSI SGR (`colourN` → 256-color, `#rrggbb` → truecolor, named → basic)
   for the `--preview` flag.
@@ -454,13 +484,30 @@ these shared types, not a design shortcut. Keep them serializable.
   `rustline-plugin-sdk`, kept in sync only by the e2e test; each carries a
   struct-level `#[serde(default)]` so a guest's decode stays forward-compatible
   with a host that adds/omits a field. `rustline-wasm` and the SDK re-export
-  them.
+  them. Two more joined them for the exec capability: `ExecResult { ok,
+  status: i32, stdout, stderr, error, truncated }` (`rl_exec`'s result — `ok`
+  means "allowed and ran to completion", NOT "succeeded"; a non-zero exit is
+  `ok: true` with a non-zero `status`, `status: -1` on a signal kill or
+  timeout) and `CachedExecResult` (`rl_exec_cached`'s result, adding
+  `stale`/`age_secs` — same "usable result present, fresh or stale"
+  convention as `CachedHttpResult`). Same struct-level `#[serde(default)]`
+  forward-compatibility as the other four.
   The WASM wire types, re-exported by `rustline-core`.
 
 `rustline-wasm`:
 - `allow.rs` — `AllowSet`/`Pattern`: each `allowed_urls`/`allowed_paths` entry
   is a glob by default or a regex when prefixed `re:`; deny-by-default (empty
   set matches nothing); malformed patterns are logged and skipped.
+  `allowed_commands` (the exec capability's allowlist) compiles through this
+  same `AllowSet`, unchanged.
+- `argv.rs` — `canonical_argv(program, args) -> String`, the exec
+  capability's single **matching key** an `allowed_commands` pattern is checked
+  against — never executed, since the host always spawns `program` + `args`
+  directly with no shell. Quotes an argument (single-quoted, POSIX-style, with
+  an embedded `'` escaped as `'\''`) whenever it contains whitespace, a quote,
+  or a backslash, or is empty, so two different argv vectors (e.g.
+  `["log", "--author=a b"]` vs `["log", "--author=a", "b"]`) can never collapse
+  onto the same canonical string and silently share a grant.
 - `state.rs` — `sanitize_relpath` (rejects absolute/`..` paths for state I/O),
   `normalize_abs` (rejects `..` for arbitrary-file I/O), `dir_size`/`check_cap`
   (state-dir quota accounting via `walkdir`).
@@ -476,33 +523,75 @@ these shared types, not a design shortcut. Keep them serializable.
   wasmtime an unusable config (N2). The cache dir is kept distinct from plugins'
   own state subdirs.
 - `abi.rs` — `RenderInput` and `parse_render_output` (malformed JSON → empty
-  `Vec`). The four host-effect wire-result types (`HttpResult`,
-  `CachedHttpResult`, `ReadResult`, `WriteResult`) now live in `rustline-abi`
-  (W51) and are re-exported here, so existing `crate::abi::HttpResult` paths
-  keep resolving (the same precedent as `rustline_core::segment`'s `Segment`
-  re-export).
+  `Vec`). The host-effect wire-result types (`HttpResult`, `CachedHttpResult`,
+  `ReadResult`, `WriteResult`, and now `ExecResult`/`CachedExecResult`) all
+  live in `rustline-abi` (W51, plus the exec pair added alongside `rl_exec`/
+  `rl_exec_cached`) and are re-exported here, so existing `crate::abi::HttpResult`
+  paths keep resolving (the same precedent as `rustline_core::segment`'s
+  `Segment` re-export).
 - `cache.rs` — pure HTTP-response-cache helpers: FNV-1a URL→path, RFC3339
   freshness (`age_secs`/`is_fresh`), quota-bounded `read_entry`/`write_entry`.
-- `capability.rs` — `CapabilityCtx`: one plugin instance's allowlists, state
+  `cache_path(state_dir, namespace, key)` now takes a `namespace` argument —
+  `HTTP_NAMESPACE`/`EXEC_NAMESPACE` — so the HTTP-response cache and the exec
+  capability's own TTL cache (see `perform.rs` below) live in separate
+  `<state_dir>/<namespace>/` subdirectories and can never collide even if a
+  URL and a command line happen to hash to the same digest.
+- `capability.rs` — `CapabilityCtx`: one plugin instance's allowlists (now
+  incl. `allowed_commands: AllowSet`, the exec capability's gate), state
   root, and quota, built from `PluginConfig` and held in Extism `UserData` so
-  each instance only ever sees its own grants.
+  each instance only ever sees its own grants. `DenialKind` gains a `Command`
+  variant alongside `Url`/`Path`, so a denied exec call is recorded and
+  reported (`rustline plugin denials`) the same way as a denied URL/path.
 - `fetch.rs` — `Fetcher` trait + `UreqFetcher` (the real rustls blocking HTTP
   client); the trait seam makes `perform_http_get`'s gating logic testable
   without a network.
-- `perform.rs` — the six capability-checked effect functions
+- `run.rs` — `Runner` trait + `ProcessRunner`, the exec capability's
+  counterpart to `fetch.rs`'s `Fetcher` seam: `Runner::run(program, args) ->
+  Result<(exit_code, stdout, stderr), String>` lets every gate test in
+  `perform.rs` run without spawning anything (the capability decision is made
+  before `run` is ever called). `ProcessRunner` is the sole production impl —
+  it spawns `program` directly with `args`, **no shell anywhere in the path**;
+  stdin is closed (`Stdio::null()`, so a child reading stdin gets EOF instead
+  of hanging), stdout/stderr are piped and capped at `MAX_OUTPUT_BYTES` (64
+  KiB per stream, flagging `truncated`), and the whole run is bounded by
+  `EXEC_TIMEOUT` (5 s, comfortably under Extism's 10 s plugin timeout) plus,
+  at most, two short `OUTPUT_GRACE` periods (250 ms each) spent collecting
+  output afterward. The child runs in its own process group
+  (`process_group(0)`, the file's one
+  `unsafe`) so a timeout/output-collection deadline kills the **group**, not
+  just the immediate pid — otherwise a backgrounded descendant (`sh -c "long
+  &"`) could keep the piped stdout/stderr open indefinitely and hang the
+  render even after its immediate parent exits cleanly. `kill_group` only
+  reaches that group, though: a descendant that escapes it via
+  `setsid`/`setpgid` (a properly-daemonizing program, e.g. `emacs --daemon`,
+  `ssh -f`, `tmux new-session -d`) keeps the piped fds open past the kill —
+  `OUTPUT_GRACE` is what keeps that case bounded (the escaped descendant's
+  own output is dropped, empty, rather than hanging the render thread and,
+  transitively, the daemon's shared render lock).
+- `perform.rs` — the eight capability-checked effect functions
   (`perform_http_get`, `perform_http_get_cached` — the TTL-cached GET:
   gate-first, 2xx-only caching, serve-stale — `perform_state_read/write`,
-  `perform_file_read/write`); pure enough to unit-test directly, incl. the
-  denied-case tests. Plus `perform_log(plugin, level, msg)` (W7): the one
-  intentional **capability-free** host function — it only ever writes to the
-  host's `tracing` subscriber, so unlike the six above it has no
+  `perform_file_read/write`, and `perform_exec`/`perform_exec_cached`); pure
+  enough to unit-test directly, incl. the denied-case tests. `perform_exec`
+  gates on `canonical_argv(program, args)` — the **whole** command line, not
+  just `program` — against `allowed_commands` before ever touching `runner`
+  (gate-first, invariant N1); a non-zero exit is `ok: true` (the process ran;
+  its own exit status is data, not a host-level error). `perform_exec_cached`
+  mirrors `perform_http_get_cached`'s shape with one deliberate difference:
+  only a **zero-exit** run is written to the cache, and a **non-zero exit is
+  returned as fresh data** rather than triggering a stale-serve fallback (it
+  genuinely ran and reported that status) — only a run that couldn't happen
+  at all (denied, spawn failure, timeout) falls back to the last-good cached
+  entry with `stale: true`. Plus `perform_log(plugin, level, msg)` (W7): the
+  one intentional **capability-free** host function — it only ever writes to
+  the host's `tracing` subscriber, so unlike the eight above it has no
   `CapabilityCtx` allowlist to check and no denied-case test; an unrecognized
   `level` string degrades to `info` (keeping the original as a field) rather
   than dropping the message or panicking.
 - `host.rs` — the `host_fn!` wrappers binding `perform_*` (incl.
-  `rl_http_get_cached` and, W7, `rl_log`) to each plugin's `CapabilityCtx`,
-  `build_plugin` (Extism instantiation: wasi off, fuel + timeout + memory
-  caps, all **seven** host functions bound), `build_plugin_with_cache` +
+  `rl_http_get_cached`, `rl_exec`/`rl_exec_cached`, and, W7, `rl_log`) to each
+  plugin's `CapabilityCtx`, `build_plugin` (Extism instantiation: wasi off,
+  fuel + timeout + memory caps, all **nine** host functions bound), `build_plugin_with_cache` +
   `CompileCache { Enabled, Disabled }` (W43): `build_plugin` now points
   wasmtime at an on-disk compile cache under the state root via
   `PluginBuilder::with_cache_config` (from `wasmtime_cache_config_path`) so a
@@ -516,7 +605,7 @@ these shared types, not a design shortcut. Keep them serializable.
   `range_name` as `Some(name)` iff `name.len() <= 15` — the guest itself
   decides whether to honor `context.toggled`).
 - `manifest.rs` — plugin capability *manifests* (W24): `PluginManifest
-  { name, version, requested_urls, requested_paths }` and
+  { name, version, requested_urls, requested_paths, requested_commands }` and
   `resolve_manifest(plugin_dir, name) -> Option<PluginManifest>`, which
   resolves a sidecar `<plugin_dir>/<name>.toml` first (primary; supersedes
   unconditionally, even if malformed) or else an embedded `rustline-manifest`
@@ -533,7 +622,14 @@ these shared types, not a design shortcut. Keep them serializable.
   `rustline plugin denials <name>`. NOTE: the record has no quota/rotation yet
   — a guest that varies its `target` defeats the dedup and grows the file
   unbounded (a follow-up; see WHATS-NEXT).
-- `lib.rs::{abi_decision, register_plugins, instantiate_named}` —
+- `lib.rs::{abi_decision, register_plugins, instantiate_named,
+  discover_plugin_names}` — `pub fn discover_plugin_names(plugin_dir: &Path)
+  -> Vec<String>` is the discovery half of `register_plugins` split out on its
+  own: the sorted `.wasm` stems present in `plugin_dir`, **without reading or
+  instantiating any of them** — a missing/unreadable dir yields an empty
+  `Vec`, never an error. This is what lets `rustline widget list`/`widget edit`
+  show plugin widgets in the AVAILABLE column without paying wasm cold-start
+  or running guest code just to render a picker.
   `abi_decision(host: u32, guest: Option<u32>) -> AbiDecision`
   (`{Register, RegisterLegacy, Skip}`, W32) is the pure ABI-version handshake:
   a guest declaring the host's version registers; a guest with no
@@ -555,22 +651,30 @@ these shared types, not a design shortcut. Keep them serializable.
 `rustline-plugin-sdk`:
 - `lib.rs` — the guest-side SDK (W39). Typed host-capability wrappers
   (`http_get`, `http_get_cached`, `state_read`/`state_write`,
-  `file_read`/`file_write`, `log`) that call the host functions and decode
-  their JSON responses into result structs, returning `Result<_, HostError>`
-  (`{Call, Decode, Unavailable}`) instead of an untyped `serde_json::Value`;
-  re-exports of `rustline_abi::{Color, GuestRender, Segment, Style,
-  WireContext}` and the four host-effect result types (`HttpResult`,
-  `CachedHttpResult`, `ReadResult`, `WriteResult`); the `active_format` toggle
+  `file_read`/`file_write`, `exec`/`exec_cached`, `log`) that call the host
+  functions and decode their JSON responses into result structs, returning
+  `Result<_, HostError>` (`{Call, Decode, Unavailable}`) instead of an untyped
+  `serde_json::Value`; `exec`/`exec_cached` are thin wrappers over
+  `rl_exec`/`rl_exec_cached` — `exec(program, args)` encodes `args` as JSON
+  for the host boundary and decodes an `ExecResult`; `exec_cached` adds
+  `ttl_secs`/`now` and decodes a `CachedExecResult`, documented (matching
+  `perform_exec_cached`'s own doc comment precisely) to return a non-zero
+  exit as fresh, uncached data and fall back to a stale cached entry only on
+  a run that couldn't happen at all (denied, spawn failure, timeout); re-exports
+  of `rustline_abi::{Color, GuestRender, Segment, Style, WireContext}` and the
+  host-effect result types (`HttpResult`, `CachedHttpResult`, `ReadResult`,
+  `WriteResult`, `ExecResult`, `CachedExecResult`); the `active_format` toggle
   helper and `LogLevel` enum; and the
   `export_plugin!` macro, which emits the `name`/`render`/`abi_version` Extism
   exports (the last returning the real `rustline_abi::ABI_VERSION`) from one
   line. The capability wrappers link the Extism PDK **only on `wasm32`**; on the
   host target they return `HostError::Unavailable` so a plugin's pure logic
-  compiles and unit-tests under `cargo test`. The four host-effect wire-result
-  types (`HttpResult`/`CachedHttpResult`/`ReadResult`/`WriteResult`) are now
-  re-exported from `rustline-abi` (W51) rather than re-declared here — the
+  compiles and unit-tests under `cargo test`. The four original host-effect
+  wire-result types (`HttpResult`/`CachedHttpResult`/`ReadResult`/`WriteResult`)
+  are re-exported from `rustline-abi` (W51) rather than re-declared here — the
   previous SDK-local copy (kept in sync only by the e2e test) is gone, removing
-  the drift risk.
+  the drift risk; `ExecResult`/`CachedExecResult` were added there directly,
+  so the exec capability never had a duplicate-copy problem to begin with.
 
 `plugins/weather` (excluded workspace member, `wasm32-unknown-unknown`):
 - `lib.rs` — pure logic (`code_to_icon`, `render_format`, `parse_wttr`,
@@ -581,12 +685,12 @@ these shared types, not a design shortcut. Keep them serializable.
   exports and a single `rl_http_get_cached` guest import (the host owns the
   TTL cache).
 
-`plugins/counter`, `plugins/filewatch`, `plugins/httpget` (excluded workspace
-members, `wasm32-unknown-unknown`, same shape as `plugins/weather` — pure
-logic unit-tested on the host target plus a `#[cfg(target_arch = "wasm32")]
-mod guest`): three more worked examples, each covering a host capability
-`weather` doesn't touch, and each logging its one failure path via `rl_log`
-(W7) rather than staying silent:
+`plugins/counter`, `plugins/filewatch`, `plugins/httpget`, `plugins/cmdrun`
+(excluded workspace members, `wasm32-unknown-unknown`, same shape as
+`plugins/weather` — pure logic unit-tested on the host target plus a
+`#[cfg(target_arch = "wasm32")] mod guest`): four more worked examples, each
+covering a host capability `weather` doesn't touch, and each logging its one
+failure path via `rl_log` (W7) rather than staying silent:
 - `plugins/counter/lib.rs` — `parse_count`/`next_count`/`render_format`; the
   guest reads its previous count via `rl_state_read`, increments it,
   persists the new value via `rl_state_write` (a failed write is `rl_log`ged
@@ -605,13 +709,30 @@ mod guest`): three more worked examples, each covering a host capability
   completed", not "succeeded" — unlike the cached path, nothing upstream
   filters non-2xx for it), and falls back to `down_format` (same convention),
   `rl_log`ging the failure reason.
+- `plugins/cmdrun/lib.rs` — `extract_snippet`/`render_format`/`select_mode`;
+  the guest runs a configured `program`/`args` via the **plain** `rl_exec`
+  (`ttl_secs == 0`, the default) or the **TTL-cached** `rl_exec_cached`
+  (`ttl_secs > 0`) — the exec counterpart to `httpget`'s plain-vs-cached HTTP
+  contrast — and renders the first line of stdout (capped at 60 chars). A
+  denial, spawn failure, timeout, or non-zero exit is `rl_log`ged and falls
+  back to `down_format` (same convention). Ships a sidecar `cmdrun.toml`
+  manifest requesting `["uname", "uname *"]` (program `uname`, with or
+  without arguments — not a `uname*` prefix glob, which would also match a
+  program named `unamex`), so `rustline plugin approve cmdrun`
+  demonstrates the exec-specific approval warning end to end.
 
 `rustline` (bin):
 - `cli.rs` — `clap` derive. A global `--config <path>` flag (W35, alongside
   `-v`) overrides the config-file path for every subcommand that reads/writes
-  it. `render`, `config`, `plugin`, and `theme` are subcommand *groups*; the
-  `plugin` group now spans `list`, `url|path`, `approve`, `new`, `build`
-  (W31), `run` (W34), `install`/`update`/`remove` (W38), and `denials` (W28).
+  it. `render`, `config`, `plugin`, `theme`, and `widget` are subcommand
+  *groups*; the `plugin` group now spans `list`, `url|path|cmd`, `approve`,
+  `new`, `build` (W31), `run` (W34), `install`/`update`/`remove` (W38), and
+  `denials` (W28) — `cmd` (`PluginCmd::Cmd(PatternCmd)`) is `plugin cmd
+  list|add|remove`, the exec capability's `allowed_commands` counterpart to
+  `url`/`path`, sharing the same `PatternCmd`/`pattern_cmd` plumbing (see
+  `plugin_cmd.rs` below). `WidgetCmd { List { json }, Enable { name, region,
+  index }, Disable { name }, Move { name, region, index }, Edit }` is the
+  widget-manager group (see `widget_cmd.rs` below and CLI below).
   `init` (`InitArgs`) is the onboarding-wizard subcommand (see CLI below);
   `click` (`ClickArgs { range, button }`, both defaulted so an empty click is a
   parseable no-op) is a flat subcommand invoked by the tmux mouse binding
@@ -900,11 +1021,15 @@ mod guest`): three more worked examples, each covering a host capability
   `write_toggles` (best-effort atomic temp-file + rename; a write failure
   `warn!`s and never panics — a broken toggle must never break the bar).
 - `plugin_cmd.rs` — `rustline plugin …`: `list` reads the effective `Config`;
-  `list`/`url|path list`/`denials` each take a `--json` flag (W40,
+  `list`/`url|path|cmd list`/`denials` each take a `--json` flag (W40,
   `plugin_list_json`/`pattern_list_json`/`denials_json`) emitting a
   `serde_json`-pretty array instead of the human text, human output
-  unchanged when the flag is absent;
-  `url|path add/remove` mutate the config file in place via `toml_edit`
+  unchanged when the flag is absent — `list --json`'s per-plugin object now
+  also carries `allowed_commands`, alongside the existing `allowed_urls`/
+  `allowed_paths`. `url|path|cmd add/remove` all share one `pattern_cmd`
+  dispatch keyed by a private `Kind { Url, Path, Command }` (`Kind::key()` ->
+  `"allowed_urls"`/`"allowed_paths"`/`"allowed_commands"`) that mutates the
+  config file in place via `toml_edit`
   (preserving comments/formatting), creating `[plugins.<name>]` if absent;
   `new <name> [--path] [--force]` scaffolds a ready-to-build WASM guest
   plugin crate from embedded templates (`assets/plugin-cargo.toml.tmpl`/
@@ -917,17 +1042,82 @@ mod guest`): three more worked examples, each covering a host capability
   `cargo build --target wasm32-unknown-unknown` + install step and a
   starter `[plugins.<name>]` config snippet afterward. `approve <name>
   [--yes]` (W24) resolves the plugin's manifest via `resolve_manifest`,
-  prints what it requests, and — after an interactive y/N confirmation (or
-  unconditionally with `--yes`) — writes **exactly** those requested URL/path
-  patterns into `[plugins.<name>]`'s allowlists (idempotent append, never a
-  wider grant); `list` also now shows a `run \`plugin approve <name>\`` hint
-  when a manifest resolves for that plugin. Also handles `build` (W31, any
+  prints what it requests via `manifest_report` — which, when
+  `requested_commands` is non-empty, appends an explicit warning that
+  `allowed_commands` runs real programs with the user's own environment and
+  permissions, and to approve only patterns they understand — and, after an
+  interactive y/N confirmation (or unconditionally with `--yes`), writes
+  **exactly** those requested URL/path/command patterns into
+  `[plugins.<name>]`'s allowlists (idempotent append, never a wider grant).
+  The warning is part of `manifest_report`'s printed text, not the
+  confirmation prompt, so it still shows up under `--yes` and in captured
+  output/logs, not just an interactive session. `list` also now shows a `run
+  \`plugin approve <name>\`` hint when a manifest resolves for that plugin.
+  Also handles `build` (W31, any
   cdylib crate → `.wasm` in the plugin dir; pure `wasm_artifact_path`/
   `cargo_build_args`/`package_name`), `run` (W34, the read-only dev harness via
   `rustline_wasm::instantiate_named` + `format_run_output`, printing segments
   and captured denials), `denials` (W28, read-only over
   `rustline_wasm::denials::read_denials`), and delegates
   `install`/`update`/`remove` to `plugin_install.rs`.
+- `widget_cmd.rs` — `rustline widget …`: `read_layout`/`write_layout` are a
+  `toml_edit` reader/writer pair over `[layout]` (handling both a standard
+  `[layout]` table and an inline `layout = { ... }` form alike, and falling
+  back per-region to `Config::load`'s defaults when a region is absent) —
+  the same in-place-edit approach `plugin_cmd.rs`/`theme_cmd.rs` use.
+  Every mutation goes through `rustline-core`'s pure `layout_enable`/
+  `layout_disable`/`layout_move` (see `config.rs` above) via a shared
+  `mutate` helper: load config → validate the name against `known_names`
+  (built-ins + non-colliding instances + discovered plugin stems, via
+  `widget_placements`) → apply the edit → write + `println!` a human summary
+  (`describe`) → best-effort `tmux refresh-client -S` when inside tmux. A
+  refused edit (unknown name, unknown region, or a `LayoutEditError`) prints
+  to stderr and exits `1` **without writing anything**. `--region center` is
+  the one case that's legal but inert here (see the module doc and invariant
+  discussion in `config.rs`/CENTER-region above): `warn_if_center` prints a
+  note rather than refusing, since the CLI path must still be able to
+  round-trip the default `center = ["windows"]`. `list [--json]` renders
+  `widget_placements` as `<region>[<index>] name summary (source)` lines, or
+  `placements_json` — `{name, summary, source, region, index}` per row,
+  `source` one of `"builtin"`/`"plugin"`/`"instance of <kind>"`
+  (`"instance:<kind>"` in JSON). `Edit` dispatches to `widget_tui::run`.
+- `widget_tui.rs` — the interactive `rustline widget edit` full-screen editor
+  (`ratatui` + `crossterm`), built the same way `theme_cmd.rs`'s `run_picker`
+  is: a pure state machine (`EditorState::on_key(KeyKind) -> EditorAction`,
+  unit-tested with no terminal involved) plus a thin terminal-owning shell
+  (`run`, which needs a TTY — mirroring `theme pick`'s guard — and errors with
+  a hint toward `widget list` on a non-interactive invocation). Four
+  `Column`s (`Left`, `Center`, `Right`, `Available`) are drawn side by side;
+  arrow keys or vim keys (`h`/`j`/`k`/`l`) move focus/cursor, `space`/`Enter`
+  adds a selected AVAILABLE widget to RIGHT (the only region AVAILABLE
+  placement ever appends into — `last_region` is unconditionally RIGHT once
+  focus reaches AVAILABLE, since `Column::ALL`'s `[Left, Center, Right,
+  Available]` adjacency always passes through RIGHT immediately beforehand)
+  or removes a placed one back to AVAILABLE, `J`/`K` nudge a widget's
+  position within its region (via `layout_nudge`), `H`/`L` (shifted,
+  mirroring `J`/`K`; both the `Char('H')` and `Char('h')`+SHIFT reporting
+  forms) move a *placed* widget directly to the other editable region (via
+  `layout_move` + the free `adjacent_editable_region` helper, which skips
+  over CENTER rather than stopping there — the only way LEFT is reachable
+  from RIGHT at all) — CENTER is still refused as a source (focus a widget
+  in CENTER and press `H`/`L`, same as `space`/`J`/`K`, and it's refused
+  with `CENTER_FIXED_STATUS`), `w` writes the in-memory `Layout` to
+  `config.toml` (same `read_layout`/`write_layout` as `widget_cmd.rs`), `q`
+  quits (prompting to confirm first if there are unsaved changes — `dirty`
+  tracking — else quitting immediately), and `?` toggles a help overlay. A
+  live ANSI preview strip along the bottom re-renders the region under focus
+  (via `render_named_region` + `tmux_to_ansi`, the exact pipeline `render
+  left`/`render right` use) against the **in-memory, possibly-unsaved**
+  layout, so a move/add/remove is visible immediately, before `w`. `Column::
+  Center` stays focusable/visible (so a user can see the window list lives
+  there) but every edit targeting it is refused outright with an
+  explanatory status line (`CENTER_FIXED_STATUS`) — unlike `widget_cmd.rs`'s
+  CLI path, which still writes a center edit with a warning (round-tripping
+  the default config matters there; a "wrote but nothing happened" surprise
+  is cheaper to prevent up front in an interactive editor). `TerminalGuard`
+  (a `Drop` impl) restores raw mode and leaves the alternate screen on every
+  exit path, including a panic unwinding through the draw loop (this
+  workspace's default `panic = "unwind"`, so `Drop` still runs).
 - `theme_cmd.rs` — `rustline theme …`, mirroring `plugin_cmd.rs`'s `toml_edit`
   approach: `list` prints every built-in and themes-dir `*.toml` stem,
   marking the active one (`cfg.theme.base`, default `"default"`) with `*` and
@@ -1100,6 +1290,30 @@ config-file path for every subcommand that reads or writes it (default:
   **in-process, NOT daemon-routed** (a systemd/launchd daemon has no `$TMUX`
   to run `tmux list-windows` against). One-line mode is unchanged — it still
   renders per-window via `render window`.
+- `rustline widget list [--json]` — every widget (built-ins, `[instances.*]`,
+  and discovered plugin stems) and where, if anywhere, it currently sits in
+  `[layout]`; `--json` emits `{name, summary, source, region, index}` per row
+  (`source` `"builtin"`/`"plugin"`/`"instance:<kind>"`; `region`/`index` are
+  `null` for an unplaced widget) instead of human text.
+- `rustline widget enable <name> [--region left|center|right] [--index N]` —
+  add a widget to a layout region (default `right`, appended unless
+  `--index` is given); refuses (writing nothing, exit `1`) if `<name>` is
+  unknown or already placed somewhere.
+- `rustline widget disable <name>` — remove a widget from whichever region
+  holds it; refuses if it isn't placed anywhere.
+- `rustline widget move <name> --region <r> [--index N]` — relocate a placed
+  widget to another region and/or position.
+- `rustline widget edit` — open the interactive full-screen `ratatui` editor
+  (needs a TTY): four columns (LEFT/CENTER/RIGHT/AVAILABLE), arrow or vim
+  keys to move focus, `space`/`Enter` to add/remove, `J`/`K` to reorder,
+  `w` to write, `q` to quit (confirms first if there are unsaved changes),
+  `?` for a help overlay, plus a live ANSI preview strip of the region under
+  focus so an edit's effect is visible before you save. See `widget_tui.rs`
+  above.
+  `enable`/`move --region center` still write and exit `0` (with a stderr
+  note) since nothing renders `[layout].center` — see the Config section's
+  CENTER-region note below; `widget edit`'s TUI refuses a CENTER edit
+  outright instead, with an on-screen explanation.
 - `rustline init` — interactive onboarding wizard (needs a TTY): asks theme
   (with preview), one-/two-line status, mouse/click-to-toggle, machine-type
   widgets (laptop → `battery`, Tailscale → `tailscale_ip`, LAN → `lan_ip`),
@@ -1149,18 +1363,27 @@ config-file path for every subcommand that reads or writes it (default:
   `daemon_client::daemon_socket_path()` has no socket file at all ("not
   running"), `warn` when a socket exists but doesn't answer a `Ping`
   ("present but not reachable — a stale socket from a killed daemon?"), or
-  `pass` when it's reachable; never affects `doctor`'s exit code.
+  `pass` when it's reachable; never affects `doctor`'s exit code. Also
+  another advisory-only row: `pass` at tmux ≥ 3.2 ("display-popup available
+  (prefix + W opens the widget manager)"), `warn` below 3.2 ("prefix + W
+  widget manager needs tmux >= 3.2 (display-popup); the status line itself
+  works") — the widget-manager popup binding needs `display-popup` (tmux
+  ≥ 3.2), one version tier above the `range=user|` floor (≥ 3.1) the status
+  line itself needs; this row never affects the exit code either.
 - `rustline completions <bash|zsh|fish>` — print a shell-completion script
   (via `clap_complete`) to stdout.
 - `rustline plugin list [--json]` — discovered/configured plugins with their
   source, allowlists, and state quota; `--json` emits a JSON array of
-  `{name, source, tag, allowed_urls, allowed_paths, max_state_bytes,
-  has_manifest}` instead of human text.
-- `rustline plugin url|path list [--json]|add|remove <plugin> [pattern]` —
-  read or edit a plugin's `allowed_urls`/`allowed_paths` (`add`/`remove`
-  rewrite the config file in place via `toml_edit`, preserving
+  `{name, source, tag, allowed_urls, allowed_paths, allowed_commands,
+  max_state_bytes, has_manifest}` instead of human text.
+- `rustline plugin url|path|cmd list [--json]|add|remove <plugin> [pattern]`
+  — read or edit a plugin's `allowed_urls`/`allowed_paths`/`allowed_commands`
+  (`add`/`remove` rewrite the config file in place via `toml_edit`, preserving
   comments/formatting); `list --json` emits the patterns as a JSON array of
-  strings (`[]` for an absent/empty plugin) instead of one per line.
+  strings (`[]` for an absent/empty plugin) instead of one per line. `cmd` is
+  the exec capability's counterpart to `url`/`path`: its patterns are matched
+  against the whole canonical argv (`rustline_wasm::canonical_argv`), not
+  just the program name.
 - `rustline plugin new <name> [--path <dir>] [--force]` — scaffold a
   ready-to-build WASM guest plugin crate at `<dir or cwd>/<name>/`
   (`Cargo.toml` with an empty `[workspace]` table + edition 2024 + cdylib,
@@ -1171,9 +1394,13 @@ config-file path for every subcommand that reads or writes it (default:
   existing `<name>/` directory without `--force`.
 - `rustline plugin approve <name> [--yes]` — resolve `<name>`'s declared
   capability manifest (a sidecar `<name>.toml` in the plugin dir, or an
-  embedded `rustline-manifest` wasm custom section), print what it requests,
-  and — after an interactive y/N confirmation (or unconditionally with
-  `--yes`) — write exactly those requested URL/path patterns into
+  embedded `rustline-manifest` wasm custom section), print what it requests
+  — including, when the manifest asks for `requested_commands`, an explicit
+  warning that granting `allowed_commands` runs real programs with the
+  user's own environment and permissions (part of the printed report, so it
+  shows up under `--yes` too, not just an interactive prompt) — and, after
+  an interactive y/N confirmation (or unconditionally with `--yes`), write
+  exactly those requested URL/path/command patterns into
   `[plugins.<name>]`'s allowlists; declines (writing nothing) without
   confirmation, and does nothing if the plugin has no manifest.
 - `rustline plugin build <dir> [--release] [--plugin-dir <d>]` — build any
@@ -1320,6 +1547,20 @@ question (`InitAnswers.mouse`) can add that setter for you (`--print` never
 does; it always emits the mouse-off, one-line legacy block regardless of
 config).
 
+**Widget-manager popup (`prefix + W`).** The block also emits
+`bind-key W display-popup -E -w 80% -h 80% "<binary> widget edit"` —
+unconditionally, the same way the three `MouseDown*Status` blocks are, and
+with no tmux format variable interpolated (nothing to `#{q:}`-escape). This
+needs **tmux ≥ 3.2** for `display-popup` (one version tier above the ≥ 3.1
+the status line itself needs for `range=user|`); `doctor` carries an
+advisory-only row for it (see CLI above). Because `init_block` emits this
+line the same way it emits the mouse bindings, `rustline init --print`'s
+legacy one-line block **also** carries the `bind-key W` line now — `--print`
+was never special-cased to omit it, and no test pins the legacy block
+byte-for-byte, so this is the correct, consistent outcome rather than a gap.
+`init --uninstall` removes it along with the rest of the managed block, same
+as every other binding.
+
 **Two-line window list is batched (W42).** In two-line mode, `status-format[0]`
 (the window-list line) used to invoke tmux's own `#{W:...}` loop, which expanded
 to a `#{T:window-status-format}` per-window `#(<binary> render window …)` call —
@@ -1358,6 +1599,23 @@ optional `timezone` (an IANA zone name, e.g. `"America/New_York"`; default
 option) that formats in that zone instead via `chrono-tz`; an unrecognized
 name is logged and falls back to local time rather than erroring. Unknown
 widget names in a layout are skipped, not fatal.
+
+**`[layout].center` is inert.** Nothing in the render pipeline reads it:
+`assemble.rs`'s `window_pill` (backing both `render_window` and
+`render_windows`) hardcodes `registry.resolve(&["windows".to_string()])`
+regardless of what `center` contains — tmux's window list is rendered by
+that dedicated path, not by resolving the center layout array. The array
+still exists and still round-trips (the default config is `center =
+["windows"]`, and it must stay writable), and `rustline widget
+enable|disable|move --region center` still writes and exits `0` — but it
+prints a stderr note that the change won't affect the rendered bar, since a
+silent no-op would be worse than an explained one. The interactive `widget
+edit` TUI goes further and refuses a CENTER edit outright (with an
+explanatory status line), since a "wrote but nothing happened" surprise is
+costlier to discover at save time in an editor than at CLI-invocation time.
+This is a known, deliberate limitation — not a bug to "fix" by making
+`center` do something without first deciding what a configurable window
+list would even mean.
 
 **Multiple widget instances (`[instances.<name>]`):** the same widget *kind*
 can appear more than once in a layout with distinct options — e.g. two
@@ -1786,6 +2044,7 @@ plugin_dir = "~/.local/share/rustline/plugins"   # optional
 source = "steve/rustline-weather"          # owner/repo; consumed by `plugin update`
 allowed_urls = ["https://wttr.in/*"]        # glob, or "re:<pattern>" for regex
 allowed_paths = []
+allowed_commands = []                       # glob/"re:", matched against the WHOLE argv (see below)
 max_state_bytes = 52428800                  # default: 50 MB
 # tag = "v1.2.0"                            # recorded by `plugin install/update`
 # checksum = "<sha256-hex>"                 # recorded by `plugin install/update` (TOFU)
@@ -1806,19 +2065,65 @@ with globs); to match a prefix/substring, include `.*` in the pattern (e.g.
 
 A plugin may also declare a capability **manifest** — a sidecar
 `<plugin_dir>/<name>.toml` (or an embedded `rustline-manifest` wasm custom
-section) listing `requested_urls`/`requested_paths` — which `rustline plugin
-approve <name>` turns into exactly those allowlist entries above, after
-confirmation (see CLI above). A manifest alone grants nothing; only
-`approve` (or hand-editing the config) ever widens an allowlist.
+section) listing `requested_urls`/`requested_paths`/`requested_commands` —
+which `rustline plugin approve <name>` turns into exactly those allowlist
+entries above, after confirmation (see CLI above). A manifest alone grants
+nothing; only `approve` (or hand-editing the config) ever widens an
+allowlist. `plugin approve` prints an explicit warning when a manifest
+requests commands — see the exec-capability paragraph below.
 
 `source` is a typed `PluginSource` that still accepts a bare `owner/repo`
 string; `rustline plugin install <owner/repo>` (W38) downloads the plugin's
 `.wasm` from its GitHub release into the plugin dir and records
 `source`/`tag`/`checksum` here — but grants **no** capabilities (the same
-allowlist-widening rule: run `approve` or `url|path add` afterward). The
+allowlist-widening rule: run `approve` or `url|path|cmd add` afterward). The
 recorded `checksum` is TOFU (trust-on-first-use — noted, not verified against a
 pin). `plugin update` re-resolves the latest release for that `source` and
 refreshes `checksum`/`tag`.
+
+**Exec capability (`allowed_commands`):** a plugin can ask the host to run a
+program on its behalf via `rl_exec` (plain, every render) or `rl_exec_cached`
+(TTL-cached, keyed on the whole command line — `cmdrun`'s worked example,
+see the Architecture section above), gated by `[plugins.<name>].allowed_commands`
+(glob by default, `re:` for regex, same shape as `allowed_urls`/`allowed_paths`,
+empty = deny by default). Four properties make this capability's blast radius
+explicit rather than implicit:
+- **No shell, ever.** The host spawns `program` plus an explicit `args` array
+  directly (`std::process::Command`) — nothing re-parses a string, so there is
+  no quoting/word-splitting surface. A plugin that wants a shell must be
+  granted one explicitly and visibly, e.g. `allowed_commands = ["sh -c *"]`;
+  the host never introduces one on its own.
+- **The gate matches the whole canonical argv, not just the program.** A grant
+  for `git status*` does **not** cover `git push --force` — `rustline_wasm::
+  canonical_argv(program, args)` renders `program` + every argument
+  (quoting one that contains whitespace/quotes/is empty, so two different
+  argv vectors can never collapse onto the same matched string) and the
+  *whole* rendered string is what a pattern is checked against.
+- **Bounded and capped.** A 5 s wall-clock timeout (under Extism's 10 s plugin
+  timeout, so a hung command surfaces as a renderable failure rather than
+  killing the whole plugin render), a 64 KiB cap per stdout/stderr stream
+  (flagged `truncated` past it, not silently dropped), and stdin closed
+  (`Stdio::null()`, so a command that tries to read stdin gets EOF instead of
+  hanging). The child runs in its own process group so a backgrounded
+  descendant (e.g. `sh -c "long_thing &"`) can't hold the piped output open
+  past the timeout and hang the render — and even a descendant that escapes
+  that group entirely (`setsid`/`setpgid`) is bounded by a short output-
+  collection grace period afterward, so its own output is dropped rather than
+  hanging the render (`rustline-wasm::run`'s `OUTPUT_GRACE`).
+- **Environment and working directory are inherited from the host process —
+  plainly, not as a footnote.** This is why `playerctl`/`git`/etc. work
+  without extra plumbing, and it's a real part of what you're granting: an
+  approved command sees your shell's environment variables and runs from
+  wherever `rustline` itself runs, with your user's permissions. Approve
+  `allowed_commands` patterns you actually understand.
+
+Cache semantics for `rl_exec_cached` mirror `rl_http_get_cached`'s shape with
+one deliberate difference: only a **zero-exit** run is written to the cache,
+and a **non-zero exit is returned immediately as fresh data** (the command
+genuinely ran and reported that status — it isn't a transient failure to
+paper over with stale data); only a run that couldn't happen at all (denied,
+spawn failure, or timeout) falls back to the last-good cached entry with
+`stale: true`.
 
 **Logging:** a `[log]` table controls the two sinks. `rustline` logs to a
 rotated file (`$XDG_DATA_HOME/rustline/rustline.log`, default level `info`) and
@@ -1901,15 +2206,23 @@ branch on platform.
 `rustline-wasm` or `plugins/*`):**
 
 8. **N1. Zero ambient authority.** A guest runs with `with_wasi(false)` and no
-   Extism built-in HTTP/FS; every network/filesystem effect goes through a
-   host function that checks the plugin's `CapabilityCtx` first. Adding a new
-   host capability means adding its gate *and* a denied-case test. The
+   Extism built-in HTTP/FS/process-spawn; every network/filesystem/exec
+   effect goes through a host function that checks the plugin's
+   `CapabilityCtx` first. Adding a new host capability means adding its gate
+   *and* a denied-case test. The
    TTL-cached GET (`rl_http_get_cached`) gates `allowed_urls` before any fetch
    (gate-first: a denied URL makes no network call and touches no cache),
-   with its own denied-case test. Every deny site also calls `observe_denial`
-   (before returning `ok:false`) so the default `FileDenialObserver` records
-   the `(kind, target)` for `rustline plugin denials` (W28) — recording is
-   best-effort and never changes the gate outcome.
+   with its own denied-case test. The exec capability (`rl_exec`/
+   `rl_exec_cached`) is the most recent worked instance of this pattern:
+   `perform_exec`/`perform_exec_cached` gate on `canonical_argv(program,
+   args)` — the whole quoted command line, not just `program` — against
+   `allowed_commands` before `runner.run` is ever called, with denied-case
+   tests proving a denied argv never reaches a spawn (and, for the cached
+   variant, never touches its own cache file either). Every deny site also
+   calls `observe_denial` (before returning `ok:false`) so the default
+   `FileDenialObserver` records the `(kind, target)` for `rustline plugin
+   denials` (W28) — recording is best-effort and never changes the gate
+   outcome.
 9. **N2. A plugin never breaks the bar.** Any instantiation error, render
    error, timeout, or malformed output degrades to empty segments
    (`WasmWidget::render`), bounded by fuel + wall-clock timeout + memory caps.
@@ -1930,7 +2243,7 @@ branch on platform.
   tmux context when inside tmux, else samples — needs a Nerd/powerline font for
   the glyphs), `just build-plugin NAME` (builds `plugins/<NAME>` for
   `wasm32-unknown-unknown` and installs `<NAME>.wasm` into the plugin dir —
-  generic across all four example plugins, e.g. `just build-plugin counter`),
+  generic across all five example plugins, e.g. `just build-plugin cmdrun`),
   `just build-weather` (an alias: `build-plugin "weather"`), `just test-wasm`
   (opt-in: builds the weather plugin, then runs the feature-gated
   `rustline-wasm` e2e test and the bin's `wasm_wiring` test — needs the wasm
@@ -1939,8 +2252,15 @@ branch on platform.
   --release --features bench -- bench {{ARGS}}`).
 - Toolchain: Rust 1.97, **edition 2024** in every crate (incl. `rustline-abi`
   and the excluded `plugins/weather`, `plugins/counter`, `plugins/filewatch`,
-  `plugins/httpget`); `rustfmt.toml` is edition 2024. Keep all crate editions
-  equal to `rustfmt.toml`.
+  `plugins/httpget`, `plugins/cmdrun`); `rustfmt.toml` is edition 2024. Keep
+  all crate editions equal to `rustfmt.toml`.
+- `ratatui` `0.30` (default features, pulling `ratatui-crossterm` so
+  `ratatui::crossterm` re-exports crossterm — no separate direct crossterm
+  dependency) backs the `rustline widget edit` interactive editor
+  (`widget_tui.rs`). Deliberately **not** feature-gated (unlike `bench`):
+  `rustline init` emits the `prefix + W` `display-popup` binding
+  unconditionally, so the subcommand it points at (`widget edit`) must
+  always exist in every build, not just an opt-in one.
 - Must stay **clippy-clean** (`cargo clippy --all-targets -- -D warnings`) and
   **rustfmt-clean** (`cargo fmt --all --check`). There is **no pre-commit hook**
   in this repo — run `cargo fmt --all` yourself before committing.
@@ -1958,10 +2278,11 @@ branch on platform.
   (its built-in HTTP client is deliberately dropped — `rl_http_get` and
   `rl_http_get_cached` are the only network paths). `cargo tree -i openssl` /
   `-i native-tls` stay empty across the whole graph, including
-  `plugins/weather`, `plugins/counter`, `plugins/filewatch`, and
-  `plugins/httpget` (the last of these is the only other example plugin that
+  `plugins/weather`, `plugins/counter`, `plugins/filewatch`, `plugins/httpget`,
+  and `plugins/cmdrun` (`httpget` is the only other example plugin that
   touches the network at all, via the plain `rl_http_get` host fn — still
-  rustls under the hood, same as `weather`'s cached path). The `2.3 MB`
+  rustls under the hood, same as `weather`'s cached path; `cmdrun` touches
+  neither TLS nor the network — it spawns a subprocess). The `2.3 MB`
   dynamic binary is
   fine here — the musl/`scratch` Docker policy is for server images, not this
   local CLI. `if-addrs` (host interface enumeration for the IP widgets, in
@@ -2227,14 +2548,49 @@ branch on platform.
     `[instances.<name>]` of that kind, not just the base (W56) — an
     instance-only `{spark}` now populates `Context.cpu_history`/
     `mem_history` too.
+- Done (branch `feat/2026-07-24-widget-manager-exec` — see the
+  [design spec](docs/superpowers/specs/2026-07-24-rustline-widget-manager-and-exec-capability-design.md)
+  / [plan](docs/superpowers/plans/2026-07-24-rustline-widget-manager-and-exec-capability.md)):
+  - **Widget manager (W44).** `rustline widget list|enable|disable|move|edit`
+    (`widget_cmd.rs`) — a `toml_edit`-in-place CLI mirroring `plugin_cmd.rs`/
+    `theme_cmd.rs`, built over `rustline-core`'s new pure layout algebra
+    (`Region`, `LayoutEditError`, `LayoutChange`, `Layout::{get, get_mut,
+    find}`, `layout_enable`/`layout_disable`/`layout_move`/`layout_nudge`,
+    `WidgetPlacement`/`widget_placements` — see `config.rs` above) — plus
+    `rustline widget edit` (`widget_tui.rs`), a full-screen `ratatui` editor
+    (four columns, arrow/vim keys, `space` to add/remove, `J`/`K` to
+    reorder, `w` to write, `q` to quit with an unsaved-changes confirm, `?`
+    for help, a live ANSI preview strip via the exact `render_named_region`
+    pipeline). `rustline init` gained a `prefix + W`
+    `display-popup`-into-`widget edit` binding (tmux ≥ 3.2; `doctor` gained
+    an advisory-only row for it), and `[layout].center`'s pre-existing
+    inertness (nothing renders it — see the Config section above) is now
+    documented and handled honestly instead of silently: the TUI refuses a
+    CENTER edit, the CLI still writes one (round-tripping the default
+    config) but warns.
+  - **Exec capability.** Two new capability-gated host functions, `rl_exec`
+    and `rl_exec_cached` (bringing the host to nine host functions total,
+    eight capability-gated — see the Architecture section above), gated by a
+    new `allowed_commands` allowlist matched against the **whole canonical
+    argv** (`rustline_wasm::canonical_argv`, `argv.rs`) via a `Runner` seam
+    (`run.rs`) mirroring `fetch.rs`'s `Fetcher` — no shell anywhere in the
+    path, a 5 s timeout, 64 KiB output caps, closed stdin, and
+    process-group-wide kill on timeout so a backgrounded descendant can't
+    hang the render. `perform_exec_cached` caches only a zero-exit run,
+    returning a non-zero exit as fresh (not stale) data. Manifests gained
+    `requested_commands`; `plugin approve` prints an explicit
+    execution-blast-radius warning (part of the report, so it shows under
+    `--yes` too) when a manifest requests commands. New CLI: `rustline
+    plugin cmd list|add|remove` (parallel to `url`/`path`); `plugin list
+    [--json]` now includes `allowed_commands`. New worked example:
+    `plugins/cmdrun`, the fifth example plugin (joining `weather`, `counter`,
+    `filewatch`, `httpget`), demonstrating exec with a sidecar `cmdrun.toml`
+    manifest.
 - Per-widget richer customization; naming the widget in the panic-guard `warn!`.
 - Range-on-binding — today a `run`/`open_url` click binding only fires on a
   widget that already emits a clickable range (i.e. has a non-empty
   `alt_format`); making any widget with a configured binding emit a range would
   let a `run`/`open_url` binding fire without a throwaway `alt_format`.
-- A widget-management TUI/popup (enable/disable/reorder layout widgets,
-  writing `config.toml`) — parked in `TODO.md`; distinct from this feature's
-  transient click-toggle view state.
 
 ## Design docs
 
@@ -2263,3 +2619,5 @@ branch on platform.
 - Plan (whats-next bundle #5): `docs/superpowers/plans/2026-07-24-rustline-whatsnext-bundle-5.md`
 - Spec (batched window render): `docs/superpowers/specs/2026-07-24-rustline-batched-window-render-design.md`
 - Plan (batched window render): `docs/superpowers/plans/2026-07-24-rustline-batched-window-render.md`
+- Spec (widget manager + exec capability): `docs/superpowers/specs/2026-07-24-rustline-widget-manager-and-exec-capability-design.md`
+- Plan (widget manager + exec capability): `docs/superpowers/plans/2026-07-24-rustline-widget-manager-and-exec-capability.md`

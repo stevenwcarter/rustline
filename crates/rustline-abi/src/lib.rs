@@ -7,10 +7,11 @@
 //! `rustline-core::context` (`NetIface`, `Battery`/`BatteryState`,
 //! `CpuUsage`, `MemInfo`), `GitInfo`/`DiskInfo`, the typed guest-input wire
 //! types (`WireContext`, `WireWindowCtx`, `GuestRender`) a plugin
-//! deserializes instead of hand-walking a `serde_json::Value`, and the four
+//! deserializes instead of hand-walking a `serde_json::Value`, and the
 //! host-effect wire-result types (`HttpResult`, `CachedHttpResult`,
-//! `ReadResult`, `WriteResult`) a host function's response decodes into —
-//! previously duplicated between `rustline-wasm` and `rustline-plugin-sdk`.
+//! `ReadResult`, `WriteResult`, `ExecResult`, `CachedExecResult`) a host
+//! function's response decodes into — previously duplicated between
+//! `rustline-wasm` and `rustline-plugin-sdk`.
 use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
@@ -320,6 +321,45 @@ pub struct CachedHttpResult {
     pub age_secs: i64,
 }
 
+/// Result of a host-executed subprocess (`rl_exec`).
+///
+/// `ok` means "the command was allowed and the process ran to completion" —
+/// **not** that it succeeded. A non-zero exit is data, not an error, so a
+/// guest can render a fallback from `status`/`stderr` rather than losing the
+/// distinction between "denied" and "ran and failed". Shared by both sides of
+/// the WASM boundary; `#[serde(default)]` keeps a guest's decode
+/// forward-compatible with a host that adds or omits a field.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExecResult {
+    pub ok: bool,
+    /// The process exit code, or `-1` when killed by a signal or timed out.
+    pub status: i32,
+    pub stdout: String,
+    pub stderr: String,
+    /// Non-empty iff `ok` is false: denied, malformed args, spawn failure, or
+    /// timeout.
+    pub error: String,
+    /// True iff stdout or stderr hit the host's output cap and was truncated.
+    pub truncated: bool,
+}
+
+/// Result of a TTL-cached subprocess run (`rl_exec_cached`). `ok` means "a
+/// usable result is present" (fresh OR stale) — the same convention as
+/// [`CachedHttpResult`]; `stale` distinguishes them.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CachedExecResult {
+    pub ok: bool,
+    pub status: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub error: String,
+    pub stale: bool,
+    pub age_secs: i64,
+    pub truncated: bool,
+}
+
 /// Result of a host state/file read. `ok=true` with `exists=false` is a
 /// successful read of a missing file (not an error); `error` carries the
 /// message only when `ok` is false. Shared by both sides of the WASM
@@ -475,5 +515,26 @@ mod tests {
         assert!(r.ok && r.exists);
         let w: WriteResult = serde_json::from_str(r#"{"ok":true,"error":""}"#).unwrap();
         assert!(w.ok);
+    }
+
+    /// The two exec-capability wire-result types decode the exact JSON the
+    /// host emits, and stay forward-compatible (`#[serde(default)]`) with a
+    /// minimal payload that omits newer fields.
+    #[test]
+    fn exec_result_types_round_trip_host_json() {
+        let e: ExecResult = serde_json::from_str(
+            r#"{"ok":true,"status":0,"stdout":"hi","stderr":"","error":"","truncated":false}"#,
+        )
+        .unwrap();
+        assert!(e.ok && e.status == 0 && e.stdout == "hi" && !e.truncated);
+        let c: CachedExecResult = serde_json::from_str(
+            r#"{"ok":true,"status":0,"stdout":"hi","stderr":"","error":"","stale":true,"age_secs":42,"truncated":false}"#,
+        )
+        .unwrap();
+        assert!(c.ok && c.stale && c.age_secs == 42);
+        // A minimal object still decodes: every field defaults (additive-wire
+        // invariant #2).
+        let minimal: ExecResult = serde_json::from_str("{}").unwrap();
+        assert_eq!(minimal, ExecResult::default());
     }
 }

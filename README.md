@@ -34,13 +34,18 @@ pane, window, host, and system info, with zero required configuration.
 - Run the same widget more than once with different options via
   `[instances.<name>]` — e.g. two clocks in different timezones, or gauges
   for more than one disk mount.
+- Manage your layout without hand-editing TOML: `rustline widget
+  list|enable|disable|move`, or `rustline widget edit` for a full-screen
+  interactive editor with a live preview — bound to `prefix + W` in tmux out
+  of the box. See [Widget manager](#widget-manager) below.
 - Optional persistent daemon (`rustline daemon run`) that keeps your config,
   theme, widget registry, and WASM plugins warm across tmux refreshes;
   renders fall back to the normal in-process path automatically whenever
   it's not running.
 - Install third-party WASM plugins straight from GitHub
   (`rustline plugin install owner/repo`), then grant only the capabilities they
-  need.
+  need — including, if you choose to, running a local command
+  (`allowed_commands`). See [Plugins](#plugins) below.
 - Seven built-in themes (a `default` plus six multi-accent, truecolor curated
   themes) selectable via `rustline theme use`, browsable interactively with
   `rustline theme pick`, plus a `theme new` scaffolder for tweaking your own
@@ -89,7 +94,9 @@ window list — in two-line mode the window list renders in a single batched
 so the bar updates immediately when you switch panes or windows, and — if you
 opt in — binds a left click on any clickable widget to toggle its `alt_format`
 (see [Click-to-toggle widget views](#click-to-toggle-widget-views) below) and
-turns on `set -g mouse on` for you.
+turns on `set -g mouse on` for you. It also binds `prefix + W` to open the
+interactive widget manager in a tmux popup — see [Widget
+manager](#widget-manager) below.
 
 - `rustline init --defaults` — non-interactive; recommended settings.
 - `rustline init --print` — just print the raw one-line tmux block to stdout
@@ -129,7 +136,10 @@ files against their current contents and asks you to confirm.
 >
 > **tmux requirement:** click-to-toggle needs tmux **≥ 3.1** (status-line
 > click ranges) and `set -g mouse on` in your tmux config — the wizard's mouse
-> question can turn that on for you, or you can set it yourself.
+> question can turn that on for you, or you can set it yourself. The `prefix +
+> W` widget-manager popup needs tmux **≥ 3.2** (`display-popup`); the status
+> line itself still only needs ≥ 3.1. `rustline doctor` checks both and warns
+> (never fails) if either is missing.
 
 ## Default layout
 
@@ -185,6 +195,49 @@ first if it doesn't exist); `rustline config validate` strictly parses it
 and reports any error with its location, unlike `Config::load`'s silent
 fallback to defaults. A global `--config <path>` flag points any subcommand
 at a different config file.
+
+### Widget manager
+
+Edit which widgets are enabled and where they sit without hand-editing
+`[layout]`:
+
+```bash
+rustline widget list                        # every widget + where it sits
+rustline widget list --json                  # same, as JSON, for scripting
+rustline widget enable git --region right    # add git to the right region
+rustline widget disable loadavg              # remove a widget
+rustline widget move git --region left       # relocate a placed widget
+rustline widget edit                         # interactive full-screen editor
+```
+
+`enable`/`move` insert at the end of the target region by default; pass
+`--index N` to place it elsewhere. An edit that would leave the layout
+unchanged, target an already-placed widget, or name something unknown is
+refused with an explanation and writes nothing.
+
+`rustline widget edit` opens a full-screen `ratatui` editor (needs a
+terminal): four columns — LEFT, CENTER, RIGHT, and AVAILABLE (everything not
+currently placed) — navigated with arrow keys or vim keys (`h`/`j`/`k`/`l`).
+`space`/`Enter` moves the selected widget between AVAILABLE and RIGHT (the
+only region AVAILABLE placement appends into); `J`/`K` reorders it within
+its current region; `H`/`L` (shifted, mirroring `J`/`K`) move a placed
+widget directly to the other editable region (LEFT ↔ RIGHT — this is how
+you get a widget into LEFT). A live preview strip along
+the bottom shows the region you're editing, rendered exactly as it would
+appear in tmux, updating as you make changes — before you've saved anything.
+`w` writes your changes to `config.toml`; `q` quits (asking to confirm first
+if you have unsaved changes); `?` shows a help overlay.
+
+In tmux, `prefix + W` opens this editor in a popup (`rustline init` wires
+this up for you — see [Enable in tmux](#enable-in-tmux) above), so you can
+tweak your layout without leaving your session.
+
+**CENTER is fixed.** tmux renders the window list there itself — nothing in
+`rustline` reads `[layout].center` at render time — so the interactive editor
+refuses to edit it (with an on-screen explanation) and the CLI (`widget
+enable|move --region center`) still writes the change, to keep the default
+`center = ["windows"]` round-trippable, but prints a note that it won't
+affect what you see on the bar.
 
 ### Multiple widget instances
 
@@ -820,19 +873,32 @@ function — the same `Context` in, `Segment`s out contract as a built-in
 widget, just crossing the wasm boundary as JSON.
 
 Everything a plugin can touch is capability-gated by the host: network
-requests and arbitrary file paths are checked against per-plugin allowlists in
-your config (`allowed_urls` / `allowed_paths`, each a glob or a `re:`-prefixed
-regex; `re:` patterns are anchored to a full-string match, so include `.*` for a
+requests, arbitrary file paths, and running local commands are checked
+against per-plugin allowlists in your config (`allowed_urls` / `allowed_paths`
+/ `allowed_commands`, each a glob or a `re:`-prefixed regex; `re:` patterns
+are anchored to a full-string match, so include `.*` for a
 prefix, e.g. `re:https://wttr\.in/.*`), and each plugin gets its own sandboxed
 state directory with a size
 quota (`max_state_bytes`, default 50 MB) for caching data between renders. The
-host also exposes a TTL-cached HTTP GET, so a plugin can fetch remote data at
-most once per interval without managing its own cache — the bundled `weather`
-example uses it. A plugin has no ambient access to anything — a disallowed
-request is simply refused, and any plugin error, timeout, or crash renders as
-an empty segment rather than breaking the status line.
+host also exposes a TTL-cached HTTP GET (and a TTL-cached exec — see below),
+so a plugin can fetch remote data or run a slow command at most once per
+interval without managing its own cache — the bundled `weather`
+example uses the former. A plugin has no ambient access to anything — a
+disallowed request is simply refused, and any plugin error, timeout, or
+crash renders as an empty segment rather than breaking the status line.
 
-Four worked examples ship under `plugins/`, each demonstrating a different
+**Plugin security, plainly:** an approved `allowed_commands` entry lets a
+plugin run a real program with **your own environment variables and user
+permissions** — the host does not sandbox the command itself, only *whether*
+it can run and *which* command lines. A pattern matches the **whole command
+line** (program plus every argument, not just the program name), so a grant
+for `git status*` does not cover `git push --force`. And there is **no shell**
+involved unless you explicitly grant one (`allowed_commands = ["sh -c *"]`)
+— the host always spawns the program directly, so nothing re-parses or
+word-splits what a plugin sends it. Only approve `allowed_commands` patterns
+you actually understand.
+
+Five worked examples ship under `plugins/`, each demonstrating a different
 host capability:
 
 | Plugin       | Capability                          | Renders                                  |
@@ -841,11 +907,12 @@ host capability:
 | `counter`    | `rl_state_read`/`rl_state_write`      | a count that persists across renders      |
 | `filewatch`  | `rl_file_read`                        | a configured file's first line + line count |
 | `httpget`    | `rl_http_get` (plain, uncached)       | a snippet of a fetched URL's body         |
+| `cmdrun`     | `rl_exec`/`rl_exec_cached`            | a snippet of a command's stdout           |
 
 Build and install any of them with the generic recipe:
 
 ```bash
-just build-plugin weather    # or counter / filewatch / httpget
+just build-plugin weather    # or counter / filewatch / httpget / cmdrun
 ```
 
 (`just build-weather` still works too — it's now just an alias for
@@ -898,10 +965,27 @@ format = "status: {body}"
 max_chars = 40
 ```
 
-All three of the newer examples also demonstrate `rl_log`: each logs a
+`cmdrun` needs a command allowlist (`allowed_commands`), matched against the
+whole command line:
+
+```toml
+[layout]
+right = ["cmdrun", "cwd", "datetime"]
+
+[plugins.cmdrun]
+allowed_commands = ["uname", "uname *"]  # program "uname", any args (globs match "*" literally, not a prefix)
+
+[plugins.cmdrun.options]
+program = "uname"
+args = ["-sr"]
+format = "{out}"
+```
+
+All four of the newer examples also demonstrate `rl_log`: each logs a
 `warn`-level message through the host's `tracing` subscriber on its one
-failure path (a denied/failed state write, an unreadable file, or a non-2xx
-HTTP response) rather than staying silent.
+failure path (a denied/failed state write, an unreadable file, a non-2xx HTTP
+response, or a denied/failed/non-zero-exit command) rather than staying
+silent.
 
 Manage a plugin's allowlists from the command line without hand-editing TOML:
 
@@ -910,16 +994,18 @@ rustline plugin list
 rustline plugin list --json                        # same info as a JSON array, for scripting
 rustline plugin url add weather "https://wttr.in/*"
 rustline plugin url list weather --json             # its allowed_urls as a JSON array of strings
+rustline plugin cmd add cmdrun "uname *"             # allowed_commands works the same way
 ```
 
 A plugin can also declare a capability *manifest* — a sidecar
 `<plugin_dir>/<name>.toml` (or an embedded `rustline-manifest` wasm custom
-section) listing the `allowed_urls`/`allowed_paths` it wants — so you don't
-have to hand-write them yourself:
+section) listing the `allowed_urls`/`allowed_paths`/`allowed_commands` it
+wants — so you don't have to hand-write them yourself:
 
 ```bash
 rustline plugin approve weather        # shows what it requests, asks to confirm
 rustline plugin approve weather --yes  # non-interactive; for scripts
+rustline plugin approve cmdrun         # commands get an extra, explicit warning
 ```
 
 `approve` writes exactly the requested patterns into
@@ -969,7 +1055,10 @@ version with the host, so a plugin built against an incompatible future ABI is
 skipped rather than loaded — existing plugins keep working.
 
 See the [design spec](docs/superpowers/specs/2026-07-20-rustline-wasm-plugins-design.md)
-for the full capability model, config schema, and plugin ABI.
+for the full capability model, config schema, and plugin ABI, and the
+[widget manager + exec capability design
+spec](docs/superpowers/specs/2026-07-24-rustline-widget-manager-and-exec-capability-design.md)
+for the exec capability's gating/bounds detail and the layout-editing CLI/TUI.
 
 [extism-pdk]: https://github.com/extism/rust-pdk
 
@@ -982,7 +1071,8 @@ See the full design specs:
 [CPU/memory widgets](docs/superpowers/specs/2026-07-21-rustline-cpu-memory-widgets-design.md),
 [click-to-toggle widgets](docs/superpowers/specs/2026-07-21-rustline-click-toggle-widgets-design.md),
 [themes/theme picker](docs/superpowers/specs/2026-07-21-rustline-themes-theme-picker-design.md),
-[whats-next bundle](docs/superpowers/specs/2026-07-22-rustline-whatsnext-bundle-design.md).
+[whats-next bundle](docs/superpowers/specs/2026-07-22-rustline-whatsnext-bundle-design.md),
+[widget manager + exec capability](docs/superpowers/specs/2026-07-24-rustline-widget-manager-and-exec-capability-design.md).
 
 ## License
 

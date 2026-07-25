@@ -1,6 +1,9 @@
-//! URL/path allow-patterns. Each entry is a glob by default, or a regex when
-//! prefixed with `re:`. Globs use `globset` defaults (`*` matches across `/`),
-//! so `https://wttr.in/*` matches the full URL incl. its query string.
+//! URL/path/command allow-patterns. Each entry is a glob by default, or a
+//! regex when prefixed with `re:`. Globs use `globset` defaults (`*` matches
+//! across `/`), so `https://wttr.in/*` matches the full URL incl. its query
+//! string, and `uname*` matches any argv string starting with `uname`
+//! (including `unamex`, `uname-anything`, etc. — see `allowed_commands`'
+//! own docs for the precision this implies for exec grants).
 
 use globset::{Glob, GlobMatcher};
 use regex::Regex;

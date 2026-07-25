@@ -51,6 +51,10 @@ pub enum Command {
     /// List, preview, select, or scaffold themes.
     #[command(subcommand)]
     Theme(ThemeCmd),
+    /// List, enable, disable, and reorder the widgets in the status line's
+    /// `[layout]` regions, or open the interactive editor.
+    #[command(subcommand)]
+    Widget(WidgetCmd),
     /// Resolve and dispatch a status-line click (invoked by the tmux
     /// `MouseDown{1,2,3}Status` bindings): the default left-click toggles a
     /// widget's alt view; a `[widgets.*.click]` binding can open a URL or run
@@ -137,6 +141,42 @@ pub enum ThemeCmd {
     },
 }
 
+/// List, enable, disable, and reorder the widgets in the status line's
+/// `[layout]` regions, or open the interactive editor.
+#[derive(Subcommand)]
+pub enum WidgetCmd {
+    /// List every widget (built-in, instance, plugin) and where it sits.
+    List {
+        /// Emit the list as a JSON array instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a widget to a layout region.
+    Enable {
+        name: String,
+        /// Which region to add it to. Default: `right`.
+        #[arg(long, default_value = "right")]
+        region: String,
+        /// Insert position within the region (clamped). Default: append.
+        #[arg(long)]
+        index: Option<usize>,
+    },
+    /// Remove a widget from whichever region holds it.
+    Disable { name: String },
+    /// Move a widget to another region and/or position.
+    Move {
+        name: String,
+        /// Destination region.
+        #[arg(long)]
+        region: String,
+        /// Destination position within the region (clamped). Default: append.
+        #[arg(long)]
+        index: Option<usize>,
+    },
+    /// Open the interactive widget editor (needs a TTY).
+    Edit,
+}
+
 /// Manage the config file: print its resolved path, open it in `$EDITOR`, or
 /// strictly validate it.
 #[derive(Subcommand)]
@@ -167,6 +207,10 @@ pub enum PluginCmd {
     /// Manage a plugin's filesystem-path allowlist.
     #[command(subcommand)]
     Path(PatternCmd),
+    /// Manage a plugin's command allowlist (the exec capability). Patterns are
+    /// matched against the whole canonical argv, not just the program.
+    #[command(subcommand)]
+    Cmd(PatternCmd),
     /// Approve a plugin's declared capability manifest into its allowlists.
     Approve(ApproveArgs),
     /// Download a plugin's `.wasm` from its GitHub release into the plugin dir

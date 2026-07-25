@@ -12,6 +12,7 @@ exclude = [
     "plugins/counter",
     "plugins/filewatch",
     "plugins/httpget",
+    "plugins/cmdrun",
 ]
 
 [workspace.package]

@@ -21,6 +21,11 @@ use crate::{daemon, daemon_client};
 /// ranges and the `mouse_status_range` format variable were added in 3.1.
 const MIN_TMUX_VERSION: (u32, u32) = (3, 1);
 
+/// tmux version at which `display-popup` became available — what the
+/// `prefix + W` widget-manager binding needs. Advisory only: the status line
+/// itself works on 3.1.
+const MIN_POPUP_TMUX_VERSION: (u32, u32) = (3, 2);
+
 /// The outcome of one doctor check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CheckStatus {
@@ -96,12 +101,16 @@ fn block_installed(tmux_conf_contents: &str) -> bool {
 /// rustline works without tmux); a parseable version below
 /// [`MIN_TMUX_VERSION`] is also a `Fail`; unparseable output is a `Warn`
 /// (tmux is clearly present, but this check can't confirm the version).
-fn check_tmux() -> Check {
+///
+/// Also returns the parsed version alongside the check, so [`check_popup`]'s
+/// advisory row can reuse it instead of shelling out to `tmux -V` again.
+fn check_tmux() -> (Check, Option<(u32, u32)>) {
     match Command::new("tmux").arg("-V").output() {
         Ok(output) => {
             let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            match parse_tmux_version(&text) {
-                Some(version) if version >= MIN_TMUX_VERSION => Check {
+            let version = parse_tmux_version(&text);
+            let check = match version {
+                Some(v) if v >= MIN_TMUX_VERSION => Check {
                     name: "tmux",
                     status: CheckStatus::Ok,
                     detail: format!("{text} detected"),
@@ -120,13 +129,47 @@ fn check_tmux() -> Check {
                     status: CheckStatus::Warn,
                     detail: format!("could not parse a version from tmux -V output: {text:?}"),
                 },
-            }
+            };
+            (check, version)
         }
-        Err(e) => Check {
-            name: "tmux",
-            status: CheckStatus::Fail,
-            detail: format!("tmux not found on PATH: {e}"),
-        },
+        Err(e) => (
+            Check {
+                name: "tmux",
+                status: CheckStatus::Fail,
+                detail: format!("tmux not found on PATH: {e}"),
+            },
+            None,
+        ),
+    }
+}
+
+/// Advisory status for the widget-manager popup binding: `Ok` at tmux >= 3.2,
+/// `Warn` below it or when the version can't be determined. Never `Fail` — a
+/// missing popup does not break the status line, so this must not affect
+/// doctor's exit code (the same shape as the daemon-reachability row).
+fn popup_status(version: Option<(u32, u32)>) -> CheckStatus {
+    match version {
+        Some(v) if v >= MIN_POPUP_TMUX_VERSION => CheckStatus::Ok,
+        _ => CheckStatus::Warn,
+    }
+}
+
+/// Whether the `prefix + W` widget-manager popup binding (emitted
+/// unconditionally by `rustline init`, see
+/// `tmux_conf`'s `WIDGET_POPUP_BINDING`) will actually work: `display-popup`
+/// needs tmux >= [`MIN_POPUP_TMUX_VERSION`]. Takes the version [`check_tmux`]
+/// already parsed rather than shelling out to `tmux -V` a second time.
+fn check_popup(version: Option<(u32, u32)>) -> Check {
+    let status = popup_status(version);
+    let detail = if status == CheckStatus::Ok {
+        "display-popup available (prefix + W opens the widget manager)"
+    } else {
+        "prefix + W widget manager needs tmux >= 3.2 (display-popup); the status line itself works"
+    };
+    Check {
+        name: "widget manager popup",
+        status,
+        detail: detail.to_string(),
     }
 }
 
@@ -312,13 +355,15 @@ pub(crate) fn run(paths: &DoctorPaths) -> i32 {
     let config_dir = paths.config.parent().unwrap_or(paths.config);
     let log_dir = paths.log_file.parent().unwrap_or(paths.log_file);
 
+    let (tmux_check, tmux_version) = check_tmux();
     let checks = [
-        check_tmux(),
+        tmux_check,
         check_mouse(),
         check_truecolor(),
         check_binary_on_path(),
         check_managed_block(paths.tmux_conf),
         check_daemon(),
+        check_popup(tmux_version),
         check_dir("config dir", config_dir),
         check_dir("themes dir", paths.themes_dir),
         check_dir("plugin dir", paths.plugin_dir),
@@ -403,5 +448,13 @@ mod tests {
         let with_block = format!("before\n{TMUX_BEGIN}\nBLOCK\n{TMUX_END}\nafter\n");
         assert!(block_installed(&with_block));
         assert!(!block_installed("no markers here"));
+    }
+
+    #[test]
+    fn popup_support_passes_at_3_2_and_warns_below() {
+        assert_eq!(popup_status(Some((3, 2))), CheckStatus::Ok);
+        assert_eq!(popup_status(Some((3, 4))), CheckStatus::Ok);
+        assert_eq!(popup_status(Some((3, 1))), CheckStatus::Warn);
+        assert_eq!(popup_status(None), CheckStatus::Warn);
     }
 }

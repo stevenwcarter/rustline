@@ -2065,3 +2065,615 @@ fn daemon_status_with_no_daemon_running_exits_nonzero() {
         "prints \"not running\": {stderr}"
     );
 }
+
+/// `rustline widget …` — enable/disable/move against the `[layout]` arrays,
+/// exercising `widget_cmd.rs`'s `toml_edit`-backed writer end to end through
+/// the real binary (Finding 2: previously pinned only by a manual transcript).
+
+#[test]
+fn widget_enable_adds_widget_to_a_region() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(&cfg, "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\"]\n").unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "enable", "git", "--region", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    assert!(after.contains("git"), "git added to right region: {after}");
+}
+
+/// The load-bearing contract: a refused edit writes nothing at all.
+#[test]
+fn widget_enable_already_present_refuses_and_writes_nothing() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    let original = "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\", \"git\"]\n";
+    fs::write(&cfg, original).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "enable", "git", "--region", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        !out.status.success(),
+        "enabling an already-placed widget must be refused"
+    );
+    assert_eq!(
+        fs::read_to_string(&cfg).unwrap().as_bytes(),
+        original.as_bytes(),
+        "config file left byte-for-byte unchanged by a refused edit"
+    );
+}
+
+#[test]
+fn widget_enable_unknown_name_refuses_and_lists_available() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    let original = "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\"]\n";
+    fs::write(&cfg, original).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "enable", "not_a_real_widget"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(!out.status.success(), "unknown widget name must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not_a_real_widget"),
+        "names the bad widget: {stderr}"
+    );
+    assert!(stderr.contains("cwd"), "lists available widgets: {stderr}");
+    assert_eq!(
+        fs::read_to_string(&cfg).unwrap(),
+        original,
+        "config file left unchanged"
+    );
+}
+
+#[test]
+fn widget_enable_unknown_region_refuses() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    let original = "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\"]\n";
+    fs::write(&cfg, original).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "enable", "git", "--region", "nope"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(!out.status.success(), "unknown region must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("nope"), "names the bad region: {stderr}");
+    assert_eq!(
+        fs::read_to_string(&cfg).unwrap(),
+        original,
+        "config file left unchanged"
+    );
+}
+
+#[test]
+fn widget_disable_removes_widget_and_exits_ok() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\", \"git\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "disable", "git"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    assert!(!after.contains("git"), "git removed: {after}");
+    assert!(after.contains("cwd"), "cwd still present: {after}");
+}
+
+/// `widget move <name> --region <r>` with no `--index` must append (the
+/// `usize::MAX` sentinel flowing into `layout_move`'s clamp), not prepend.
+#[test]
+fn widget_move_without_index_appends_to_destination_region() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "[layout]\nleft = [\"pane_id\", \"git\"]\nright = [\"cwd\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "move", "git", "--region", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    let right_line = after
+        .lines()
+        .find(|l| l.trim_start().starts_with("right"))
+        .expect("right line present");
+    let cwd_pos = right_line.find("cwd").expect("cwd present");
+    let git_pos = right_line.find("git").expect("git present");
+    assert!(
+        git_pos > cwd_pos,
+        "git appended after cwd (not prepended): {right_line}"
+    );
+    let left_line = after
+        .lines()
+        .find(|l| l.trim_start().starts_with("left"))
+        .expect("left line present");
+    assert!(
+        !left_line.contains("git"),
+        "git removed from its old region: {left_line}"
+    );
+}
+
+#[test]
+fn widget_enable_preserves_comments_in_config() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "# my rustline config\n[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\"]\n\n\
+         [widgets.cpu]\nformat = \"{percent}\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "enable", "git", "--region", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    assert!(
+        after.contains("# my rustline config"),
+        "comment preserved: {after}"
+    );
+    assert!(
+        after.contains("[widgets.cpu]"),
+        "other table preserved: {after}"
+    );
+    assert!(after.contains("git"), "widget added: {after}");
+}
+
+/// Finding 1 repro (positive path): `layout = { ... }` (an inline table) is
+/// valid config that `Config::load`/`print-config` round-trip fine, and must
+/// be edited correctly rather than silently discarded or refused.
+#[test]
+fn widget_enable_on_inline_table_layout_edits_correctly() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "layout = { left = [\"pane_id\"], right = [\"cwd\"] }\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "enable", "git", "--region", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "inline-table layout must be edited, not refused/panicked; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_ne!(out.status.code(), Some(101), "must not panic");
+    let after = fs::read_to_string(&cfg).unwrap();
+    assert!(after.contains("git"), "widget added: {after}");
+    assert!(after.contains("pane_id"), "left untouched: {after}");
+}
+
+/// Finding 1 repro (negative path): a genuinely non-table `layout` value
+/// (`layout = "oops"`) must exit 1 cleanly — never panic (exit 101) — and
+/// leave the file untouched.
+#[test]
+fn widget_enable_on_scalar_layout_refuses_without_panicking() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    let original = "layout = \"oops\"\n";
+    fs::write(&cfg, original).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "enable", "git", "--region", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "clean refusal, not a panic (exit 101); stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "must not panic: stderr={stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(&cfg).unwrap(),
+        original,
+        "config file left byte-for-byte unchanged"
+    );
+}
+
+/// `widget enable --region center` and `widget move --region center` must
+/// NOT be refused — `center = ["windows"]` is the default config and has to
+/// stay writable so a legitimate round-trip (e.g. re-writing the default
+/// layout, or a config generated by another tool) never breaks. They must,
+/// however, warn on stderr that tmux renders the window list in CENTER
+/// itself, so a user isn't left wondering why the edit had no visible effect
+/// on the rendered bar.
+#[test]
+fn widget_enable_region_center_still_writes_and_warns() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "[layout]\nleft = [\"pane_id\"]\ncenter = [\"windows\"]\nright = [\"cwd\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "enable", "git", "--region", "center"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "a center edit must still succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    assert!(after.contains("git"), "git added to center: {after}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("center") && stderr.contains("window"),
+        "warns that tmux owns the window list in center: {stderr}"
+    );
+}
+
+/// Same warn-but-succeed contract for `widget move --region center`.
+#[test]
+fn widget_move_region_center_still_writes_and_warns() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "[layout]\nleft = [\"pane_id\", \"git\"]\ncenter = [\"windows\"]\nright = [\"cwd\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "move", "git", "--region", "center"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "a center edit must still succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    let center_line = after
+        .lines()
+        .find(|l| l.trim_start().starts_with("center"))
+        .expect("center line present");
+    assert!(
+        center_line.contains("git"),
+        "git moved into center: {after}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("center") && stderr.contains("window"),
+        "warns that tmux owns the window list in center: {stderr}"
+    );
+}
+
+/// Same warn-but-succeed contract for `widget disable` of a widget that was
+/// sitting in center — `widget disable` has no `--region` flag, so the
+/// warning must be keyed off the region `layout_disable` actually removed
+/// the widget from.
+#[test]
+fn widget_disable_from_center_still_writes_and_warns() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "[layout]\nleft = [\"pane_id\"]\ncenter = [\"windows\"]\nright = [\"cwd\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "disable", "windows"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "a center edit must still succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    let center_line = after
+        .lines()
+        .find(|l| l.trim_start().starts_with("center"))
+        .expect("center line present");
+    assert!(
+        !center_line.contains("windows"),
+        "windows removed from center: {after}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("center") && stderr.contains("window"),
+        "warns that tmux owns the window list in center: {stderr}"
+    );
+}
+
+/// I4: `disable` must operate on a placed name regardless of whether the
+/// widget catalog (built-ins + instances + discovered plugins) recognizes
+/// it — a layout can name a plugin whose `.wasm` is no longer present (a
+/// fresh clone, an empty plugin dir, `plugin remove` without cleaning up
+/// the layout), and the CLI must still be able to remove it.
+#[test]
+fn widget_disable_removes_a_placed_but_unknown_entry_and_exits_ok() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\", \"ghostwidget\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "disable", "ghostwidget"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "disable of a placed-but-unrecognized name must succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    assert!(!after.contains("ghostwidget"), "removed: {after}");
+    assert!(after.contains("cwd"), "cwd still present: {after}");
+}
+
+/// `move` must have the same "operates on what's placed, regardless of
+/// catalog membership" behavior as `disable`.
+#[test]
+fn widget_move_relocates_a_placed_but_unknown_entry() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "[layout]\nleft = [\"pane_id\", \"ghostwidget\"]\nright = [\"cwd\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "move", "ghostwidget", "--region", "right"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "move of a placed-but-unrecognized name must succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    let left_line = after
+        .lines()
+        .find(|l| l.trim_start().starts_with("left"))
+        .expect("left line present");
+    assert!(
+        !left_line.contains("ghostwidget"),
+        "removed from its old region: {left_line}"
+    );
+    let right_line = after
+        .lines()
+        .find(|l| l.trim_start().starts_with("right"))
+        .expect("right line present");
+    assert!(
+        right_line.contains("ghostwidget"),
+        "present in its new region: {right_line}"
+    );
+}
+
+/// `enable` is the one verb that can introduce a name not already in the
+/// layout, so it alone must still refuse an unrecognized name — otherwise a
+/// typo would silently write garbage into `[layout]`.
+#[test]
+fn widget_enable_of_an_unknown_name_still_refuses() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    let original = "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\"]\n";
+    fs::write(&cfg, original).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "enable", "totally-bogus"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        !out.status.success(),
+        "enable of a name that isn't placed anywhere and isn't in the \
+         catalog must still be refused"
+    );
+    assert_eq!(
+        fs::read_to_string(&cfg).unwrap(),
+        original,
+        "config file left unchanged"
+    );
+}
+
+/// Skipping the catalog check for `disable`/`move` (RequireKnown::No) must
+/// not weaken their existing refusal of a name that isn't placed *anywhere*
+/// (not even as an unrecognized layout entry) — `layout_disable`'s own
+/// `LayoutEditError::NotPresent` is still the backstop.
+#[test]
+fn widget_disable_of_a_name_placed_nowhere_still_refuses_and_writes_nothing() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    let original = "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\"]\n";
+    fs::write(&cfg, original).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "disable", "never-placed-anywhere"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        !out.status.success(),
+        "disable of a name that was never placed anywhere must be refused"
+    );
+    assert_eq!(
+        fs::read_to_string(&cfg).unwrap(),
+        original,
+        "config file left unchanged"
+    );
+}
+
+/// `widget list`/`widget list --json` must surface a placed-but-unrecognized
+/// entry, clearly flagged, rather than silently under-reporting the layout.
+#[test]
+fn widget_list_surfaces_a_placed_but_unknown_entry() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\", \"ghostwidget\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "list"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ghostwidget"),
+        "the placed-but-unrecognized name is listed: {stdout}"
+    );
+    assert!(
+        stdout.contains("unknown"),
+        "it's clearly flagged as unknown: {stdout}"
+    );
+
+    let mut json_cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    json_cmd
+        .args(["widget", "list", "--json"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut json_cmd, tmp.path());
+    let json_out = json_cmd.output().unwrap();
+    assert!(json_out.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&json_out.stdout).unwrap();
+    let rows = parsed.as_array().expect("top-level array");
+    let ghost = rows
+        .iter()
+        .find(|r| r["name"] == "ghostwidget")
+        .expect("ghostwidget present in --json output");
+    assert_eq!(ghost["source"], "unknown");
+    assert_eq!(ghost["region"], "right");
+}
+
+/// A disable out of `left`/`right` must NOT print the center warning — guards
+/// against a version of the fix that warns unconditionally on every disable.
+#[test]
+fn widget_disable_from_non_center_region_prints_no_center_warning() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let cfg = cfgdir.join("config.toml");
+    fs::write(
+        &cfg,
+        "[layout]\nleft = [\"pane_id\"]\nright = [\"cwd\", \"git\"]\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["widget", "disable", "git"])
+        .env("XDG_CONFIG_HOME", tmp.path());
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "exit ok; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = fs::read_to_string(&cfg).unwrap();
+    assert!(!after.contains("git"), "git removed: {after}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("center"),
+        "no center warning for a non-center disable: {stderr}"
+    );
+}

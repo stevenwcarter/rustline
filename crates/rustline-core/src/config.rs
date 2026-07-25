@@ -18,12 +18,13 @@ use toml::Value;
 
 use crate::Color;
 use crate::render::Theme;
+use crate::widget::{WidgetDescriptor, WidgetSource};
 
 /// Which widgets render in each region of the status bar, by name.
 ///
 /// Names are resolved against a [`crate::widget::Registry`] at render time;
 /// an unknown name is skipped there, not a config error.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     #[serde(default = "default_left")]
     pub left: Vec<String>,
@@ -59,6 +60,323 @@ impl Default for Layout {
             right: default_right(),
         }
     }
+}
+
+/// Which of the three layout arrays a widget sits in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Region {
+    Left,
+    Center,
+    Right,
+}
+
+impl Region {
+    /// Every region, in visual left-to-right order.
+    pub const ALL: [Region; 3] = [Region::Left, Region::Center, Region::Right];
+
+    /// The config-key spelling, and what `--region` accepts.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Region::Left => "left",
+            Region::Center => "center",
+            Region::Right => "right",
+        }
+    }
+
+    /// Parse a `--region` value, case-insensitively. `None` if unrecognized.
+    pub fn parse(s: &str) -> Option<Region> {
+        match s.to_ascii_lowercase().as_str() {
+            "left" => Some(Region::Left),
+            "center" => Some(Region::Center),
+            "right" => Some(Region::Right),
+            _ => None,
+        }
+    }
+}
+
+/// Why a layout edit was refused. Every variant means **nothing was mutated**.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayoutEditError {
+    /// The name is already placed, at this region/index. A widget may appear
+    /// at most once across all three regions: two copies would share one
+    /// click-toggle/range identity (invariant #7).
+    AlreadyPresent { region: Region, index: usize },
+    /// The name is not in any region.
+    NotPresent,
+    /// The edit would leave the layout exactly as it is.
+    NoOp,
+}
+
+impl std::fmt::Display for LayoutEditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LayoutEditError::AlreadyPresent { region, index } => {
+                write!(
+                    f,
+                    "already in the {} region at position {index}",
+                    region.as_str()
+                )
+            }
+            LayoutEditError::NotPresent => write!(f, "not in any layout region"),
+            LayoutEditError::NoOp => write!(f, "already in that position; nothing to do"),
+        }
+    }
+}
+
+/// A completed layout edit, described so a caller can report it without
+/// diffing. `from`/`to` are `None` for an add/remove respectively.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutChange {
+    pub name: String,
+    pub from: Option<(Region, usize)>,
+    pub to: Option<(Region, usize)>,
+}
+
+impl Layout {
+    /// This region's widget names, in visual left-to-right order (invariant #5).
+    pub fn get(&self, r: Region) -> &[String] {
+        match r {
+            Region::Left => &self.left,
+            Region::Center => &self.center,
+            Region::Right => &self.right,
+        }
+    }
+
+    pub fn get_mut(&mut self, r: Region) -> &mut Vec<String> {
+        match r {
+            Region::Left => &mut self.left,
+            Region::Center => &mut self.center,
+            Region::Right => &mut self.right,
+        }
+    }
+
+    /// Where `name` currently sits, if anywhere. A name appears at most once.
+    pub fn find(&self, name: &str) -> Option<(Region, usize)> {
+        Region::ALL.into_iter().find_map(|r| {
+            self.get(r)
+                .iter()
+                .position(|n| n == name)
+                .map(|idx| (r, idx))
+        })
+    }
+}
+
+/// Place `name` in `region`, at `at` (clamped to the region's length) or
+/// appended when `at` is `None`.
+pub fn layout_enable(
+    layout: &mut Layout,
+    name: &str,
+    region: Region,
+    at: Option<usize>,
+) -> Result<LayoutChange, LayoutEditError> {
+    if let Some((region, index)) = layout.find(name) {
+        return Err(LayoutEditError::AlreadyPresent { region, index });
+    }
+    let target = layout.get_mut(region);
+    let index = at.unwrap_or(target.len()).min(target.len());
+    target.insert(index, name.to_string());
+    Ok(LayoutChange {
+        name: name.to_string(),
+        from: None,
+        to: Some((region, index)),
+    })
+}
+
+/// Remove `name` from whichever region holds it.
+pub fn layout_disable(layout: &mut Layout, name: &str) -> Result<LayoutChange, LayoutEditError> {
+    let (region, index) = layout.find(name).ok_or(LayoutEditError::NotPresent)?;
+    layout.get_mut(region).remove(index);
+    Ok(LayoutChange {
+        name: name.to_string(),
+        from: Some((region, index)),
+        to: None,
+    })
+}
+
+/// Move `name` to `to`/`to_index` (index clamped to the destination length,
+/// so a large index means "append").
+pub fn layout_move(
+    layout: &mut Layout,
+    name: &str,
+    to: Region,
+    to_index: usize,
+) -> Result<LayoutChange, LayoutEditError> {
+    let from = layout.find(name).ok_or(LayoutEditError::NotPresent)?;
+    layout.get_mut(from.0).remove(from.1);
+    // Clamp against the length *after* removal, so a same-region move to the
+    // end lands at the last slot rather than out of bounds.
+    let dest = layout.get_mut(to);
+    let index = to_index.min(dest.len());
+    if from == (to, index) {
+        // Restore and refuse: nothing would change.
+        layout.get_mut(from.0).insert(from.1, name.to_string());
+        return Err(LayoutEditError::NoOp);
+    }
+    layout.get_mut(to).insert(index, name.to_string());
+    Ok(LayoutChange {
+        name: name.to_string(),
+        from: Some(from),
+        to: Some((to, index)),
+    })
+}
+
+/// Shift `name` by `delta` positions inside its current region. A step past
+/// either end is [`LayoutEditError::NoOp`] — never a wrap-around.
+pub fn layout_nudge(
+    layout: &mut Layout,
+    name: &str,
+    delta: i32,
+) -> Result<LayoutChange, LayoutEditError> {
+    let (region, index) = layout.find(name).ok_or(LayoutEditError::NotPresent)?;
+    let len = layout.get(region).len();
+    let target = i64::from(delta) + index as i64;
+    if target < 0 || target >= len as i64 {
+        return Err(LayoutEditError::NoOp);
+    }
+    let target = target as usize;
+    let arr = layout.get_mut(region);
+    let name_owned = arr.remove(index);
+    arr.insert(target, name_owned);
+    Ok(LayoutChange {
+        name: name.to_string(),
+        from: Some((region, index)),
+        to: Some((region, target)),
+    })
+}
+
+/// One row of `widget list` / one entry in the TUI: a selectable widget, what
+/// it is, and where (if anywhere) it currently sits in the layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WidgetPlacement {
+    pub name: String,
+    pub summary: String,
+    pub source: WidgetSource,
+    /// `None` means "available but not currently in any region".
+    pub placement: Option<(Region, usize)>,
+}
+
+/// Every widget a user could put in a layout, with its current placement.
+///
+/// Ordering is built-ins (in registration order) → instances (sorted) →
+/// plugin stems (sorted) → placed-but-unrecognized names (sorted), which is
+/// also the order `widget list` prints and the
+/// TUI's AVAILABLE column shows. This is enforced by partitioning on each
+/// candidate's [`WidgetSource`] rather than by which of the four inputs
+/// below it arrived through — a candidate's `source` (trustworthy since
+/// `Registry::with_builtins` labels every `[instances.<name>]` descriptor
+/// `WidgetSource::Instance`, not `Builtin`) decides its group, and only
+/// group order is fixed; within the instance/plugin/unknown groups, names are
+/// always sorted regardless of `descriptors`' own order (which for instances
+/// reflects a `Registry`'s `HashMap<String, Value>` iteration over
+/// `cfg.instances`, itself unspecified). An `[instances.<name>]` entry whose
+/// name collides with a built-in is skipped — built-in always wins, the same
+/// precedence `Registry::with_builtins` and `is_builtin_widget_name` enforce.
+///
+/// The fourth group, [`WidgetSource::Unknown`], is populated differently from
+/// the other three: instead of scanning a catalog and looking up its
+/// placement, it scans `cfg.layout` itself for any name the first three
+/// passes never classified (e.g. a plugin whose `.wasm` is no longer present,
+/// or a stale name left behind after `plugin remove`) — so `widget_placements`
+/// always accounts for every name actually sitting in `[layout]`, not just
+/// the ones a live registry/plugin-dir scan currently recognizes. This is
+/// what lets `widget list`/`widget edit` show — and `widget disable`/`widget
+/// move` operate on — a placed widget the catalog doesn't otherwise know
+/// about; only `widget enable` (adding a *new*, unplaced name) still requires
+/// catalog membership, since an unplaced name never reaches this scan.
+pub fn widget_placements(
+    cfg: &Config,
+    descriptors: &[WidgetDescriptor],
+    plugin_names: &[String],
+) -> Vec<WidgetPlacement> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    // Built-ins keep the order they're first seen in (a `Registry`'s
+    // registration order); instances, plugins, and unknowns are sorted by
+    // name below, so their intake order here doesn't matter.
+    let mut builtins: Vec<(String, String, WidgetSource)> = Vec::new();
+    let mut instances: Vec<(String, String, WidgetSource)> = Vec::new();
+    let mut plugins: Vec<(String, String, WidgetSource)> = Vec::new();
+    let mut unknown: Vec<(String, String, WidgetSource)> = Vec::new();
+
+    // First candidate for a name wins (a later duplicate, e.g. a name
+    // appearing in both `descriptors` and `plugin_names`, is dropped);
+    // deduped entries are then sorted into one of the four ordering groups
+    // by their own `source`, never by which pass produced them.
+    let mut classify = |name: String, summary: String, source: WidgetSource| {
+        if !seen.insert(name.clone()) {
+            return;
+        }
+        match &source {
+            WidgetSource::Builtin => builtins.push((name, summary, source)),
+            WidgetSource::Instance { .. } => instances.push((name, summary, source)),
+            WidgetSource::Plugin => plugins.push((name, summary, source)),
+            WidgetSource::Unknown => unknown.push((name, summary, source)),
+        }
+    };
+
+    for d in descriptors {
+        classify(d.name.clone(), d.summary.clone(), d.source.clone());
+    }
+    // A dedicated scan over `cfg.instances` covers a caller that passes
+    // `descriptors` without having run `Registry::with_builtins` first (e.g.
+    // a bare `&[]`) — the instance is still offered, just via this pass
+    // instead of arriving pre-labeled.
+    let mut instance_entries: Vec<(&String, &Value)> = cfg.instances.iter().collect();
+    instance_entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, value) in instance_entries {
+        if is_builtin_widget_name(name) {
+            continue;
+        }
+        let Some(kind) = Config::instance_kind(value) else {
+            continue;
+        };
+        classify(
+            name.clone(),
+            format!("{kind} instance"),
+            WidgetSource::Instance {
+                kind: kind.to_string(),
+            },
+        );
+    }
+    for name in plugin_names {
+        classify(
+            name.clone(),
+            "wasm plugin".to_string(),
+            WidgetSource::Plugin,
+        );
+    }
+    // Anything still placed in the layout after the three catalog passes
+    // above is a name none of them recognized — surface it rather than
+    // silently dropping it (see the doc comment above).
+    for region in Region::ALL {
+        for name in cfg.layout.get(region) {
+            classify(
+                name.clone(),
+                "placed but not a recognized widget (unknown)".to_string(),
+                WidgetSource::Unknown,
+            );
+        }
+    }
+
+    instances.sort_by(|a, b| a.0.cmp(&b.0));
+    plugins.sort_by(|a, b| a.0.cmp(&b.0));
+    unknown.sort_by(|a, b| a.0.cmp(&b.0));
+
+    builtins
+        .into_iter()
+        .chain(instances)
+        .chain(plugins)
+        .chain(unknown)
+        .map(|(name, summary, source)| {
+            let placement = cfg.layout.find(&name);
+            WidgetPlacement {
+                name,
+                summary,
+                source,
+                placement,
+            }
+        })
+        .collect()
 }
 
 /// Options for the `datetime` widget.
@@ -1052,9 +1370,9 @@ impl<'de> Deserialize<'de> for PluginSource {
 
 /// Per-plugin configuration, keyed by plugin name in [`Config::plugins`].
 ///
-/// Capability fields (`allowed_urls`, `allowed_paths`, `max_state_bytes`) are
-/// enforced by the WASM host, never by the guest. `options` is opaque to the
-/// host and forwarded to the plugin verbatim.
+/// Capability fields (`allowed_urls`, `allowed_paths`, `allowed_commands`,
+/// `max_state_bytes`) are enforced by the WASM host, never by the guest.
+/// `options` is opaque to the host and forwarded to the plugin verbatim.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PluginConfig {
     #[serde(default)]
@@ -1063,6 +1381,13 @@ pub struct PluginConfig {
     pub allowed_urls: Vec<String>,
     #[serde(default)]
     pub allowed_paths: Vec<String>,
+    /// Command allow-patterns for the exec capability. Each entry is a glob by
+    /// default, or a regex when prefixed `re:`, matched against the
+    /// **canonical argv string** (`rustline_wasm::canonical_argv`) — the whole
+    /// command line, not just the program. Empty (the default) matches
+    /// nothing: deny by default, like the other two allowlists.
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
     #[serde(default = "default_max_state_bytes")]
     pub max_state_bytes: u64,
     /// sha256 hex of the installed `.wasm`, recorded by `plugin install`/
@@ -1092,6 +1417,7 @@ impl Default for PluginConfig {
             source: None,
             allowed_urls: Vec::new(),
             allowed_paths: Vec::new(),
+            allowed_commands: Vec::new(),
             max_state_bytes: default_max_state_bytes(),
             checksum: None,
             tag: None,
@@ -2700,5 +3026,433 @@ mount = "/data"
         );
         let mounts = c.disk_mounts(&["cpu".into()]);
         assert!(!mounts.contains("/hijack"));
+    }
+
+    fn sample_layout() -> Layout {
+        Layout {
+            left: vec!["pane_id".into(), "hostname".into()],
+            center: vec!["windows".into()],
+            right: vec!["cwd".into(), "cpu".into(), "datetime".into()],
+        }
+    }
+
+    #[test]
+    fn region_parse_is_case_insensitive_and_round_trips() {
+        assert_eq!(Region::parse("LEFT"), Some(Region::Left));
+        assert_eq!(Region::parse("Center"), Some(Region::Center));
+        assert_eq!(Region::parse("right"), Some(Region::Right));
+        assert_eq!(Region::parse("middle"), None);
+        for r in Region::ALL {
+            assert_eq!(Region::parse(r.as_str()), Some(r));
+        }
+    }
+
+    #[test]
+    fn find_locates_a_widget_in_any_region() {
+        let l = sample_layout();
+        assert_eq!(l.find("hostname"), Some((Region::Left, 1)));
+        assert_eq!(l.find("windows"), Some((Region::Center, 0)));
+        assert_eq!(l.find("datetime"), Some((Region::Right, 2)));
+        assert_eq!(l.find("git"), None);
+    }
+
+    #[test]
+    fn enable_appends_when_index_is_none() {
+        let mut l = sample_layout();
+        let change = layout_enable(&mut l, "git", Region::Right, None).unwrap();
+        assert_eq!(l.right, ["cwd", "cpu", "datetime", "git"]);
+        assert_eq!(change.from, None);
+        assert_eq!(change.to, Some((Region::Right, 3)));
+    }
+
+    #[test]
+    fn enable_inserts_at_a_clamped_index() {
+        let mut l = sample_layout();
+        layout_enable(&mut l, "git", Region::Right, Some(1)).unwrap();
+        assert_eq!(l.right, ["cwd", "git", "cpu", "datetime"]);
+
+        let mut l2 = sample_layout();
+        layout_enable(&mut l2, "git", Region::Right, Some(99)).unwrap();
+        assert_eq!(l2.right, ["cwd", "cpu", "datetime", "git"]);
+    }
+
+    #[test]
+    fn enable_rejects_a_name_already_present_in_another_region_and_does_not_mutate() {
+        let mut l = sample_layout();
+        let before = l.clone();
+        let err = layout_enable(&mut l, "hostname", Region::Right, None).unwrap_err();
+        assert_eq!(
+            err,
+            LayoutEditError::AlreadyPresent {
+                region: Region::Left,
+                index: 1
+            }
+        );
+        assert_eq!(l, before, "error path must not mutate");
+    }
+
+    #[test]
+    fn disable_removes_and_reports_where_it_was() {
+        let mut l = sample_layout();
+        let change = layout_disable(&mut l, "cpu").unwrap();
+        assert_eq!(l.right, ["cwd", "datetime"]);
+        assert_eq!(change.from, Some((Region::Right, 1)));
+        assert_eq!(change.to, None);
+    }
+
+    #[test]
+    fn disable_of_an_absent_name_errors_without_mutating() {
+        let mut l = sample_layout();
+        let before = l.clone();
+        assert_eq!(
+            layout_disable(&mut l, "git").unwrap_err(),
+            LayoutEditError::NotPresent
+        );
+        assert_eq!(l, before);
+    }
+
+    #[test]
+    fn move_across_regions_removes_from_the_old_one() {
+        let mut l = sample_layout();
+        let change = layout_move(&mut l, "hostname", Region::Right, 0).unwrap();
+        assert_eq!(l.left, ["pane_id"]);
+        assert_eq!(l.right, ["hostname", "cwd", "cpu", "datetime"]);
+        assert_eq!(change.from, Some((Region::Left, 1)));
+        assert_eq!(change.to, Some((Region::Right, 0)));
+    }
+
+    #[test]
+    fn move_within_a_region_reindexes_correctly() {
+        let mut l = sample_layout();
+        layout_move(&mut l, "cwd", Region::Right, 2).unwrap();
+        assert_eq!(l.right, ["cpu", "datetime", "cwd"]);
+    }
+
+    #[test]
+    fn move_clamps_an_out_of_range_index_instead_of_erroring() {
+        let mut l = sample_layout();
+        layout_move(&mut l, "cwd", Region::Right, 99).unwrap();
+        assert_eq!(l.right, ["cpu", "datetime", "cwd"]);
+    }
+
+    #[test]
+    fn move_to_where_it_already_is_is_a_noop_error() {
+        let mut l = sample_layout();
+        let before = l.clone();
+        assert_eq!(
+            layout_move(&mut l, "cpu", Region::Right, 1).unwrap_err(),
+            LayoutEditError::NoOp
+        );
+        assert_eq!(l, before);
+    }
+
+    #[test]
+    fn nudge_moves_one_step_inside_its_own_region() {
+        let mut l = sample_layout();
+        layout_nudge(&mut l, "cpu", -1).unwrap();
+        assert_eq!(l.right, ["cpu", "cwd", "datetime"]);
+        layout_nudge(&mut l, "cpu", 1).unwrap();
+        assert_eq!(l.right, ["cwd", "cpu", "datetime"]);
+    }
+
+    #[test]
+    fn nudge_at_a_region_boundary_is_a_noop_not_a_wraparound() {
+        let mut l = sample_layout();
+        let before = l.clone();
+        assert_eq!(
+            layout_nudge(&mut l, "cwd", -1).unwrap_err(),
+            LayoutEditError::NoOp
+        );
+        assert_eq!(
+            layout_nudge(&mut l, "datetime", 1).unwrap_err(),
+            LayoutEditError::NoOp
+        );
+        assert_eq!(l, before);
+    }
+
+    #[test]
+    fn nudge_of_an_absent_name_errors() {
+        let mut l = sample_layout();
+        assert_eq!(
+            layout_nudge(&mut l, "git", 1).unwrap_err(),
+            LayoutEditError::NotPresent
+        );
+    }
+
+    #[test]
+    fn placements_mark_where_each_widget_sits_and_leave_the_rest_unplaced() {
+        let cfg = Config {
+            layout: Layout {
+                left: vec!["pane_id".into()],
+                center: vec![],
+                right: vec!["cpu".into(), "weather".into()],
+            },
+            ..Default::default()
+        };
+        let descriptors = vec![
+            WidgetDescriptor {
+                name: "pane_id".into(),
+                summary: "pane id".into(),
+                configurable: true,
+                source: WidgetSource::Builtin,
+            },
+            WidgetDescriptor {
+                name: "cpu".into(),
+                summary: "cpu usage".into(),
+                configurable: true,
+                source: WidgetSource::Builtin,
+            },
+            WidgetDescriptor {
+                name: "git".into(),
+                summary: "git branch".into(),
+                configurable: true,
+                source: WidgetSource::Builtin,
+            },
+        ];
+        let out = widget_placements(&cfg, &descriptors, &["weather".to_string()]);
+
+        let by = |n: &str| out.iter().find(|p| p.name == n).unwrap().clone();
+        assert_eq!(by("pane_id").placement, Some((Region::Left, 0)));
+        assert_eq!(by("cpu").placement, Some((Region::Right, 0)));
+        assert_eq!(by("git").placement, None);
+        assert_eq!(by("weather").placement, Some((Region::Right, 1)));
+        assert_eq!(by("weather").source, WidgetSource::Plugin);
+    }
+
+    #[test]
+    fn placements_include_instances_with_their_kind() {
+        let mut cfg = Config {
+            layout: Layout {
+                left: vec![],
+                center: vec![],
+                right: vec!["clock_utc".into()],
+            },
+            ..Default::default()
+        };
+        cfg.instances.insert(
+            "clock_utc".to_string(),
+            toml::from_str::<toml::Value>("kind = \"datetime\"\ntimezone = \"UTC\"").unwrap(),
+        );
+        let out = widget_placements(&cfg, &[], &[]);
+        let e = out.iter().find(|p| p.name == "clock_utc").unwrap();
+        assert_eq!(
+            e.source,
+            WidgetSource::Instance {
+                kind: "datetime".into()
+            }
+        );
+        assert_eq!(e.placement, Some((Region::Right, 0)));
+    }
+
+    #[test]
+    fn placements_from_a_real_registry_label_instances_correctly() {
+        // The exact composition every real caller uses (see
+        // `crates/rustline/src/widget_cmd.rs`'s `known_names`/`list`):
+        // `widget_placements(cfg, Registry::with_builtins(cfg).descriptors(),
+        // &plugins)`. Regression test for a bug where
+        // `Registry::with_builtins`'s instance-registration pass reused
+        // `builtin_descriptor`, hardcoding `WidgetSource::Builtin` onto every
+        // instance's descriptor — so `widget_placements`'s name-based dedup
+        // (first source wins) locked each instance in as `Builtin` before the
+        // dedicated `cfg.instances` pass further down ever got a chance to
+        // relabel it.
+        use crate::widget::Registry;
+
+        let mut cfg = Config::default();
+        cfg.instances.insert(
+            "clock_utc".to_string(),
+            toml::from_str::<toml::Value>("kind = \"datetime\"\ntimezone = \"UTC\"").unwrap(),
+        );
+        let registry = Registry::with_builtins(&cfg);
+        let out = widget_placements(&cfg, registry.descriptors(), &[]);
+        let e = out.iter().find(|p| p.name == "clock_utc").unwrap();
+        assert_eq!(
+            e.source,
+            WidgetSource::Instance {
+                kind: "datetime".into()
+            }
+        );
+    }
+
+    #[test]
+    fn placements_skip_an_instance_that_collides_with_a_builtin() {
+        // Built-in always wins (the W46 precedence guard); an [instances.cpu]
+        // entry must never be offered as its own selectable widget.
+        let mut cfg = Config::default();
+        cfg.instances.insert(
+            "cpu".to_string(),
+            toml::from_str::<toml::Value>("kind = \"datetime\"").unwrap(),
+        );
+        let descriptors = vec![WidgetDescriptor {
+            name: "cpu".into(),
+            summary: "cpu usage".into(),
+            configurable: true,
+            source: WidgetSource::Builtin,
+        }];
+        let out = widget_placements(&cfg, &descriptors, &[]);
+        let cpus: Vec<_> = out.iter().filter(|p| p.name == "cpu").collect();
+        assert_eq!(cpus.len(), 1, "exactly one 'cpu' entry");
+        assert_eq!(cpus[0].source, WidgetSource::Builtin);
+    }
+
+    #[test]
+    fn placements_are_deduped_and_sorted_builtins_then_instances_then_plugins() {
+        // Routed through a real `Registry::with_builtins(&cfg)`, the same as
+        // `placements_from_a_real_registry_label_instances_correctly` above —
+        // so this also pins the *second* defect: an instance's position in
+        // the output must not depend on where in `cfg.instances`'
+        // (unspecified) `HashMap` iteration order it landed inside
+        // `registry.descriptors()`.
+        use crate::widget::Registry;
+
+        let mut cfg = Config::default();
+        // Insertion order is deliberately the reverse of sorted order, so a
+        // passing assertion can't be accidentally riding iteration order
+        // instead of an actual sort.
+        cfg.instances.insert(
+            "zclock".to_string(),
+            toml::from_str::<toml::Value>("kind = \"datetime\"").unwrap(),
+        );
+        cfg.instances.insert(
+            "aclock".to_string(),
+            toml::from_str::<toml::Value>("kind = \"datetime\"").unwrap(),
+        );
+        let registry = Registry::with_builtins(&cfg);
+        // The same plugin stem listed twice must yield one entry; plugin
+        // names are likewise out of sorted order.
+        let out = widget_placements(
+            &cfg,
+            registry.descriptors(),
+            &[
+                "zplugin".to_string(),
+                "aplugin".to_string(),
+                "zplugin".to_string(),
+            ],
+        );
+        let names: Vec<&str> = out.iter().map(|p| p.name.as_str()).collect();
+        let expected: Vec<&str> = [
+            // All sixteen built-ins, in registration order.
+            "pane_id",
+            "hostname",
+            "windows",
+            "loadavg",
+            "datetime",
+            "cwd",
+            "lan_ip",
+            "tailscale_ip",
+            "battery",
+            "cpu",
+            "memory",
+            "git",
+            "disk",
+            "uptime",
+            "media",
+            "throughput",
+            // Instances, sorted by name.
+            "aclock",
+            "zclock",
+            // Plugin stems, sorted by name (deduped).
+            "aplugin",
+            "zplugin",
+        ]
+        .to_vec();
+        assert_eq!(
+            names, expected,
+            "built-ins (registration order), then instances (sorted), then plugins (sorted)"
+        );
+    }
+
+    /// I4: a layout can name a widget none of the three catalog inputs
+    /// recognize — e.g. a plugin whose `.wasm` is no longer present. That
+    /// name must still show up, flagged `WidgetSource::Unknown`, with its
+    /// real placement, rather than silently vanishing from the list.
+    #[test]
+    fn placements_surface_a_placed_but_unrecognized_widget_as_unknown() {
+        let cfg = Config {
+            layout: Layout {
+                left: vec!["pane_id".into()],
+                center: vec![],
+                right: vec!["cwd".into(), "ghostwidget".into()],
+            },
+            ..Default::default()
+        };
+        let descriptors = vec![
+            WidgetDescriptor {
+                name: "pane_id".into(),
+                summary: "pane id".into(),
+                configurable: true,
+                source: WidgetSource::Builtin,
+            },
+            WidgetDescriptor {
+                name: "cwd".into(),
+                summary: "current directory".into(),
+                configurable: true,
+                source: WidgetSource::Builtin,
+            },
+        ];
+        let out = widget_placements(&cfg, &descriptors, &[]);
+        let ghost = out
+            .iter()
+            .find(|p| p.name == "ghostwidget")
+            .expect("placed-but-unrecognized name is still offered");
+        assert_eq!(ghost.source, WidgetSource::Unknown);
+        assert_eq!(ghost.placement, Some((Region::Right, 1)));
+    }
+
+    /// The unknown-scan must never re-classify (or duplicate) a name the
+    /// earlier catalog passes already recognized — a `cfg.layout` scan alone
+    /// can't tell a built-in/instance/plugin apart from an unrecognized name,
+    /// so it must defer to `classify`'s existing dedup rather than blindly
+    /// re-adding every placed name as `Unknown`.
+    #[test]
+    fn placements_unknown_scan_does_not_reclassify_an_already_known_name() {
+        let cfg = Config {
+            layout: Layout {
+                left: vec!["pane_id".into()],
+                center: vec![],
+                right: vec!["weather".into()],
+            },
+            ..Default::default()
+        };
+        let descriptors = vec![WidgetDescriptor {
+            name: "pane_id".into(),
+            summary: "pane id".into(),
+            configurable: true,
+            source: WidgetSource::Builtin,
+        }];
+        let out = widget_placements(&cfg, &descriptors, &["weather".to_string()]);
+        let matches: Vec<_> = out.iter().filter(|p| p.name == "pane_id").collect();
+        assert_eq!(matches.len(), 1, "no duplicate entry for pane_id");
+        assert_eq!(matches[0].source, WidgetSource::Builtin);
+        let weather = out.iter().find(|p| p.name == "weather").unwrap();
+        assert_eq!(
+            weather.source,
+            WidgetSource::Plugin,
+            "still a plugin, not Unknown"
+        );
+        assert!(out.iter().all(|p| p.source != WidgetSource::Unknown));
+    }
+
+    /// Ordering: the unknown group sorts after built-ins/instances/plugins,
+    /// by name.
+    #[test]
+    fn placements_unknown_group_is_sorted_and_ordered_last() {
+        let cfg = Config {
+            layout: Layout {
+                left: vec![],
+                center: vec![],
+                right: vec!["zghost".into(), "cwd".into(), "aghost".into()],
+            },
+            ..Default::default()
+        };
+        let descriptors = vec![WidgetDescriptor {
+            name: "cwd".into(),
+            summary: "current directory".into(),
+            configurable: true,
+            source: WidgetSource::Builtin,
+        }];
+        let out = widget_placements(&cfg, &descriptors, &[]);
+        let names: Vec<&str> = out.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["cwd", "aghost", "zghost"]);
     }
 }

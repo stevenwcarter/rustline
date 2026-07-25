@@ -1,0 +1,14 @@
+# Capability manifest for the `cmdrun` example plugin.
+#
+# A manifest GRANTS NOTHING on its own — it is a declaration `rustline plugin
+# approve cmdrun` turns into exactly these `allowed_commands` entries, after
+# you confirm. Patterns match the whole canonical argv as a glob (globset
+# defaults: `*` matches across `/` and matches greedily, so a bare `uname*`
+# would also match a program named `unamex` or `uname-anything` — see
+# `rustline-wasm`'s `allow.rs`). These two entries permit exactly the
+# program `uname`, with or without arguments, and nothing else: `"uname"`
+# matches a bare invocation, `"uname *"` (note the literal space) matches
+# one with arguments.
+name = "cmdrun"
+version = "0.1.0"
+requested_commands = ["uname", "uname *"]
