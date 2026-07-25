@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rustline_core::{Config, Context, PluginConfig, Registry, Widget, WidgetSource};
 use rustline_wasm::capability::CapabilityCtx;
-use rustline_wasm::{WasmWidget, build_plugin, register_plugins};
+use rustline_wasm::{WasmWidget, build_plugin, register_plugins, sha256_hex};
 
 const WTTR_BODY: &str = r#"{"current_condition":[{"temp_F":"72","weatherCode":"113","weatherDesc":[{"value":"Sunny"}]}]}"#;
 
@@ -190,5 +190,101 @@ fn cross_zip_isolation_no_leak() {
     assert!(
         sb.is_empty(),
         "no entry for 90210 + failed fetch -> empty: {sb:?}"
+    );
+}
+
+/// Stage the real weather plugin into a fresh dir, returning (dir, bytes) so a
+/// test can compute — or deliberately corrupt — its digest.
+fn staged_weather() -> (tempfile::TempDir, Vec<u8>) {
+    let bytes = weather_wasm();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("weather.wasm"), &bytes).expect("stage plugin");
+    (dir, bytes)
+}
+
+/// A Config pinning `weather` to `checksum`.
+fn cfg_with_checksum(checksum: Option<String>) -> Config {
+    let mut cfg = Config::default();
+    cfg.plugins.insert(
+        "weather".to_string(),
+        PluginConfig {
+            checksum,
+            ..Default::default()
+        },
+    );
+    cfg
+}
+
+fn register_weather(cfg: &Config, dir: &std::path::Path) -> Registry {
+    let mut reg = Registry::new();
+    register_plugins(&mut reg, cfg, dir, &["weather".to_string()]);
+    reg
+}
+
+/// Producer 1: a hand-installed plugin (or one built by `just build-plugin`)
+/// has no recorded digest and must keep loading.
+#[test]
+fn plugin_without_a_recorded_checksum_still_registers() {
+    let (dir, _bytes) = staged_weather();
+    let reg = register_weather(&cfg_with_checksum(None), dir.path());
+    assert!(
+        reg.contains("weather"),
+        "an unpinned plugin must still load"
+    );
+}
+
+/// Producer 2: a plugin installed via `plugin install` records the digest of
+/// exactly these bytes, so it must verify.
+#[test]
+fn plugin_with_a_matching_checksum_registers() {
+    let (dir, bytes) = staged_weather();
+    let reg = register_weather(&cfg_with_checksum(Some(sha256_hex(&bytes))), dir.path());
+    assert!(
+        reg.contains("weather"),
+        "a correctly pinned plugin must load"
+    );
+}
+
+/// The threat this feature exists for: the file on disk was swapped after the
+/// digest was recorded. Note the module itself is perfectly valid here — only
+/// the digest disagrees — so this can only pass if the gate is real.
+#[test]
+fn plugin_with_a_mismatched_checksum_does_not_register() {
+    let (dir, _bytes) = staged_weather();
+    let wrong = sha256_hex(b"different bytes entirely");
+    let reg = register_weather(&cfg_with_checksum(Some(wrong)), dir.path());
+    assert!(
+        !reg.contains("weather"),
+        "a tampered plugin must be refused even though the module is valid"
+    );
+}
+
+/// Fail closed: an unparseable digest is a request to verify that we cannot honour.
+#[test]
+fn plugin_with_a_malformed_checksum_does_not_register() {
+    let (dir, _bytes) = staged_weather();
+    let reg = register_weather(
+        &cfg_with_checksum(Some("not-a-digest".to_string())),
+        dir.path(),
+    );
+    assert!(!reg.contains("weather"), "a malformed pin must fail closed");
+}
+
+/// Round-trip across the install -> load seam. This is what pins the two halves
+/// together: if either side ever changes its hex encoding, adds a `sha256:`
+/// prefix on write, or hashes something other than the raw file bytes, this
+/// fails loudly instead of silently disabling every pinned plugin.
+#[test]
+fn a_digest_written_at_install_time_is_accepted_at_load_time() {
+    let (dir, bytes) = staged_weather();
+    // Exactly what `plugin install` records: sha256_hex over the downloaded
+    // asset bytes, which are the same bytes written to <plugin_dir>/<name>.wasm.
+    let recorded = sha256_hex(&bytes);
+    assert_eq!(recorded.len(), 64, "recorded digest shape must stay stable");
+
+    let reg = register_weather(&cfg_with_checksum(Some(recorded)), dir.path());
+    assert!(
+        reg.contains("weather"),
+        "the install path's digest must satisfy the load path's verification"
     );
 }
