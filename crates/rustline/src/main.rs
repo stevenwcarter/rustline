@@ -19,6 +19,7 @@ mod logging;
 mod media;
 mod memory;
 mod plugin_cmd;
+mod plugin_index;
 mod plugin_install;
 mod sample_context;
 mod sample_store;
