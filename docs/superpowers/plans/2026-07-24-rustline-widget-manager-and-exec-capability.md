@@ -2213,7 +2213,15 @@ Expected: all pass. Existing `init_block` characterization tests that assert on 
 - [ ] **Step 6: Verify `--print` is still the legacy block**
 
 Run: `cargo test -p rustline tmux_conf 2>&1 | grep -i print`
-and confirm the `--print`/legacy characterization test still passes unchanged. `--print` emits no bindings, so it must be unaffected.
+and confirm the `--print`/legacy characterization test still passes. **Correction
+(found during Task 6):** the claim that `--print` "emits no bindings" is false
+about this codebase — `init.rs`'s `--print` branch calls the same
+`tmux_conf::init_block` as every other path (pinning only `two_line: false,
+mouse: false, interval: 1`), and `init_block` has always emitted the three
+`MouseDown{1,2,3}Status` stanzas unconditionally. No test pins `--print`
+byte-for-byte (substring checks only). So `--print` legitimately gains the new
+`bind-key W` line too, which is the consistent outcome given the binding is
+emitted unconditionally.
 
 - [ ] **Step 7: Lint and commit**
 
