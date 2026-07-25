@@ -29,12 +29,21 @@ fn fnv1a(s: &str) -> u64 {
     h
 }
 
-/// `<state_dir>/__http_cache__/<hash>.json` — the cache file for `url`.
-pub fn cache_path(state_dir: &Path, url: &str) -> PathBuf {
+/// `<state_dir>/<namespace>/<hash>.json` — the cache file for `key` within a
+/// namespace. The namespace keeps the HTTP and exec caches in separate
+/// subdirectories so a URL and a command line that happen to hash the same can
+/// never read each other's entries. Both stay under the plugin's own state
+/// dir, so `check_cap`'s quota accounting (invariant N3) covers them unchanged.
+pub fn cache_path(state_dir: &Path, namespace: &str, key: &str) -> PathBuf {
     state_dir
-        .join("__http_cache__")
-        .join(format!("{:016x}.json", fnv1a(url)))
+        .join(namespace)
+        .join(format!("{:016x}.json", fnv1a(key)))
 }
+
+/// The HTTP response cache's namespace.
+pub const HTTP_NAMESPACE: &str = "__http_cache__";
+/// The exec result cache's namespace.
+pub const EXEC_NAMESPACE: &str = "__exec_cache__";
 
 /// Age in seconds of `fetched` relative to `now` if both parse, else `None`.
 pub fn age_secs(now_rfc3339: &str, fetched_rfc3339: &str) -> Option<i64> {
@@ -84,13 +93,21 @@ mod tests {
     #[test]
     fn cache_path_is_deterministic_and_scoped() {
         let dir = Path::new("/state/weather");
-        let a = cache_path(dir, "https://wttr.in/48183?format=j1");
-        let b = cache_path(dir, "https://wttr.in/48183?format=j1");
-        let c = cache_path(dir, "https://wttr.in/90210?format=j1");
+        let a = cache_path(dir, HTTP_NAMESPACE, "https://wttr.in/48183?format=j1");
+        let b = cache_path(dir, HTTP_NAMESPACE, "https://wttr.in/48183?format=j1");
+        let c = cache_path(dir, HTTP_NAMESPACE, "https://wttr.in/90210?format=j1");
         assert_eq!(a, b, "same url -> same path");
         assert_ne!(a, c, "different url -> different path");
         assert!(a.starts_with("/state/weather/__http_cache__"));
         assert_eq!(a.extension().unwrap(), "json");
+    }
+
+    #[test]
+    fn cache_path_namespaces_never_collide_on_the_same_key() {
+        let dir = Path::new("/state/weather");
+        let http = cache_path(dir, HTTP_NAMESPACE, "same-key");
+        let exec = cache_path(dir, EXEC_NAMESPACE, "same-key");
+        assert_ne!(http, exec, "http and exec caches must not share a file");
     }
 
     #[test]
@@ -102,14 +119,15 @@ mod tests {
             body: "hello".into(),
         };
         let content = serde_json::to_string(&entry).unwrap();
-        let path = cache_path(dir.path(), "https://x/y");
+        let path = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/y");
         write_entry(dir.path(), &path, &content, 1_000).unwrap();
         let got = read_entry(&path).unwrap();
         assert_eq!(got.status, 200);
         assert_eq!(got.body, "hello");
         // a write that would blow the quota is refused
         let big = "z".repeat(2_000);
-        assert!(write_entry(dir.path(), &cache_path(dir.path(), "big"), &big, 1_000).is_err());
+        let big_path = cache_path(dir.path(), HTTP_NAMESPACE, "big");
+        assert!(write_entry(dir.path(), &big_path, &big, 1_000).is_err());
         // a missing file reads as None
         assert!(read_entry(Path::new("/no/such/file.json")).is_none());
     }

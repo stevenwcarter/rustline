@@ -15,6 +15,7 @@ pub mod host;
 pub mod manifest;
 pub mod paths;
 pub mod perform;
+pub mod run;
 pub mod state;
 
 use std::path::Path;
@@ -34,6 +35,7 @@ pub use paths::{
     data_root, default_plugin_dir, ensure_wasmtime_cache_config, expand_tilde, state_root,
     wasmtime_cache_config_path,
 };
+pub use run::{ProcessRunner, Runner};
 
 /// The outcome of comparing the host's [`ABI_VERSION`] against a guest's
 /// declared version (its optional `abi_version` export).
