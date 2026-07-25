@@ -27,18 +27,20 @@ test:
 test-wasm: build-weather
     cargo test -p rustline-wasm --features wasm-e2e --test e2e
     cargo test -p rustline --features wasm-e2e --test wasm_wiring
+    cargo test -p rustline --features wasm-e2e --test plugin_build_wasm
 
 # CI-style checks: formatting and clippy
 lint:
     cargo fmt --all --check
     cargo clippy --all-targets -- -D warnings
-    # crates/rustline-wasm/tests/e2e.rs and crates/rustline/tests/wasm_wiring.rs
-    # are `#![cfg(feature = "wasm-e2e")]`-gated, so the pass above never compiles
-    # them and clippy never checks that code. This pass reaches both (one
-    # `--features` flag applies to every selected package that declares the
-    # feature). It only needs a host-target compile — the tests need a
-    # prebuilt weather.wasm at *runtime* (see `just test-wasm`), not the
-    # wasm32 target at lint time.
+    # crates/rustline-wasm/tests/e2e.rs and crates/rustline/tests/{wasm_wiring,
+    # plugin_build_wasm}.rs are all `#![cfg(feature = "wasm-e2e")]`-gated, so
+    # the pass above never compiles them and clippy never checks that code.
+    # This pass reaches all three (one `--features` flag applies to every
+    # selected package that declares the feature). It only needs a
+    # host-target compile — the tests need a prebuilt weather.wasm (or, for
+    # plugin_build_wasm, the wasm32 target itself) at *runtime* (see `just
+    # test-wasm`), not at lint time.
     cargo clippy --workspace --all-targets --features wasm-e2e -- -D warnings
 
 # Preview the rendered bar in colour (live tmux context inside tmux, else samples)

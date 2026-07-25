@@ -2479,8 +2479,11 @@ branch on platform.
   generic across all five example plugins, e.g. `just build-plugin cmdrun`),
   `just build-weather` (an alias: `build-plugin "weather"`), `just test-wasm`
   (opt-in: builds the weather plugin, then runs the feature-gated
-  `rustline-wasm` e2e test and the bin's `wasm_wiring` test — needs the wasm
-  target; `just test` never requires it), `just bench [ARGS]` (builds the
+  `rustline-wasm` e2e test, the bin's `wasm_wiring` test, and the bin's
+  `plugin_build_wasm` test (the four `plugin build` tests that cargo-compile
+  a throwaway crate for `wasm32-unknown-unknown`, moved out of `smoke.rs` so
+  the default suite doesn't need that target) — needs the wasm target; `just
+  test` never requires it), `just bench [ARGS]` (builds the
   weather plugin, then runs the real `rustline bench` tool via `cargo run
   --release --features bench -- bench {{ARGS}}`), `just lint-plugins` (the
   five excluded `plugins/*` are invisible to the root `cargo fmt`/`clippy`/
