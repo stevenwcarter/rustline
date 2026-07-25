@@ -3,6 +3,13 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # Lets the whole pipeline (build, package, checksum) be dry-run on a branch
+  # before the first real `v*` tag ever gets pushed — this repo has zero tags
+  # today and this workflow has never executed, so without this its maiden
+  # run would otherwise be the irreversible public v0.1.0 tag. The publish
+  # step below is skipped on a manual run (see its `if:`), so a dispatch never
+  # creates a real GitHub release — only the build/package/checksum legs run.
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -50,6 +57,16 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME}"
+          # On a real release this is a tag (e.g. "v0.1.0") and is already a
+          # safe path component. On a manual `workflow_dispatch` dry run,
+          # though, `GITHUB_REF_NAME` is a BRANCH name, which may contain `/`
+          # (e.g. "feat/my-branch") — left as-is that would make `mkdir -p`
+          # create nested directories for `${stage}`, and the later
+          # `dist/*.tar.gz` glob (both the upload-artifact `path:` and the
+          # Checksums step) would then miss the asset entirely, tripping
+          # `if-no-files-found: error`. Flatten any slashes so a dry run
+          # packages exactly like a real one, just under a branch-derived name.
+          version="${version//\//-}"
           stage="rustline-${version}-${{ matrix.target }}"
           mkdir -p "dist/${stage}/completions"
 
@@ -65,7 +82,6 @@ jobs:
           "$bin" completions fish > "dist/${stage}/completions/rustline.fish"
 
           tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
-          echo "asset=dist/${stage}.tar.gz" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -91,7 +107,13 @@ jobs:
           sha256sum *.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
+      # Skipped on a manual `workflow_dispatch` dry run — a dispatch runs on a
+      # branch, not a tag, so there is no real version to publish under; every
+      # other step above (build, package, checksum) still runs and can be
+      # inspected via the uploaded artifacts, so the whole pipeline gets
+      # exercised without creating a real GitHub release.
       - uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         with:
           files: |
             artifacts/*.tar.gz
