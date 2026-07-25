@@ -116,6 +116,31 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
             tracing::warn!(plugin = %stem, "failed to read plugin file, skipping");
             continue;
         };
+        // W19: verify the recorded digest before building any capability object
+        // and before wasmtime ever sees the module. An absent checksum loads as
+        // before; a mismatched or unparseable one fails closed. Like every other
+        // skip site here, this drops one widget with a warn — never an error
+        // into the render path (invariant N2).
+        match integrity::verify_checksum(pc.checksum.as_deref(), &wasm) {
+            integrity::ChecksumVerdict::NotRecorded | integrity::ChecksumVerdict::Match => {}
+            integrity::ChecksumVerdict::Mismatch { expected, actual } => {
+                tracing::warn!(
+                    plugin = %stem,
+                    %expected,
+                    %actual,
+                    "plugin checksum mismatch, skipping"
+                );
+                continue;
+            }
+            integrity::ChecksumVerdict::Malformed { recorded } => {
+                tracing::warn!(
+                    plugin = %stem,
+                    %recorded,
+                    "recorded plugin checksum is not a valid sha256 digest, skipping"
+                );
+                continue;
+            }
+        }
         let observer = denials::FileDenialObserver::new(denials_path.clone());
         let ctx = capability::CapabilityCtx::from_config(stem, &pc, root.clone())
             .with_observer(Arc::new(observer));
@@ -183,10 +208,12 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
 /// caller-supplied [`DenialObserver`] — e.g. a collecting observer for a local
 /// dev harness (`rustline plugin run`) — bypassing the `needed`-list discovery
 /// filter, the built-in-name-collision check, and the `name()`/ABI-export
-/// verification `register_plugins` does, since a one-off harness run doesn't
-/// need any of them. Returns `None` on any read/instantiation failure,
-/// mirroring `register_plugins`'s never-fatal behavior. Doesn't touch the
-/// `Registry` and doesn't disturb `register_plugins` itself.
+/// verification `register_plugins` does, and (unlike `register_plugins`)
+/// treats a failed checksum verification as a warning rather than a refusal,
+/// since a one-off harness run doesn't need any of them. Returns `None` on any
+/// read/instantiation failure, mirroring `register_plugins`'s never-fatal
+/// behavior. Doesn't touch the `Registry` and doesn't disturb
+/// `register_plugins` itself.
 pub fn instantiate_named(
     plugin_dir: &Path,
     name: &str,
@@ -194,6 +221,19 @@ pub fn instantiate_named(
     observer: Arc<dyn DenialObserver + Send + Sync>,
 ) -> Option<WasmWidget> {
     let wasm = std::fs::read(plugin_dir.join(format!("{name}.wasm"))).ok()?;
+    // Dev harness (`rustline plugin run`): report a bad digest but still run.
+    // This command is used while iterating on a plugin you just rebuilt, where
+    // a recorded checksum legitimately mismatches on every build. The real gate
+    // is `register_plugins`, which the bar, the daemon, and `plugin list` all
+    // go through.
+    let verdict = integrity::verify_checksum(pc.checksum.as_deref(), &wasm);
+    if !verdict.allows_load() {
+        tracing::warn!(
+            plugin = %name,
+            ?verdict,
+            "plugin checksum did not verify; running anyway (dev harness)"
+        );
+    }
     let ctx =
         capability::CapabilityCtx::from_config(name, pc, state_root()).with_observer(observer);
     let plugin = host::build_plugin(&wasm, ctx).ok()?;

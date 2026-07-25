@@ -12,18 +12,23 @@
 //! `User-Agent` the GitHub API requires. The trait lets the install/update
 //! flows be unit-tested with a fake, no network involved.
 
-use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{Context as _, anyhow, bail};
 use rustline_core::{Config, PluginSource};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::cli::{InstallArgs, RemoveArgs, UpdateArgs};
 use crate::plugin_cmd::{MAX_PLUGIN_NAME_BYTES, RESERVED_PLUGIN_NAME};
+
+/// Re-exported so `plugin_install::sha256_hex` keeps resolving for existing
+/// callers and tests. The definition lives in `rustline-wasm` beside the
+/// verification that consumes it, so the digest written at install time and the
+/// one checked at load time cannot drift (the same single-definition argument
+/// W51 applied to the wire types).
+pub use rustline_wasm::sha256_hex;
 
 /// A minimal HTTP GET seam over the two shapes `plugin install` needs: the
 /// release JSON from the GitHub API, and the raw asset bytes (following
@@ -107,16 +112,6 @@ pub fn select_wasm_asset(release: &Value) -> Option<(String, String)> {
         }
         let url = asset.get("browser_download_url")?.as_str()?;
         Some((name.to_string(), url.to_string()))
-    })
-}
-
-/// Lowercase hex sha256 of `bytes` (64 chars) — the `checksum` recorded for an
-/// installed plugin.
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().fold(String::with_capacity(64), |mut acc, b| {
-        let _ = write!(acc, "{b:02x}");
-        acc
     })
 }
 
