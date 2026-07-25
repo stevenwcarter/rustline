@@ -286,9 +286,11 @@ fn run_plugin(args: &RunArgs, config_path: &Path, plugin_dir: &Path) {
 }
 
 /// `rustline plugin search [QUERY] [--json] [--refresh]` — browse the curated
-/// plugin index. Read-only: it touches neither the config nor the plugin dir,
-/// and finding a plugin here grants it nothing (only `plugin approve` or a hand
-/// edit ever widens an allowlist).
+/// plugin index. It never *modifies* anything: it reads the config (for
+/// `plugin_index_url`) and reads the plugin dir (to mark which entries are
+/// already installed), and its only write is the index cache under the state
+/// dir. Finding a plugin here grants it nothing — only `plugin approve` or a
+/// hand edit ever widens an allowlist.
 fn search(config_path: &Path, plugin_dir: &Path, query: Option<&str>, json: bool, refresh: bool) {
     let cfg = Config::load(config_path);
     let url = cfg

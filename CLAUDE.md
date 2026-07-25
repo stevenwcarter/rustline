@@ -643,8 +643,8 @@ these shared types, not a design shortcut. Keep them serializable.
   bytes: &[u8]) -> ChecksumVerdict` accept 64 hex chars (case-insensitive), an
   optional `sha256:` prefix, and surrounding whitespace; an absent or blank
   `recorded` is `NotRecorded` (nothing to verify, loads as before), not a
-  refusal. `register_plugins` — the real gate the bar, the daemon, and
-  `plugin list` all go through — matches the four `ChecksumVerdict` variants
+  refusal. `register_plugins` — the real gate the bar and the daemon go
+  through — matches the four `ChecksumVerdict` variants
   directly rather than calling `allows_load()`, so it can log a distinct
   `warn!` message per rejection reason: `NotRecorded`/`Match` permit
   registration; `Mismatch`/`Malformed` skip the plugin — a value this build

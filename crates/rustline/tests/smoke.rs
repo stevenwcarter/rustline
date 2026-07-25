@@ -3142,6 +3142,33 @@ fn isolate_with_dead_plugin_index(cmd: &mut Command, tmp: &Path) {
     cmd.env("XDG_CONFIG_HOME", tmp.join("cfg"));
 }
 
+/// Guards the *reason* the other `plugin_search_*` tests are hermetic.
+///
+/// They all seed a fresh cache AND point `plugin_index_url` at a dead loopback,
+/// so if the freshness stamping ever regressed (e.g. back to a far-future
+/// `fetched_at`, which `index_is_fresh` treats as STALE), they would still pass
+/// — the failed fetch falls back to the same cached content and only stderr
+/// differs. That would silently restore the network round-trip this suite
+/// exists to avoid. Asserting the staleness warning is *absent* pins
+/// "no fetch was attempted" rather than merely "the right bytes came out".
+#[test]
+fn plugin_search_with_a_fresh_cache_attempts_no_fetch() {
+    let tmp = tempdir().unwrap();
+    seed_index_cache(tmp.path());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search"]);
+    isolate_with_dead_plugin_index(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("could not refresh"),
+        "a fresh cache must be served without any fetch attempt; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("weather"), "cache still served: {stdout}");
+}
+
 #[test]
 fn plugin_search_lists_the_index() {
     let tmp = tempdir().unwrap();
