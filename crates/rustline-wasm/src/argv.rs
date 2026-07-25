@@ -99,4 +99,34 @@ mod tests {
             "'/opt/my tools/bin'"
         );
     }
+
+    #[test]
+    fn a_bare_double_quote_triggers_quoting_rather_than_being_emitted_bare() {
+        assert_eq!(canonical_argv("x", &s(&[r#"id="42""#])), r#"x 'id="42"'"#);
+        // If a literal `"` were silently dropped or ignored instead of
+        // forcing quoting, this would render identically to the quote-free
+        // variant below, collapsing two distinct arguments onto the same
+        // canonical string.
+        assert_ne!(
+            canonical_argv("x", &s(&[r#"id="42""#])),
+            canonical_argv("x", &s(&["id=42"]))
+        );
+    }
+
+    #[test]
+    fn a_backslash_adjacent_to_a_single_quote_does_not_interfere_with_the_escape() {
+        // `\'` (backslash then quote) is quoted, with the embedded quote
+        // escaped as `'\''` and the raw backslash carried through unchanged.
+        assert_eq!(canonical_argv("x", &s(&["\\'"])), "x '\\'\\'''");
+        // Swapping the two characters' order (`'\` — quote then backslash)
+        // must render to a DIFFERENT canonical string: if a raw backslash in
+        // the input could be confused with the backslash the escape scheme
+        // itself emits inside a `'\''` group, these two distinct
+        // two-character arguments could collapse onto the same canonical
+        // form.
+        assert_ne!(
+            canonical_argv("x", &s(&["\\'"])),
+            canonical_argv("x", &s(&["'\\"]))
+        );
+    }
 }

@@ -9,14 +9,15 @@ use extism::{Manifest, PTR, PluginBuilder, UserData, Wasm, host_fn};
 use rustline_abi::ABI_VERSION;
 use rustline_core::{Context, RANGE_NAME_MAX_BYTES, Segment, Widget};
 
-use crate::abi::{RenderInput, parse_render_output};
+use crate::abi::{CachedExecResult, ExecResult, RenderInput, parse_render_output};
 use crate::capability::CapabilityCtx;
 use crate::fetch::UreqFetcher;
 use crate::paths::wasmtime_cache_config_path;
 use crate::perform::{
-    perform_file_read, perform_file_write, perform_http_get, perform_http_get_cached, perform_log,
-    perform_state_read, perform_state_write,
+    perform_exec, perform_exec_cached, perform_file_read, perform_file_write, perform_http_get,
+    perform_http_get_cached, perform_log, perform_state_read, perform_state_write,
 };
+use crate::run::ProcessRunner;
 
 fn json<T: serde::Serialize>(v: &T) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string())
@@ -59,11 +60,42 @@ host_fn!(rl_file_write(user_data: CapabilityCtx; path: String, contents: String)
     Ok(json(&perform_file_write(&ctx, &path, &contents)))
 });
 
+/// Decode the JSON array a guest passes as its `args`. Extism host functions
+/// carry scalars and strings, so a vector crosses the boundary encoded — the
+/// same "encode it, parse host-side" shape as `rl_http_get_cached`'s
+/// `ttl_secs: String`. A malformed value is an error, never a panic and never
+/// a spawn.
+fn decode_args(json: &str) -> Result<Vec<String>, String> {
+    serde_json::from_str::<Vec<String>>(json).map_err(|e| format!("invalid args: {e}"))
+}
+
+host_fn!(rl_exec(user_data: CapabilityCtx; program: String, args_json: String) -> String {
+    let ctx = user_data.get()?;
+    let ctx = ctx.lock().unwrap();
+    let result = match decode_args(&args_json) {
+        Ok(args) => perform_exec(&ctx, &program, &args, &ProcessRunner),
+        // Malformed args never reach the gate or a spawn.
+        Err(error) => ExecResult { ok: false, status: -1, error, ..Default::default() },
+    };
+    Ok(json(&result))
+});
+
+host_fn!(rl_exec_cached(user_data: CapabilityCtx; program: String, args_json: String, ttl_secs: String, now: String) -> String {
+    let ctx = user_data.get()?;
+    let ctx = ctx.lock().unwrap();
+    let ttl: i64 = ttl_secs.parse().unwrap_or(0);
+    let result = match decode_args(&args_json) {
+        Ok(args) => perform_exec_cached(&ctx, &program, &args, ttl, &now, &ProcessRunner),
+        Err(error) => CachedExecResult { ok: false, status: -1, error, ..Default::default() },
+    };
+    Ok(json(&result))
+});
+
 // `rl_log` is the one intentional capability-free host function (invariant
-// N1): it only writes to the host's `tracing` subscriber, so — unlike the six
-// wrappers above — there is no allowlist check here. `user_data` is still
-// used, but only to read this instance's plugin name for the log fields, not
-// to gate anything.
+// N1): it only writes to the host's `tracing` subscriber, so — unlike the
+// eight wrappers above — there is no allowlist check here. `user_data` is
+// still used, but only to read this instance's plugin name for the log
+// fields, not to gate anything.
 host_fn!(rl_log(user_data: CapabilityCtx; level: String, msg: String) -> String {
     let ctx = user_data.get()?;
     let ctx = ctx.lock().unwrap();
@@ -84,7 +116,7 @@ pub enum CompileCache {
 }
 
 /// Build an Extism plugin from wasm bytes with wasi off, fuel + timeout +
-/// memory caps, and the seven host functions (six capability-gated, plus the
+/// memory caps, and the nine host functions (eight capability-gated, plus the
 /// capability-free `rl_log`) bound to this instance's `CapabilityCtx`. Uses the
 /// on-disk compile cache (see [`build_plugin_with_cache`]).
 pub fn build_plugin(wasm: &[u8], ctx: CapabilityCtx) -> Result<extism::Plugin, extism::Error> {
@@ -141,6 +173,14 @@ pub fn build_plugin_with_cache(
             [PTR],
             ud.clone(),
             rl_file_write,
+        )
+        .with_function("rl_exec", [PTR, PTR], [PTR], ud.clone(), rl_exec)
+        .with_function(
+            "rl_exec_cached",
+            [PTR, PTR, PTR, PTR],
+            [PTR],
+            ud.clone(),
+            rl_exec_cached,
         )
         .with_function("rl_log", [PTR, PTR], [PTR], ud, rl_log)
         .build()
@@ -213,7 +253,7 @@ mod tests {
     use rustline_abi::ABI_VERSION;
     use rustline_core::{Config, Context, Registry};
 
-    use super::plugin_range_name;
+    use super::{decode_args, plugin_range_name};
     use crate::abi::{RenderInput, parse_render_output};
 
     /// A minimal `Context` with `toggled` set to `{name}`, for pinning the
@@ -284,6 +324,22 @@ mod tests {
             &["weather".into()],
         );
         assert!(!reg.contains("weather"));
+    }
+
+    #[test]
+    fn decode_args_accepts_a_json_array_and_rejects_anything_else() {
+        assert_eq!(
+            decode_args(r#"["metadata","--format","{{title}}"]"#).unwrap(),
+            vec![
+                "metadata".to_string(),
+                "--format".to_string(),
+                "{{title}}".to_string()
+            ]
+        );
+        assert_eq!(decode_args("[]").unwrap(), Vec::<String>::new());
+        assert!(decode_args("not json").is_err());
+        assert!(decode_args(r#"{"a":1}"#).is_err());
+        assert!(decode_args(r#"[1,2]"#).is_err(), "numbers are not args");
     }
 
     #[test]
