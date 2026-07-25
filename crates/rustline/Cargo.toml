@@ -41,6 +41,7 @@ comfy-table = { version = "7", optional = true }
 # cargo feature (unlike `bench`): `init` writes a `prefix + W` tmux binding
 # unconditionally, so the subcommand it points at must always exist.
 ratatui = "0.30"
+unicode-width = "0.2.2"
 
 [features]
 # Opt-in positive end-to-end test that renders a real plugin through the bin
