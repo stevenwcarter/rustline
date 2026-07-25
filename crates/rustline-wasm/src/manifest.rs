@@ -45,6 +45,10 @@ pub struct PluginManifest {
     /// Filesystem-path allow-patterns the plugin asks the user to approve.
     #[serde(default)]
     pub requested_paths: Vec<String>,
+    /// Command allow-patterns the plugin asks the user to approve. Written
+    /// verbatim into `allowed_commands` by `plugin approve` — never widened.
+    #[serde(default)]
+    pub requested_commands: Vec<String>,
 }
 
 /// Resolve a plugin's manifest: the sidecar `<plugin_dir>/<name>.toml` first
@@ -243,6 +247,7 @@ mod tests {
                 version: "1.2.3".into(),
                 requested_urls: vec!["https://a/*".into()],
                 requested_paths: vec!["/tmp/x".into()],
+                requested_commands: Vec::new(),
             }
         );
     }
@@ -340,5 +345,30 @@ mod tests {
     fn leb128_rejects_overlong_u32() {
         // Six continuation bytes cannot encode a u32.
         assert!(read_leb_u32(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x00]).is_none());
+    }
+
+    #[test]
+    fn a_manifest_parses_requested_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("p.toml"),
+            "name = \"p\"\nversion = \"1\"\nrequested_commands = [\"playerctl metadata*\"]\n",
+        )
+        .unwrap();
+        let m = resolve_manifest(dir.path(), "p").unwrap();
+        assert_eq!(m.requested_commands, ["playerctl metadata*"]);
+        assert!(m.requested_urls.is_empty());
+    }
+
+    #[test]
+    fn a_manifest_without_requested_commands_still_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("p.toml"),
+            "requested_urls = [\"https://a/*\"]\n",
+        )
+        .unwrap();
+        let m = resolve_manifest(dir.path(), "p").unwrap();
+        assert!(m.requested_commands.is_empty());
     }
 }

@@ -32,6 +32,7 @@ const PLUGIN_LIB_TEMPLATE: &str = include_str!("../assets/plugin-lib.rs.tmpl");
 enum Kind {
     Url,
     Path,
+    Command,
 }
 
 impl Kind {
@@ -39,6 +40,7 @@ impl Kind {
         match self {
             Kind::Url => "allowed_urls",
             Kind::Path => "allowed_paths",
+            Kind::Command => "allowed_commands",
         }
     }
 }
@@ -50,6 +52,7 @@ pub fn run(cmd: PluginCmd, config_path: &Path, plugin_dir: &Path) {
         PluginCmd::List { json } => list(config_path, plugin_dir, json),
         PluginCmd::Url(pc) => pattern_cmd(pc, Kind::Url, config_path),
         PluginCmd::Path(pc) => pattern_cmd(pc, Kind::Path, config_path),
+        PluginCmd::Cmd(pc) => pattern_cmd(pc, Kind::Command, config_path),
         PluginCmd::Approve(args) => approve(args, config_path, plugin_dir),
         PluginCmd::Install(args) => crate::plugin_install::install(&args, config_path, plugin_dir),
         PluginCmd::Update(args) => crate::plugin_install::update(&args, config_path, plugin_dir),
@@ -137,6 +140,7 @@ struct PluginEntryJson<'a> {
     tag: Option<&'a str>,
     allowed_urls: &'a [String],
     allowed_paths: &'a [String],
+    allowed_commands: &'a [String],
     max_state_bytes: u64,
     has_manifest: bool,
 }
@@ -157,6 +161,7 @@ fn plugin_list_json(cfg: &Config, plugin_dir: &Path) -> String {
             tag: pc.tag.as_deref(),
             allowed_urls: &pc.allowed_urls,
             allowed_paths: &pc.allowed_paths,
+            allowed_commands: &pc.allowed_commands,
             max_state_bytes: pc.max_state_bytes,
             has_manifest: resolve_manifest(plugin_dir, name).is_some(),
         })
@@ -282,12 +287,14 @@ fn list(config_path: &Path, plugin_dir: &Path, json: bool) {
         }
         println!("  allowed_urls: {:?}", pc.allowed_urls);
         println!("  allowed_paths: {:?}", pc.allowed_paths);
+        println!("  allowed_commands: {:?}", pc.allowed_commands);
         println!("  max_state_bytes: {}", pc.max_state_bytes);
         if let Some(m) = resolve_manifest(plugin_dir, name) {
             println!(
-                "  declared capabilities: {} urls, {} paths (run `plugin approve {name}`)",
+                "  declared capabilities: {} urls, {} paths, {} commands (run `plugin approve {name}`)",
                 m.requested_urls.len(),
-                m.requested_paths.len()
+                m.requested_paths.len(),
+                m.requested_commands.len()
             );
         }
     }
@@ -302,6 +309,7 @@ fn pattern_cmd(cmd: PatternCmd, kind: Kind, config_path: &Path) {
             let patterns = cfg.plugins.get(&plugin).map(|p| match kind {
                 Kind::Url => &p.allowed_urls,
                 Kind::Path => &p.allowed_paths,
+                Kind::Command => &p.allowed_commands,
             });
             if json {
                 println!("{}", pattern_list_json(patterns));
@@ -341,8 +349,11 @@ fn approve(args: ApproveArgs, config_path: &Path, plugin_dir: &Path) {
         println!("no manifest found for {}", args.plugin);
         return;
     };
-    print_manifest(&manifest);
-    if manifest.requested_urls.is_empty() && manifest.requested_paths.is_empty() {
+    print!("{}", manifest_report(&manifest));
+    if manifest.requested_urls.is_empty()
+        && manifest.requested_paths.is_empty()
+        && manifest.requested_commands.is_empty()
+    {
         println!("manifest requests no capabilities; nothing to approve");
         return;
     }
@@ -354,26 +365,41 @@ fn approve(args: ApproveArgs, config_path: &Path, plugin_dir: &Path) {
     println!("approved capabilities for {}", args.plugin);
 }
 
-/// Show a manifest's identity and the exact capabilities it requests.
-fn print_manifest(m: &PluginManifest) {
+/// The text `approve` shows before its confirmation prompt: the plugin's
+/// identity, exactly what it requests, and — when it asks for commands — a
+/// warning that this capability is categorically different from reading a URL
+/// or a file. The warning is part of the report (not the prompt) so it also
+/// lands in a `--yes` run's output and in logs.
+fn manifest_report(m: &PluginManifest) -> String {
     let name = if m.name.is_empty() { "?" } else { &m.name };
     let version = if m.version.is_empty() {
         "?"
     } else {
         &m.version
     };
-    println!("plugin {name} (version {version}) requests:");
-    print_requests("allowed_urls", &m.requested_urls);
-    print_requests("allowed_paths", &m.requested_paths);
+    let mut out = String::new();
+    let _ = writeln!(out, "plugin {name} (version {version}) requests:");
+    write_requests(&mut out, "allowed_urls", &m.requested_urls);
+    write_requests(&mut out, "allowed_paths", &m.requested_paths);
+    write_requests(&mut out, "allowed_commands", &m.requested_commands);
+    if !m.requested_commands.is_empty() {
+        out.push_str(
+            "\n  ! allowed_commands runs real programs on your machine with your\n\
+             \x20 ! environment and permissions. Approve only patterns you understand.\n",
+        );
+    }
+    out
 }
 
-/// Print one requested-capability list under `label`, or `(none)`.
-fn print_requests(label: &str, entries: &[String]) {
-    println!("  {label}:");
+/// Append one requested-capability list under `label`, or `(none)`.
+fn write_requests(out: &mut String, label: &str, entries: &[String]) {
+    let _ = writeln!(out, "  {label}:");
     if entries.is_empty() {
-        println!("    (none)");
+        out.push_str("    (none)\n");
     } else {
-        entries.iter().for_each(|e| println!("    {e}"));
+        for e in entries {
+            let _ = writeln!(out, "    {e}");
+        }
     }
 }
 
@@ -407,6 +433,12 @@ fn write_grants(config_path: &Path, plugin: &str, m: &PluginManifest) {
         append_unique(
             allowlist_array(table, plugin, Kind::Path.key()),
             &m.requested_paths,
+        );
+    }
+    if !m.requested_commands.is_empty() {
+        append_unique(
+            allowlist_array(table, plugin, Kind::Command.key()),
+            &m.requested_commands,
         );
     }
     write_doc(config_path, &doc);
@@ -728,6 +760,7 @@ mod tests {
             version: "1".into(),
             requested_urls: urls.iter().map(|s| s.to_string()).collect(),
             requested_paths: paths.iter().map(|s| s.to_string()).collect(),
+            requested_commands: Vec::new(),
         }
     }
 
@@ -785,6 +818,66 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn write_grants_writes_requested_commands_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(&cfg, "[plugins.w]\n").unwrap();
+
+        let mut m = manifest(&[], &[]);
+        m.requested_commands = vec!["playerctl metadata*".to_string()];
+        write_grants(&cfg, "w", &m);
+
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(
+            list_of(&text, "w", "allowed_commands"),
+            ["playerctl metadata*"]
+        );
+        // Nothing was widened beyond what was requested.
+        assert!(!text.contains("allowed_urls"), "{text}");
+    }
+
+    #[test]
+    fn approving_commands_twice_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(&cfg, "[plugins.w]\n").unwrap();
+        let mut m = manifest(&[], &[]);
+        m.requested_commands = vec!["git status*".to_string()];
+        write_grants(&cfg, "w", &m);
+        write_grants(&cfg, "w", &m);
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(list_of(&text, "w", "allowed_commands"), ["git status*"]);
+    }
+
+    #[test]
+    fn the_command_kind_maps_to_the_allowed_commands_key() {
+        assert_eq!(Kind::Command.key(), "allowed_commands");
+    }
+
+    #[test]
+    fn a_manifest_requesting_commands_prints_the_execution_warning() {
+        let mut m = manifest(&[], &[]);
+        m.requested_commands = vec!["git status*".to_string()];
+        let text = manifest_report(&m);
+        assert!(text.contains("allowed_commands"), "{text}");
+        assert!(text.contains("git status*"), "{text}");
+        assert!(
+            text.to_lowercase().contains("runs real programs"),
+            "the exec warning is shown: {text}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_without_commands_prints_no_execution_warning() {
+        let m = manifest(&["https://a/*"], &[]);
+        let text = manifest_report(&m);
+        assert!(
+            !text.to_lowercase().contains("runs real programs"),
+            "{text}"
+        );
     }
 
     #[test]

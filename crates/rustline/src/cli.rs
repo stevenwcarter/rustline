@@ -207,6 +207,10 @@ pub enum PluginCmd {
     /// Manage a plugin's filesystem-path allowlist.
     #[command(subcommand)]
     Path(PatternCmd),
+    /// Manage a plugin's command allowlist (the exec capability). Patterns are
+    /// matched against the whole canonical argv, not just the program.
+    #[command(subcommand)]
+    Cmd(PatternCmd),
     /// Approve a plugin's declared capability manifest into its allowlists.
     Approve(ApproveArgs),
     /// Download a plugin's `.wasm` from its GitHub release into the plugin dir
