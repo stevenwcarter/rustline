@@ -2678,19 +2678,56 @@ fn widget_disable_from_non_center_region_prints_no_center_warning() {
     );
 }
 
+/// Real-clock unix seconds, for stamping a seeded plugin-index cache as
+/// genuinely fresh. `plugin_index.rs`'s `index_is_fresh` is
+/// `now >= fetched_at && now - fetched_at < ttl` — a `fetched_at` in the
+/// FUTURE fails `now >= fetched_at` and is therefore **stale**, deliberately
+/// (a backward clock must force a refetch rather than pin a cache fresh
+/// forever; see `a_backward_clock_counts_as_stale_rather_than_forever_fresh`).
+/// So a current-or-past timestamp is what makes a seeded cache fresh, not a
+/// far-future one.
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Seed the plugin-index cache so `plugin search` answers from disk and never
 /// touches the network. Path mirrors `state_root()` under the `XDG_DATA_HOME`
-/// that `isolate` sets.
+/// that `isolate` sets. Stamped with the real current clock (`unix_now_secs`)
+/// so the cache is genuinely inside the TTL and `load_index` returns it
+/// without ever attempting a fetch.
 fn seed_index_cache(tmp: &Path) {
     let state = tmp.join("data/rustline/state");
     fs::create_dir_all(&state).expect("state dir");
-    // A far-future `fetched_at` keeps the entry fresh regardless of the clock,
-    // so the command never attempts a fetch.
-    let body = r#"{"fetched_at":99999999999,"index":{"schema_version":1,"plugins":[
-        {"name":"weather","description":"Weather from wttr.in","source":"o/r","bundled":true,"capabilities":["http_cached"]},
-        {"name":"othertool","description":"Something else entirely","source":"o/r2","bundled":false,"capabilities":[]}
-    ]}}"#;
+    let body = format!(
+        r#"{{"fetched_at":{},"index":{{"schema_version":1,"plugins":[
+        {{"name":"weather","description":"Weather from wttr.in","source":"o/r","bundled":true,"capabilities":["http_cached"]}},
+        {{"name":"othertool","description":"Something else entirely","source":"o/r2","bundled":false,"capabilities":[]}}
+    ]}}}}"#,
+        unix_now_secs()
+    );
     fs::write(state.join("plugin-index.json"), body).expect("seed index cache");
+}
+
+/// Belt-and-braces alongside a fresh-stamped seeded cache: point
+/// `XDG_CONFIG_HOME` at a config that overrides `plugin_index_url` to a
+/// loopback address nothing listens on. Even if a freshness regression crept
+/// back in and `plugin search` attempted a fetch, it would fail fast and
+/// offline (connection refused) instead of ever reaching the real
+/// `DEFAULT_INDEX_URL` on GitHub — these tests must never depend on network
+/// reachability, or on that URL 404ing before the branch merges.
+fn isolate_with_dead_plugin_index(cmd: &mut Command, tmp: &Path) {
+    isolate(cmd, tmp);
+    let cfg_dir = tmp.join("cfg/rustline");
+    fs::create_dir_all(&cfg_dir).expect("cfg dir");
+    fs::write(
+        cfg_dir.join("config.toml"),
+        r#"plugin_index_url = "http://127.0.0.1:1/index.json""#,
+    )
+    .expect("seed config");
+    cmd.env("XDG_CONFIG_HOME", tmp.join("cfg"));
 }
 
 #[test]
@@ -2699,7 +2736,7 @@ fn plugin_search_lists_the_index() {
     seed_index_cache(tmp.path());
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
     cmd.args(["plugin", "search"]);
-    isolate(&mut cmd, tmp.path());
+    isolate_with_dead_plugin_index(&mut cmd, tmp.path());
     let out = cmd.output().unwrap();
 
     assert!(out.status.success(), "plugin search should succeed");
@@ -2722,7 +2759,7 @@ fn plugin_search_filters_by_query() {
     seed_index_cache(tmp.path());
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
     cmd.args(["plugin", "search", "weath"]);
-    isolate(&mut cmd, tmp.path());
+    isolate_with_dead_plugin_index(&mut cmd, tmp.path());
     let out = cmd.output().unwrap();
 
     let s = String::from_utf8_lossy(&out.stdout);
@@ -2739,7 +2776,7 @@ fn plugin_search_json_emits_an_array() {
     seed_index_cache(tmp.path());
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
     cmd.args(["plugin", "search", "--json"]);
-    isolate(&mut cmd, tmp.path());
+    isolate_with_dead_plugin_index(&mut cmd, tmp.path());
     let out = cmd.output().unwrap();
 
     let s = String::from_utf8_lossy(&out.stdout);
@@ -2764,14 +2801,17 @@ fn plugin_search_prints_no_action_hint_when_neither_bundled_nor_sourced() {
     let tmp = tempdir().unwrap();
     let state = tmp.path().join("data/rustline/state");
     fs::create_dir_all(&state).expect("state dir");
-    let body = r#"{"fetched_at":99999999999,"index":{"schema_version":1,"plugins":[
-        {"name":"mystery","description":"No source, not bundled"}
-    ]}}"#;
+    let body = format!(
+        r#"{{"fetched_at":{},"index":{{"schema_version":1,"plugins":[
+        {{"name":"mystery","description":"No source, not bundled"}}
+    ]}}}}"#,
+        unix_now_secs()
+    );
     fs::write(state.join("plugin-index.json"), body).expect("seed index cache");
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
     cmd.args(["plugin", "search"]);
-    isolate(&mut cmd, tmp.path());
+    isolate_with_dead_plugin_index(&mut cmd, tmp.path());
     let out = cmd.output().unwrap();
 
     let s = String::from_utf8_lossy(&out.stdout);
@@ -2792,7 +2832,7 @@ fn plugin_search_reports_no_matches_for_an_unmatched_query() {
     seed_index_cache(tmp.path());
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
     cmd.args(["plugin", "search", "zzz-no-such-plugin"]);
-    isolate(&mut cmd, tmp.path());
+    isolate_with_dead_plugin_index(&mut cmd, tmp.path());
     let out = cmd.output().unwrap();
 
     let s = String::from_utf8_lossy(&out.stdout);
@@ -2807,12 +2847,15 @@ fn plugin_search_reports_an_empty_index() {
     let tmp = tempdir().unwrap();
     let state = tmp.path().join("data/rustline/state");
     fs::create_dir_all(&state).expect("state dir");
-    let body = r#"{"fetched_at":99999999999,"index":{"schema_version":1,"plugins":[]}}"#;
+    let body = format!(
+        r#"{{"fetched_at":{},"index":{{"schema_version":1,"plugins":[]}}}}"#,
+        unix_now_secs()
+    );
     fs::write(state.join("plugin-index.json"), body).expect("seed index cache");
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
     cmd.args(["plugin", "search"]);
-    isolate(&mut cmd, tmp.path());
+    isolate_with_dead_plugin_index(&mut cmd, tmp.path());
     let out = cmd.output().unwrap();
 
     let s = String::from_utf8_lossy(&out.stdout);
