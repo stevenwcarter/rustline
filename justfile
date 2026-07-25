@@ -1,13 +1,18 @@
 # rustline development tasks. Run `just` (or `just --list`) to see them.
 
+# The excluded example plugins (own Cargo.lock, built for wasm32-unknown-unknown).
+# One shared list so lint-plugins/test-plugins can't drift out of sync when a
+# plugin is added to one loop and forgotten in the other.
+plugins := "weather counter filewatch httpget cmdrun"
+
 # Show available recipes
 default:
     @just --list
 
-mold-install: build-weather
+mold-install:
     mold -run cargo install --path crates/rustline
 
-install: build-weather
+install:
     cargo install --path crates/rustline
 
 # Build the release binary
@@ -22,11 +27,21 @@ test:
 test-wasm: build-weather
     cargo test -p rustline-wasm --features wasm-e2e --test e2e
     cargo test -p rustline --features wasm-e2e --test wasm_wiring
+    cargo test -p rustline --features wasm-e2e --test plugin_build_wasm
 
 # CI-style checks: formatting and clippy
 lint:
     cargo fmt --all --check
     cargo clippy --all-targets -- -D warnings
+    # crates/rustline-wasm/tests/e2e.rs and crates/rustline/tests/{wasm_wiring,
+    # plugin_build_wasm}.rs are all `#![cfg(feature = "wasm-e2e")]`-gated, so
+    # the pass above never compiles them and clippy never checks that code.
+    # This pass reaches all three (one `--features` flag applies to every
+    # selected package that declares the feature). It only needs a
+    # host-target compile — the tests need a prebuilt weather.wasm (or, for
+    # plugin_build_wasm, the wasm32 target itself) at *runtime* (see `just
+    # test-wasm`), not at lint time.
+    cargo clippy --workspace --all-targets --features wasm-e2e -- -D warnings
 
 # Preview the rendered bar in colour (live tmux context inside tmux, else samples)
 preview: build
@@ -72,15 +87,46 @@ bench *ARGS: build-weather
 # Build any plugins/<NAME> WASM plugin and install it into the plugin dir.
 # Generic recipe backing the per-plugin ones below (and directly usable for
 # a plugin that doesn't have its own alias, e.g. `just build-plugin counter`).
+#
+# Delegates to the real `rustline plugin build` command (not a raw `cargo
+# build` + `cp`) so this recipe exercises the exact same path a user's own
+# `plugin build` invocation does -- including its post-build stale-checksum
+# check (see plugin_cmd.rs::maybe_refresh_stale_checksum): if a plugin was
+# `install`ed with a recorded checksum and this rebuild produces different
+# bytes, that check fires here too instead of only when a user runs the
+# command by hand. `--release` here is the *plugin crate's* build profile.
 build-plugin NAME:
     #!/usr/bin/env bash
     set -euo pipefail
     rustup target add wasm32-unknown-unknown >/dev/null 2>&1 || true
-    cargo build --release --target wasm32-unknown-unknown --manifest-path plugins/{{NAME}}/Cargo.toml
-    dest="${XDG_DATA_HOME:-$HOME/.local/share}/rustline/plugins"
-    mkdir -p "$dest"
-    cp plugins/{{NAME}}/target/wasm32-unknown-unknown/release/{{NAME}}.wasm "$dest/{{NAME}}.wasm"
-    echo "installed {{NAME}}.wasm -> $dest/{{NAME}}.wasm"
+    cargo run -q -p rustline -- plugin build plugins/{{NAME}} --release
 
 # Build the example weather WASM plugin and install it into the plugin dir
 build-weather: (build-plugin "weather")
+
+# Lint the excluded example plugins (host + wasm32 targets).
+#
+# plugins/* are EXCLUDED workspace members, so `cargo fmt --all`, `cargo clippy`
+# and `cargo test --workspace` at the root never see them. The wasm32 pass is
+# load-bearing, not redundant: each plugin's guest code lives behind
+# `#[cfg(target_arch = "wasm32")] mod guest`, so a host-only lint compiles just
+# the pure logic and never checks the half that actually runs in the sandbox.
+lint-plugins:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rustup target add wasm32-unknown-unknown >/dev/null 2>&1 || true
+    for p in {{plugins}}; do
+        echo "== $p =="
+        cargo fmt --check --manifest-path "plugins/$p/Cargo.toml"
+        cargo clippy --manifest-path "plugins/$p/Cargo.toml" --all-targets -- -D warnings
+        cargo clippy --manifest-path "plugins/$p/Cargo.toml" --target wasm32-unknown-unknown -- -D warnings
+    done
+
+# Run the excluded example plugins' host-side unit tests (their pure logic).
+test-plugins:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for p in {{plugins}}; do
+        echo "== $p =="
+        cargo test --manifest-path "plugins/$p/Cargo.toml"
+    done

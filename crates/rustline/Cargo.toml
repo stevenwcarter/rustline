@@ -33,7 +33,6 @@ serde_json = "1"
 # String-body Fetcher) because it must follow GitHub's redirect to the binary
 # asset and return raw bytes.
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
-sha2 = "0.10"
 comfy-table = { version = "7", optional = true }
 # Interactive widget editor (`rustline widget edit`). Default features pull
 # `ratatui-crossterm`, which re-exports crossterm as `ratatui::crossterm` — so

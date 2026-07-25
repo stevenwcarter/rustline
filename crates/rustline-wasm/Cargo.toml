@@ -11,6 +11,9 @@ rustline-core = { path = "../rustline-core" }
 rustline-abi = { path = "../rustline-abi" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# sha256 for plugin-binary integrity verification (W19). Already in the
+# workspace lock via the bin, so this adds no new graph node — and no TLS.
+sha2 = "0.10"
 # For parsing capability manifests (sidecar `<name>.toml` and the embedded
 # `rustline-manifest` custom section, both TOML). Already the workspace's TOML
 # crate (used by rustline-core/the bin) — adds no new node to the dep graph.

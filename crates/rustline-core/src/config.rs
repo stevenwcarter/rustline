@@ -1445,6 +1445,11 @@ pub struct Config {
     /// this in turn.
     #[serde(default)]
     pub plugin_dir: Option<String>,
+    /// Where `rustline plugin search` fetches the curated plugin index from;
+    /// overrides the built-in default URL. Lets a user point at a self-hosted
+    /// or alternate index without a code change.
+    #[serde(default)]
+    pub plugin_index_url: Option<String>,
     /// Per-plugin config, keyed by plugin name.
     #[serde(default)]
     pub plugins: HashMap<String, PluginConfig>,
@@ -3454,5 +3459,27 @@ mount = "/data"
         let out = widget_placements(&cfg, &descriptors, &[]);
         let names: Vec<&str> = out.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["cwd", "aghost", "zghost"]);
+    }
+
+    #[test]
+    fn plugin_index_url_defaults_to_none_and_round_trips() {
+        let cfg: Config = toml::from_str("").expect("empty config parses");
+        assert_eq!(cfg.plugin_index_url, None);
+
+        let cfg: Config = toml::from_str(r#"plugin_index_url = "https://example.test/i.json""#)
+            .expect("config with an index url parses");
+        assert_eq!(
+            cfg.plugin_index_url.as_deref(),
+            Some("https://example.test/i.json")
+        );
+    }
+
+    #[test]
+    fn a_garbage_plugin_index_url_still_loads_the_config() {
+        // Invariant #3: Config::load is total. A bad URL is a failed fetch at
+        // search time, never a config-load failure that breaks the bar.
+        let cfg: Config = toml::from_str(r#"plugin_index_url = "not a url at all""#)
+            .expect("any string value must parse");
+        assert!(cfg.plugin_index_url.is_some());
     }
 }

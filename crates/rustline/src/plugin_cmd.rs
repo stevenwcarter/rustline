@@ -3,7 +3,7 @@
 //! so the user's comments and formatting survive.
 
 use std::fmt::Write as _;
-use std::io::Write as _;
+use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -50,6 +50,11 @@ impl Kind {
 pub fn run(cmd: PluginCmd, config_path: &Path, plugin_dir: &Path) {
     match cmd {
         PluginCmd::List { json } => list(config_path, plugin_dir, json),
+        PluginCmd::Search {
+            query,
+            json,
+            refresh,
+        } => search(config_path, plugin_dir, query.as_deref(), json, refresh),
         PluginCmd::Url(pc) => pattern_cmd(pc, Kind::Url, config_path),
         PluginCmd::Path(pc) => pattern_cmd(pc, Kind::Path, config_path),
         PluginCmd::Cmd(pc) => pattern_cmd(pc, Kind::Command, config_path),
@@ -59,7 +64,7 @@ pub fn run(cmd: PluginCmd, config_path: &Path, plugin_dir: &Path) {
         PluginCmd::Remove(args) => crate::plugin_install::remove(&args, config_path, plugin_dir),
         PluginCmd::New(args) => new_plugin(&args),
         PluginCmd::Build(args) => {
-            if let Err(error) = build_plugin(&args, plugin_dir) {
+            if let Err(error) = build_plugin(&args, plugin_dir, config_path) {
                 eprintln!("plugin build failed: {error:#}");
                 std::process::exit(1);
             }
@@ -143,11 +148,19 @@ struct PluginEntryJson<'a> {
     allowed_commands: &'a [String],
     max_state_bytes: u64,
     has_manifest: bool,
+    /// Whether the installed `.wasm` verifies against the recorded
+    /// `checksum` — `"verified"`/`"unpinned"`/`"mismatch"`/`"malformed"`/
+    /// `"missing"` (see `plugin_checksum::PluginChecksumStatus`). Additive
+    /// field: every other field/shape here is unchanged.
+    checksum_status: &'static str,
 }
 
 /// The `plugin list --json` payload — one entry per configured plugin, same
 /// fields the human `list` prints, plus `has_manifest` (whether a capability
-/// manifest resolves). An empty plugins map serializes to `[]`.
+/// manifest resolves) and `checksum_status` (whether the installed `.wasm`
+/// verifies against the recorded `checksum`, via `plugin_checksum::status_for`
+/// — the same `rustline_wasm::verify_checksum` call `register_plugins` gates
+/// loading on). An empty plugins map serializes to `[]`.
 fn plugin_list_json(cfg: &Config, plugin_dir: &Path) -> String {
     let entries: Vec<PluginEntryJson> = cfg
         .plugins
@@ -164,6 +177,12 @@ fn plugin_list_json(cfg: &Config, plugin_dir: &Path) -> String {
             allowed_commands: &pc.allowed_commands,
             max_state_bytes: pc.max_state_bytes,
             has_manifest: resolve_manifest(plugin_dir, name).is_some(),
+            checksum_status: crate::plugin_checksum::status_for(
+                plugin_dir,
+                name,
+                pc.checksum.as_deref(),
+            )
+            .label(),
         })
         .collect();
     serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string())
@@ -265,6 +284,83 @@ fn run_plugin(args: &RunArgs, config_path: &Path, plugin_dir: &Path) {
     print!("{}", format_run_output(&segments, &denials));
 }
 
+/// `rustline plugin search [QUERY] [--json] [--refresh]` — browse the curated
+/// plugin index. It never *modifies* anything: it reads the config (for
+/// `plugin_index_url`) and reads the plugin dir (to mark which entries are
+/// already installed), and its only write is the index cache under the state
+/// dir. Finding a plugin here grants it nothing — only `plugin approve` or a
+/// hand edit ever widens an allowlist.
+fn search(config_path: &Path, plugin_dir: &Path, query: Option<&str>, json: bool, refresh: bool) {
+    let cfg = Config::load(config_path);
+    let url = cfg
+        .plugin_index_url
+        .as_deref()
+        .unwrap_or(crate::plugin_index::DEFAULT_INDEX_URL);
+    let state_dir = rustline_wasm::state_root();
+    let now = crate::sample_store::now_unix_secs();
+
+    let loaded = match crate::plugin_index::load_index(
+        &crate::plugin_install::UreqDownloader,
+        &state_dir,
+        url,
+        refresh,
+        now,
+    ) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("could not load the plugin index: {error:#}");
+            std::process::exit(1);
+        }
+    };
+
+    let entries = crate::plugin_index::filter_entries(&loaded.index, query);
+    let installed = rustline_wasm::discover_plugin_names(plugin_dir);
+
+    // Emit the staleness warning before the `--json` early return: it's on
+    // stderr, so it never corrupts the machine-readable stdout, and a
+    // scripted `--json` consumer must still be able to see it (the feature's
+    // own requirement carries no `--json` exemption).
+    if loaded.stale {
+        eprintln!("warning: could not refresh the plugin index; showing a cached copy");
+    }
+
+    if json {
+        println!("{}", crate::plugin_index::search_json(&entries, &installed));
+        return;
+    }
+
+    if entries.is_empty() {
+        match query {
+            Some(q) => println!("no plugins in the index match {q:?}"),
+            None => println!("the plugin index is empty"),
+        }
+        return;
+    }
+
+    for entry in &entries {
+        let mark = if installed.iter().any(|n| n == &entry.name) {
+            "  [installed]"
+        } else {
+            ""
+        };
+        println!("{}{}", entry.name, mark);
+        if !entry.description.is_empty() {
+            println!("  {}", entry.description);
+        }
+        if !entry.capabilities.is_empty() {
+            println!("  capabilities: {}", entry.capabilities.join(", "));
+        }
+        match (entry.bundled, entry.source.as_deref()) {
+            (true, _) => println!("  build:   just build-plugin {}", entry.name),
+            (false, Some(source)) => {
+                println!("  install: rustline plugin install {source}");
+            }
+            (false, None) => {}
+        }
+        println!();
+    }
+}
+
 /// Print every configured plugin's source and allowlists/caps, noting any
 /// declared capability manifest. With `json`, emit `plugin_list_json` instead.
 fn list(config_path: &Path, plugin_dir: &Path, json: bool) {
@@ -285,6 +381,9 @@ fn list(config_path: &Path, plugin_dir: &Path, json: bool) {
                 println!("  tag: {tag}");
             }
         }
+        let checksum_status =
+            crate::plugin_checksum::status_for(plugin_dir, name, pc.checksum.as_deref());
+        println!("  checksum: {}", checksum_status.label());
         println!("  allowed_urls: {:?}", pc.allowed_urls);
         println!("  allowed_paths: {:?}", pc.allowed_paths);
         println!("  allowed_commands: {:?}", pc.allowed_commands);
@@ -703,16 +802,22 @@ fn wasm_artifact_path(target_dir: &Path, stem: &str, release: bool) -> PathBuf {
         .join(format!("{stem}.wasm"))
 }
 
-/// `rustline plugin build <dir> [--release] [--plugin-dir <dir>]`: build any
-/// WASM guest plugin crate at `<dir>` — not limited to this repo's own
-/// `plugins/*`, the generic counterpart to `just build-plugin NAME` — and
+/// `rustline plugin build <dir> [--release] [--plugin-dir <dir>] [--yes]`:
+/// build any WASM guest plugin crate at `<dir>` — not limited to this repo's
+/// own `plugins/*`, the generic counterpart to `just build-plugin NAME` — and
 /// install the resulting `.wasm` into `plugin_dir`, named after the crate's
 /// own `[package].name` (hyphens intact, matching plugin discovery's
 /// filename-stem convention). A missing wasm target or non-zero `cargo build`
 /// exit surfaces as the process's own stderr output plus a clear error here;
 /// a missing artifact afterward (e.g. a non-`cdylib` crate) is likewise a
 /// clear error — never a panic.
-fn build_plugin(args: &BuildArgs, plugin_dir: &Path) -> anyhow::Result<()> {
+///
+/// After a successful install, checks the freshly built bytes against
+/// `config_path`'s recorded `[plugins.<name>].checksum` (see
+/// [`maybe_refresh_stale_checksum`]): `plugin install`/`update` record a
+/// checksum, and rebuilding from source without updating it would otherwise
+/// silently fail `register_plugins`' load-time gate on the very next render.
+fn build_plugin(args: &BuildArgs, plugin_dir: &Path, config_path: &Path) -> anyhow::Result<()> {
     let name = package_name(&args.dir.join("Cargo.toml"))?;
     let build_stem = name.replace('-', "_");
 
@@ -738,7 +843,9 @@ fn build_plugin(args: &BuildArgs, plugin_dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(plugin_dir)
         .with_context(|| format!("failed to create plugin dir {}", plugin_dir.display()))?;
     let dest = plugin_dir.join(format!("{name}.wasm"));
-    std::fs::copy(&artifact, &dest).with_context(|| {
+    let bytes = std::fs::read(&artifact)
+        .with_context(|| format!("failed to read {}", artifact.display()))?;
+    std::fs::write(&dest, &bytes).with_context(|| {
         format!(
             "failed to install {} to {}",
             artifact.display(),
@@ -747,7 +854,72 @@ fn build_plugin(args: &BuildArgs, plugin_dir: &Path) -> anyhow::Result<()> {
     })?;
 
     println!("built and installed {name}.wasm -> {}", dest.display());
+    maybe_refresh_stale_checksum(config_path, &name, &bytes, args.yes);
     Ok(())
+}
+
+/// After `plugin build` installs a fresh `.wasm`, react to its recorded
+/// `checksum` (if any) no longer matching. Quiet whenever
+/// [`rustline_wasm::ChecksumVerdict::allows_load`] is true — no checksum
+/// recorded, or the freshly built bytes still match — since that's the common
+/// case and must stay silent. Otherwise:
+///
+/// - `--yes` (`auto_yes`), or an interactive terminal answering yes
+///   (Enter defaults to yes — refreshing a hash after the user's own rebuild
+///   isn't a new capability grant, unlike `plugin approve`'s confirm, which
+///   defaults to no) — rewrites `[plugins.<name>].checksum` via
+///   [`crate::plugin_install::write_checksum`].
+/// - Otherwise (declined, or stdin isn't a terminal) — leaves the config
+///   alone and prints [`stale_checksum_notice`]. A non-interactive run is
+///   never prompted (it would hang a script/CI) and never silently re-pins
+///   the checksum on its own — that would let a compromised local toolchain
+///   bless itself automatically, exactly what recording a checksum guards
+///   against.
+fn maybe_refresh_stale_checksum(config_path: &Path, name: &str, bytes: &[u8], auto_yes: bool) {
+    let cfg = Config::load(config_path);
+    let Some(pc) = cfg.plugins.get(name) else {
+        return; // plugin isn't configured at all -> nothing recorded to go stale
+    };
+    if rustline_wasm::verify_checksum(pc.checksum.as_deref(), bytes).allows_load() {
+        return; // no checksum recorded, or it still matches: stay quiet
+    }
+
+    let refresh = auto_yes || (std::io::stdin().is_terminal() && confirm_checksum_refresh());
+    if refresh {
+        let new_checksum = rustline_wasm::sha256_hex(bytes);
+        match crate::plugin_install::write_checksum(config_path, name, &new_checksum) {
+            Ok(()) => println!("updated the recorded checksum for {name}"),
+            Err(e) => eprintln!("failed to update the recorded checksum for {name}: {e:#}"),
+        }
+        return;
+    }
+    println!("{}", stale_checksum_notice(name));
+}
+
+/// Interactive confirmation for refreshing a stale recorded checksum after a
+/// rebuild. Enter means yes — unlike `confirm()`'s approve prompt (which
+/// defaults to no, since that one grants a new capability), this is just
+/// re-pinning a hash to match bytes the user just built themselves. Reuses
+/// `init::parse_yes_no` for the actual yes/no parse.
+fn confirm_checksum_refresh() -> bool {
+    print!("Update the recorded checksum? [Y/n] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    crate::init::parse_yes_no(&line, true)
+}
+
+/// The message printed when a plugin's recorded checksum no longer matches a
+/// freshly built `.wasm` and it wasn't refreshed (declined interactively, or
+/// skipped because stdin isn't a terminal). Pure and unit-tested.
+fn stale_checksum_notice(name: &str) -> String {
+    format!(
+        "note: the recorded checksum for {name} no longer matches this build; it will be \
+         rejected at load time until refreshed. Re-run `plugin build` with --yes, answer y \
+         at the prompt, or edit [plugins.{name}].checksum by hand."
+    )
 }
 
 #[cfg(test)]
@@ -1090,6 +1262,166 @@ mod tests {
         assert_eq!(w["allowed_urls"][0], "https://wttr.in/*");
         assert_eq!(w["has_manifest"], false);
         assert!(w.get("max_state_bytes").is_some());
+        // No .wasm at all under a nonexistent plugin dir -> "missing", not an
+        // error and not silently dropped from the payload.
+        assert_eq!(w["checksum_status"], "missing");
+    }
+
+    #[test]
+    fn plugin_list_json_reports_a_verified_checksum() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"totally a wasm binary";
+        std::fs::write(dir.path().join("weather.wasm"), bytes).unwrap();
+
+        let mut cfg = Config::default();
+        let pc = rustline_core::PluginConfig {
+            checksum: Some(rustline_wasm::sha256_hex(bytes)),
+            ..Default::default()
+        };
+        cfg.plugins.insert("weather".to_string(), pc);
+
+        let json = plugin_list_json(&cfg, dir.path());
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let w = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "weather")
+            .unwrap();
+        assert_eq!(w["checksum_status"], "verified");
+    }
+
+    #[test]
+    fn plugin_list_json_reports_a_mismatched_checksum() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("weather.wasm"), b"actual bytes").unwrap();
+
+        let mut cfg = Config::default();
+        let pc = rustline_core::PluginConfig {
+            checksum: Some(rustline_wasm::sha256_hex(b"different bytes")),
+            ..Default::default()
+        };
+        cfg.plugins.insert("weather".to_string(), pc);
+
+        let json = plugin_list_json(&cfg, dir.path());
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let w = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "weather")
+            .unwrap();
+        assert_eq!(w["checksum_status"], "mismatch");
+    }
+
+    #[test]
+    fn stale_checksum_notice_names_the_plugin_and_how_to_fix_it() {
+        let msg = stale_checksum_notice("weather");
+        assert!(msg.contains("weather"), "{msg}");
+        assert!(msg.to_lowercase().contains("checksum"), "{msg}");
+        assert!(msg.contains("--yes"), "{msg}");
+    }
+
+    #[test]
+    fn maybe_refresh_stale_checksum_is_quiet_when_plugin_unconfigured() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(&cfg, "").unwrap();
+        maybe_refresh_stale_checksum(&cfg, "weather", b"bytes", true);
+        assert_eq!(
+            std::fs::read_to_string(&cfg).unwrap(),
+            "",
+            "nothing configured -> nothing to check, nothing written"
+        );
+    }
+
+    #[test]
+    fn maybe_refresh_stale_checksum_is_quiet_when_no_checksum_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        let original = "[plugins.weather]\nallowed_urls = []\n";
+        std::fs::write(&cfg, original).unwrap();
+        maybe_refresh_stale_checksum(&cfg, "weather", b"bytes", true);
+        assert_eq!(
+            std::fs::read_to_string(&cfg).unwrap(),
+            original,
+            "no checksum recorded -> must stay quiet, even with --yes"
+        );
+    }
+
+    #[test]
+    fn maybe_refresh_stale_checksum_is_quiet_when_it_already_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        let sum = rustline_wasm::sha256_hex(b"bytes");
+        let original = format!("[plugins.weather]\nchecksum = \"{sum}\"\n");
+        std::fs::write(&cfg, &original).unwrap();
+        maybe_refresh_stale_checksum(&cfg, "weather", b"bytes", true);
+        assert_eq!(
+            std::fs::read_to_string(&cfg).unwrap(),
+            original,
+            "already-matching checksum -> must stay quiet"
+        );
+    }
+
+    #[test]
+    fn maybe_refresh_stale_checksum_with_yes_rewrites_a_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        let stale = rustline_wasm::sha256_hex(b"old bytes");
+        std::fs::write(&cfg, format!("[plugins.weather]\nchecksum = \"{stale}\"\n")).unwrap();
+
+        maybe_refresh_stale_checksum(&cfg, "weather", b"new bytes", true);
+
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        let expected = rustline_wasm::sha256_hex(b"new bytes");
+        assert!(text.contains(&expected), "{text}");
+        assert!(!text.contains(&stale), "{text}");
+    }
+
+    #[test]
+    fn maybe_refresh_stale_checksum_with_yes_rewrites_a_malformed_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(
+            &cfg,
+            "[plugins.weather]\nchecksum = \"not-a-real-digest\"\n",
+        )
+        .unwrap();
+
+        maybe_refresh_stale_checksum(&cfg, "weather", b"new bytes", true);
+
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        let expected = rustline_wasm::sha256_hex(b"new bytes");
+        assert!(text.contains(&expected), "{text}");
+        assert!(!text.contains("not-a-real-digest"), "{text}");
+    }
+
+    #[test]
+    fn maybe_refresh_stale_checksum_without_yes_leaves_config_untouched() {
+        // No --yes and (per the doc comment) this never prompts/blocks on its
+        // own when called directly without a live confirmation loop backing
+        // it — proven at the process level by the non-TTY smoke test; this
+        // unit test pins the "config is untouched unless refresh happens"
+        // half by driving `write_checksum` around it, not this function's
+        // internal TTY probe (which depends on the test harness's own stdin).
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        let stale = rustline_wasm::sha256_hex(b"old bytes");
+        let original = format!("[plugins.weather]\nchecksum = \"{stale}\"\n");
+        std::fs::write(&cfg, &original).unwrap();
+
+        // auto_yes=false without a TTY: `is_terminal()` is false in the test
+        // harness's typical (non-interactive) stdin, so this must not prompt
+        // and must not rewrite.
+        if !std::io::stdin().is_terminal() {
+            maybe_refresh_stale_checksum(&cfg, "weather", b"new bytes", false);
+            assert_eq!(
+                std::fs::read_to_string(&cfg).unwrap(),
+                original,
+                "non-interactive run without --yes must leave the checksum alone"
+            );
+        }
     }
 
     #[test]

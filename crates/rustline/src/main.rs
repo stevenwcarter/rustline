@@ -18,7 +18,9 @@ mod init;
 mod logging;
 mod media;
 mod memory;
+mod plugin_checksum;
 mod plugin_cmd;
+mod plugin_index;
 mod plugin_install;
 mod sample_context;
 mod sample_store;
@@ -327,6 +329,7 @@ fn main() {
                 plugin_dir: &plugin_dir,
                 log_file: &logging::log_path(&cfg.log),
                 tmux_conf: &tmux_conf_path(),
+                plugins: &cfg.plugins,
             };
             std::process::exit(doctor::run(&paths));
         }

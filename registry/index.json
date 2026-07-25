@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "name": "weather",
+      "description": "Nerd-Font condition icon + °F for a configured zip code, via wttr.in",
+      "source": "stevenwcarter/rustline",
+      "bundled": true,
+      "capabilities": ["http_cached"]
+    },
+    {
+      "name": "counter",
+      "description": "Sandboxed-state counter: reads, increments, and persists a count each render",
+      "source": "stevenwcarter/rustline",
+      "bundled": true,
+      "capabilities": ["state"]
+    },
+    {
+      "name": "filewatch",
+      "description": "First line and line count of a configured file, via the gated file-read capability",
+      "source": "stevenwcarter/rustline",
+      "bundled": true,
+      "capabilities": ["file_read"]
+    },
+    {
+      "name": "httpget",
+      "description": "Snippet of a configured URL's body, via the plain uncached HTTP GET capability",
+      "source": "stevenwcarter/rustline",
+      "bundled": true,
+      "capabilities": ["http"]
+    },
+    {
+      "name": "cmdrun",
+      "description": "First line of a configured command's stdout, via the gated exec capability",
+      "source": "stevenwcarter/rustline",
+      "bundled": true,
+      "capabilities": ["exec", "exec_cached"]
+    }
+  ]
+}

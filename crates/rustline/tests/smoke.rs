@@ -1794,6 +1794,110 @@ fn doctor_runs_and_prints_resolved_paths() {
     );
 }
 
+/// `doctor`'s "plugin checksums" row is purely advisory: a plugin with a
+/// checksum that no longer matches its installed `.wasm` is named in the
+/// report, but never flips `doctor`'s own pass/fail exit code. Proven by
+/// comparing the exit code of a run with no plugins configured against one
+/// with a deliberately mismatched checksum — equal either way, regardless of
+/// what tmux/mouse/etc. happen to report in this environment.
+#[test]
+fn doctor_checksum_mismatch_is_advisory_and_never_affects_exit_code() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+
+    let baseline = isolated_cmd(&home, &data, &config)
+        .arg("doctor")
+        .output()
+        .unwrap();
+
+    // Now configure a plugin whose recorded checksum can never match: no
+    // .wasm file is even installed for it, so `plugin_checksum::status_for`
+    // reports "missing" rather than reading real bytes -- but the mismatch
+    // case below is the one that actually exercises `verify_checksum`'s
+    // comparison, so set that up precisely.
+    let plugin_dir = data.join("rustline/plugins");
+    fs::create_dir_all(&plugin_dir).unwrap();
+    fs::write(plugin_dir.join("weather.wasm"), b"the real installed bytes").unwrap();
+    let cfgdir = config.join("rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    fs::write(
+        cfgdir.join("config.toml"),
+        format!(
+            "[plugins.weather]\nchecksum = \"{}\"\n",
+            rustline_wasm::sha256_hex(b"a completely different set of bytes")
+        ),
+    )
+    .unwrap();
+
+    let with_mismatch = isolated_cmd(&home, &data, &config)
+        .arg("doctor")
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        baseline.status.code(),
+        with_mismatch.status.code(),
+        "a checksum mismatch must not change doctor's exit code: baseline stderr={} \
+         mismatch stderr={}",
+        String::from_utf8_lossy(&baseline.stderr),
+        String::from_utf8_lossy(&with_mismatch.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&with_mismatch.stdout);
+    assert!(
+        stdout.contains("plugin checksums"),
+        "checksum row present: {stdout}"
+    );
+    assert!(
+        stdout.contains("weather") && stdout.contains("mismatch"),
+        "names the mismatched plugin: {stdout}"
+    );
+    // The row itself must be `[warn]`, never `[fail]` -- the exit-code
+    // equality above already proves this behaviorally, but pin the visible
+    // label too since that's what a human actually reads.
+    let checksum_line = stdout
+        .lines()
+        .find(|l| l.contains("plugin checksums"))
+        .unwrap();
+    assert!(
+        checksum_line.contains("[warn"),
+        "checksum row is advisory (warn), not fail: {checksum_line}"
+    );
+}
+
+/// An install with no plugins configured at all gets a clean, unambiguous
+/// "no plugins configured" row rather than an empty/confusing one.
+#[test]
+fn doctor_checksum_row_reports_no_plugins_configured() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    let out = isolated_cmd(&home, &data, &config)
+        .arg("doctor")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let checksum_line = stdout
+        .lines()
+        .find(|l| l.contains("plugin checksums"))
+        .unwrap();
+    assert!(
+        checksum_line.contains("no plugins configured"),
+        "{checksum_line}"
+    );
+    assert!(
+        checksum_line.contains("[ok"),
+        "no plugins configured is a clean pass: {checksum_line}"
+    );
+}
+
 /// `plugin approve <name> --yes` resolves the plugin's sidecar manifest and
 /// writes exactly its requested urls/paths into `[plugins.<name>]`, preserving
 /// comments, and is idempotent.
@@ -1888,6 +1992,79 @@ fn plugin_approve_declined_writes_nothing() {
         original,
         "declined approval leaves config untouched"
     );
+}
+
+/// `plugin list --json` surfaces a per-plugin `checksum_status`, computed the
+/// same way `doctor`'s row is: read the installed `.wasm`, verify it via
+/// `rustline_wasm::verify_checksum`.
+#[test]
+fn plugin_list_json_reports_checksum_status() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("cfg/rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let plugin_dir = tmp.path().join("data/rustline/plugins");
+    fs::create_dir_all(&plugin_dir).unwrap();
+
+    let bytes = b"a real installed plugin binary";
+    fs::write(plugin_dir.join("weather.wasm"), bytes).unwrap();
+    fs::write(
+        cfgdir.join("config.toml"),
+        format!(
+            "[plugins.weather]\nchecksum = \"{}\"\n",
+            rustline_wasm::sha256_hex(bytes)
+        ),
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "list", "--json"])
+        .env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let w = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "weather")
+        .unwrap();
+    assert_eq!(w["checksum_status"], "verified");
+    // Additive: the previously-existing fields are all still there, unchanged.
+    assert!(w.get("allowed_urls").is_some());
+    assert!(w.get("has_manifest").is_some());
+}
+
+/// `plugin list` (human, non-JSON) prints a `checksum:` status line matching
+/// the same computation.
+#[test]
+fn plugin_list_human_output_shows_checksum_status() {
+    let tmp = tempdir().unwrap();
+    let cfgdir = tmp.path().join("cfg/rustline");
+    fs::create_dir_all(&cfgdir).unwrap();
+    let plugin_dir = tmp.path().join("data/rustline/plugins");
+    fs::create_dir_all(&plugin_dir).unwrap();
+
+    // Deliberately no .wasm installed for this one: "missing" must show up as
+    // a plain status value, never an error that aborts the listing.
+    fs::write(
+        cfgdir.join("config.toml"),
+        "[plugins.ghost]\nchecksum = \"deadbeef\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "list"])
+        .env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("checksum: missing"), "{stdout}");
 }
 
 /// A global `--config <path>` overrides the resolved config file everywhere:
@@ -2675,5 +2852,272 @@ fn widget_disable_from_non_center_region_prints_no_center_warning() {
     assert!(
         !stderr.contains("center"),
         "no center warning for a non-center disable: {stderr}"
+    );
+}
+
+/// Real-clock unix seconds, for stamping a seeded plugin-index cache as
+/// genuinely fresh. `plugin_index.rs`'s `index_is_fresh` is
+/// `now >= fetched_at && now - fetched_at < ttl` — a `fetched_at` in the
+/// FUTURE fails `now >= fetched_at` and is therefore **stale**, deliberately
+/// (a backward clock must force a refetch rather than pin a cache fresh
+/// forever; see `a_backward_clock_counts_as_stale_rather_than_forever_fresh`).
+/// So a current-or-past timestamp is what makes a seeded cache fresh, not a
+/// far-future one.
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Seed the plugin-index cache so `plugin search` answers from disk and never
+/// touches the network. Path mirrors `state_root()` under the `XDG_DATA_HOME`
+/// that `isolate` sets. Stamped with the real current clock (`unix_now_secs`)
+/// so the cache is genuinely inside the TTL and `load_index` returns it
+/// without ever attempting a fetch.
+fn seed_index_cache(tmp: &Path) {
+    let state = tmp.join("data/rustline/state");
+    fs::create_dir_all(&state).expect("state dir");
+    let body = format!(
+        r#"{{"fetched_at":{},"index":{{"schema_version":1,"plugins":[
+        {{"name":"weather","description":"Weather from wttr.in","source":"o/r","bundled":true,"capabilities":["http_cached"]}},
+        {{"name":"othertool","description":"Something else entirely","source":"o/r2","bundled":false,"capabilities":[]}}
+    ]}}}}"#,
+        unix_now_secs()
+    );
+    fs::write(state.join("plugin-index.json"), body).expect("seed index cache");
+}
+
+/// Belt-and-braces alongside a fresh-stamped seeded cache: point
+/// `XDG_CONFIG_HOME` at a config that overrides `plugin_index_url` to a
+/// loopback address nothing listens on. Even if a freshness regression crept
+/// back in and `plugin search` attempted a fetch, it would fail fast and
+/// offline (connection refused) instead of ever reaching the real
+/// `DEFAULT_INDEX_URL` on GitHub — these tests must never depend on network
+/// reachability, or on that URL 404ing before the branch merges.
+fn isolate_with_dead_plugin_index(cmd: &mut Command, tmp: &Path) {
+    isolate(cmd, tmp);
+    let cfg_dir = tmp.join("cfg/rustline");
+    fs::create_dir_all(&cfg_dir).expect("cfg dir");
+    fs::write(
+        cfg_dir.join("config.toml"),
+        r#"plugin_index_url = "http://127.0.0.1:1/index.json""#,
+    )
+    .expect("seed config");
+    cmd.env("XDG_CONFIG_HOME", tmp.join("cfg"));
+}
+
+/// Guards the *reason* the other `plugin_search_*` tests are hermetic.
+///
+/// They all seed a fresh cache AND point `plugin_index_url` at a dead loopback,
+/// so if the freshness stamping ever regressed (e.g. back to a far-future
+/// `fetched_at`, which `index_is_fresh` treats as STALE), they would still pass
+/// — the failed fetch falls back to the same cached content and only stderr
+/// differs. That would silently restore the network round-trip this suite
+/// exists to avoid. Asserting the staleness warning is *absent* pins
+/// "no fetch was attempted" rather than merely "the right bytes came out".
+#[test]
+fn plugin_search_with_a_fresh_cache_attempts_no_fetch() {
+    let tmp = tempdir().unwrap();
+    seed_index_cache(tmp.path());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search"]);
+    isolate_with_dead_plugin_index(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("could not refresh"),
+        "a fresh cache must be served without any fetch attempt; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("weather"), "cache still served: {stdout}");
+}
+
+#[test]
+fn plugin_search_lists_the_index() {
+    let tmp = tempdir().unwrap();
+    seed_index_cache(tmp.path());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search"]);
+    isolate_with_dead_plugin_index(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    assert!(out.status.success(), "plugin search should succeed");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("weather"), "index entries listed: {s}");
+    assert!(s.contains("othertool"), "{s}");
+    assert!(
+        s.contains("just build-plugin weather"),
+        "a bundled entry shows a build hint, not an install command: {s}"
+    );
+    assert!(
+        s.contains("rustline plugin install o/r2"),
+        "a non-bundled entry shows its install command: {s}"
+    );
+}
+
+#[test]
+fn plugin_search_filters_by_query() {
+    let tmp = tempdir().unwrap();
+    seed_index_cache(tmp.path());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search", "weath"]);
+    isolate_with_dead_plugin_index(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("weather"), "{s}");
+    assert!(
+        !s.contains("othertool"),
+        "the query should exclude non-matches: {s}"
+    );
+}
+
+#[test]
+fn plugin_search_json_emits_an_array() {
+    let tmp = tempdir().unwrap();
+    seed_index_cache(tmp.path());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search", "--json"]);
+    isolate_with_dead_plugin_index(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    let s = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&s)
+        .unwrap_or_else(|e| panic!("--json must emit valid JSON: {e}: {s}"));
+    let arr = v.as_array().expect("array");
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["name"], "weather");
+    assert_eq!(
+        arr[0]["installed"], false,
+        "nothing installed in the tempdir"
+    );
+    assert_eq!(arr[1]["source"], "o/r2");
+}
+
+#[test]
+fn plugin_search_prints_no_action_hint_when_neither_bundled_nor_sourced() {
+    // Coverage gap the review flagged: the `(false, None)` arm of `search`'s
+    // bundled/source match (not bundled AND no recorded `source`) was never
+    // exercised. An entry with neither must print neither a `just
+    // build-plugin` hint nor a `plugin install` hint.
+    let tmp = tempdir().unwrap();
+    let state = tmp.path().join("data/rustline/state");
+    fs::create_dir_all(&state).expect("state dir");
+    let body = format!(
+        r#"{{"fetched_at":{},"index":{{"schema_version":1,"plugins":[
+        {{"name":"mystery","description":"No source, not bundled"}}
+    ]}}}}"#,
+        unix_now_secs()
+    );
+    fs::write(state.join("plugin-index.json"), body).expect("seed index cache");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search"]);
+    isolate_with_dead_plugin_index(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("mystery"), "{s}");
+    assert!(
+        !s.contains("build-plugin"),
+        "not bundled, no build hint: {s}"
+    );
+    assert!(
+        !s.contains("plugin install"),
+        "no recorded source, no install hint: {s}"
+    );
+}
+
+#[test]
+fn plugin_search_reports_no_matches_for_an_unmatched_query() {
+    let tmp = tempdir().unwrap();
+    seed_index_cache(tmp.path());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search", "zzz-no-such-plugin"]);
+    isolate_with_dead_plugin_index(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains(r#"no plugins in the index match "zzz-no-such-plugin""#),
+        "{s}"
+    );
+}
+
+#[test]
+fn plugin_search_reports_an_empty_index() {
+    let tmp = tempdir().unwrap();
+    let state = tmp.path().join("data/rustline/state");
+    fs::create_dir_all(&state).expect("state dir");
+    let body = format!(
+        r#"{{"fetched_at":{},"index":{{"schema_version":1,"plugins":[]}}}}"#,
+        unix_now_secs()
+    );
+    fs::write(state.join("plugin-index.json"), body).expect("seed index cache");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search"]);
+    isolate_with_dead_plugin_index(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("the plugin index is empty"), "{s}");
+}
+
+#[test]
+fn plugin_search_json_warns_of_staleness_on_stderr() {
+    // Pins Defect 2's fix: `search`'s stale-cache warning must reach stderr
+    // even under `--json` — previously the `--json` early return happened
+    // BEFORE the staleness check ran at all, so a scripted `--json` consumer
+    // had no way to learn its result was a day-old cached copy.
+    let tmp = tempdir().unwrap();
+
+    // Seed a STALE cache: `fetched_at=0` is unconditionally outside the 24h
+    // TTL, so `load_index` attempts a refetch and falls back to this cache
+    // (flagged `stale`) when that refetch fails.
+    let state = tmp.path().join("data/rustline/state");
+    fs::create_dir_all(&state).expect("state dir");
+    let body = r#"{"fetched_at":0,"index":{"schema_version":1,"plugins":[
+        {"name":"weather","description":"Weather from wttr.in","source":"o/r","bundled":true,"capabilities":["http_cached"]}
+    ]}}"#;
+    fs::write(state.join("plugin-index.json"), body).expect("seed index cache");
+
+    // Point `plugin_index_url` at a loopback address nothing listens on, so
+    // the refetch this triggers fails fast and offline (connection refused)
+    // instead of ever reaching the real `DEFAULT_INDEX_URL` on GitHub — keeps
+    // this test hermetic.
+    let cfg_dir = tmp.path().join("cfg/rustline");
+    fs::create_dir_all(&cfg_dir).expect("cfg dir");
+    fs::write(
+        cfg_dir.join("config.toml"),
+        r#"plugin_index_url = "http://127.0.0.1:1/index.json""#,
+    )
+    .expect("seed config");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search", "--json"]);
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    let out = cmd.output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "search must still succeed, serving the stale cache: stderr={stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("stdout must still be valid JSON when serving a stale cache: {e}\n{stdout}")
+    });
+    let arr = v.as_array().expect("a JSON array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "weather");
+
+    assert!(
+        stderr.contains("could not refresh the plugin index"),
+        "the staleness warning must reach stderr even under --json: {stderr}"
     );
 }

@@ -10,11 +10,16 @@
 //! never writes anything — it only reads and prints, like the other
 //! stdout-is-for-humans commands (`theme list`, `plugin list`).
 
+use std::collections::HashMap;
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use rustline_core::PluginConfig;
+
+use crate::plugin_checksum::{PluginChecksumStatus, status_for};
 use crate::{daemon, daemon_client};
 
 /// Minimum tmux version rustline's click-to-toggle needs: status-line click
@@ -61,6 +66,10 @@ pub(crate) struct DoctorPaths<'a> {
     pub plugin_dir: &'a Path,
     pub log_file: &'a Path,
     pub tmux_conf: &'a Path,
+    /// The configured `[plugins.*]` table, so the checksum row (see
+    /// [`check_plugin_checksums`]) can report on every plugin the user has
+    /// configured, not just ones that happen to be discovered on disk.
+    pub plugins: &'a HashMap<String, PluginConfig>,
 }
 
 /// Parse `tmux -V` output (e.g. `"tmux 3.4\n"`, `"tmux 3.1a"`,
@@ -325,6 +334,74 @@ fn check_daemon() -> Check {
     }
 }
 
+/// Verify every configured plugin's installed `.wasm` against its recorded
+/// `checksum` (the same [`rustline_wasm::verify_checksum`] call
+/// `register_plugins` gates loading on — see `plugin_checksum::status_for`),
+/// and summarize the result as a single advisory row.
+///
+/// **Always `Ok` or `Warn`, never `Fail`** — a checksum problem is real and
+/// worth surfacing (unlike the other `Warn`-only rows here, an actual security
+/// gate is silently rejecting a widget), but `doctor`'s exit code is reserved
+/// for setup that's outright broken, and the checksum gate itself already
+/// degrades a bad plugin to "widget missing," never to a broken bar (N2). The
+/// `render daemon` row above is this check's precedent for an advisory-only,
+/// never-fails row.
+///
+/// Summarizes rather than spams: a plugin that verifies or has no checksum
+/// recorded contributes only to the leading counts, never named individually;
+/// a plugin that mismatches, has a malformed digest, or has a missing `.wasm`
+/// file is named explicitly, since those are the actionable ones. An empty
+/// `[plugins.*]` table reports a clean, unambiguous "no plugins configured"
+/// rather than an empty/confusing row.
+fn check_plugin_checksums(plugins: &HashMap<String, PluginConfig>, plugin_dir: &Path) -> Check {
+    const NAME: &str = "plugin checksums";
+    if plugins.is_empty() {
+        return Check {
+            name: NAME,
+            status: CheckStatus::Ok,
+            detail: "no plugins configured".to_string(),
+        };
+    }
+
+    let mut names: Vec<&str> = plugins.keys().map(String::as_str).collect();
+    names.sort_unstable();
+
+    let (mut verified, mut unpinned) = (0usize, 0usize);
+    let (mut mismatched, mut malformed, mut missing) = (Vec::new(), Vec::new(), Vec::new());
+    for name in names {
+        let checksum = plugins[name].checksum.as_deref();
+        match status_for(plugin_dir, name, checksum) {
+            PluginChecksumStatus::Verified => verified += 1,
+            PluginChecksumStatus::Unpinned => unpinned += 1,
+            PluginChecksumStatus::Mismatch => mismatched.push(name),
+            PluginChecksumStatus::Malformed => malformed.push(name),
+            PluginChecksumStatus::Missing => missing.push(name),
+        }
+    }
+
+    let mut detail = format!("{verified} verified, {unpinned} unpinned");
+    let status = if mismatched.is_empty() && malformed.is_empty() && missing.is_empty() {
+        CheckStatus::Ok
+    } else {
+        if !mismatched.is_empty() {
+            let _ = write!(detail, "; checksum mismatch: {}", mismatched.join(", "));
+        }
+        if !malformed.is_empty() {
+            let _ = write!(detail, "; malformed checksum: {}", malformed.join(", "));
+        }
+        if !missing.is_empty() {
+            let _ = write!(detail, "; .wasm not found: {}", missing.join(", "));
+        }
+        CheckStatus::Warn
+    };
+
+    Check {
+        name: NAME,
+        status,
+        detail,
+    }
+}
+
 /// Whether a resolved directory (config/themes/plugin/log) already exists.
 /// Absence is only a `Warn` — every one of these is created on first use
 /// (invariant: `Config::load` is total), so a fresh install legitimately has
@@ -364,6 +441,7 @@ pub(crate) fn run(paths: &DoctorPaths) -> i32 {
         check_managed_block(paths.tmux_conf),
         check_daemon(),
         check_popup(tmux_version),
+        check_plugin_checksums(paths.plugins, paths.plugin_dir),
         check_dir("config dir", config_dir),
         check_dir("themes dir", paths.themes_dir),
         check_dir("plugin dir", paths.plugin_dir),
@@ -456,5 +534,82 @@ mod tests {
         assert_eq!(popup_status(Some((3, 4))), CheckStatus::Ok);
         assert_eq!(popup_status(Some((3, 1))), CheckStatus::Warn);
         assert_eq!(popup_status(None), CheckStatus::Warn);
+    }
+
+    fn pc(checksum: Option<&str>) -> PluginConfig {
+        PluginConfig {
+            checksum: checksum.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_plugins_configured_is_a_clean_pass() {
+        let plugins = HashMap::new();
+        let dir = tempfile::tempdir().unwrap();
+        let check = check_plugin_checksums(&plugins, dir.path());
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(
+            check.detail.contains("no plugins configured"),
+            "{}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn every_plugin_verified_or_unpinned_is_a_single_ok_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("good.wasm"), b"good bytes").unwrap();
+        std::fs::write(dir.path().join("bare.wasm"), b"whatever").unwrap();
+        let mut plugins = HashMap::new();
+        plugins.insert(
+            "good".to_string(),
+            pc(Some(&rustline_wasm::sha256_hex(b"good bytes"))),
+        );
+        plugins.insert("bare".to_string(), pc(None));
+
+        let check = check_plugin_checksums(&plugins, dir.path());
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.detail.contains("1 verified"), "{}", check.detail);
+        assert!(check.detail.contains("1 unpinned"), "{}", check.detail);
+    }
+
+    #[test]
+    fn mismatch_is_advisory_warn_never_fail_and_names_the_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bad.wasm"), b"actual bytes").unwrap();
+        let mut plugins = HashMap::new();
+        plugins.insert(
+            "bad".to_string(),
+            pc(Some(&rustline_wasm::sha256_hex(b"different bytes"))),
+        );
+
+        let check = check_plugin_checksums(&plugins, dir.path());
+        assert_eq!(
+            check.status,
+            CheckStatus::Warn,
+            "advisory only: {}",
+            check.detail
+        );
+        assert!(check.detail.contains("bad"), "{}", check.detail);
+        assert!(check.detail.contains("mismatch"), "{}", check.detail);
+    }
+
+    #[test]
+    fn malformed_and_missing_are_also_advisory_warn_and_named() {
+        let dir = tempfile::tempdir().unwrap();
+        // `weird` has a malformed recorded digest but a real file present.
+        std::fs::write(dir.path().join("weird.wasm"), b"bytes").unwrap();
+        // `ghost` has no .wasm file on disk at all.
+        let mut plugins = HashMap::new();
+        plugins.insert("weird".to_string(), pc(Some("not-a-real-digest")));
+        plugins.insert("ghost".to_string(), pc(None));
+
+        let check = check_plugin_checksums(&plugins, dir.path());
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.detail.contains("weird"), "{}", check.detail);
+        assert!(check.detail.contains("malformed"), "{}", check.detail);
+        assert!(check.detail.contains("ghost"), "{}", check.detail);
+        assert!(check.detail.contains("not found"), "{}", check.detail);
     }
 }

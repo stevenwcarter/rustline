@@ -201,6 +201,18 @@ pub enum PluginCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Search the curated plugin index for widgets you can install.
+    Search {
+        /// Case-insensitive filter over name and description. Omit to list
+        /// every plugin in the index.
+        query: Option<String>,
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+        /// Bypass the 24-hour cache and fetch the index now.
+        #[arg(long)]
+        refresh: bool,
+    },
     /// Manage a plugin's URL allowlist.
     #[command(subcommand)]
     Url(PatternCmd),
@@ -258,6 +270,13 @@ pub struct BuildArgs {
     /// used elsewhere — config `plugin_dir`, or the XDG default).
     #[arg(long)]
     pub plugin_dir: Option<String>,
+    /// If the freshly built `.wasm` no longer matches a recorded
+    /// `[plugins.<name>].checksum`, refresh it without prompting (for
+    /// scripts/CI). Interactive runs are asked instead (Enter = yes); a
+    /// non-interactive run without this flag leaves the stale checksum alone
+    /// and prints how to refresh it.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// Arguments for `rustline plugin run`.

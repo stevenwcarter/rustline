@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # Lets the whole pipeline (build, package, checksum) be dry-run on a branch
+  # before the first real `v*` tag ever gets pushed — this repo has zero tags
+  # today and this workflow has never executed, so without this its maiden
+  # run would otherwise be the irreversible public v0.1.0 tag. The publish
+  # step below is skipped on a manual run (see its `if:`), so a dispatch never
+  # creates a real GitHub release — only the build/package/checksum legs run.
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Static musl needs its linker; every other leg is native to its runner.
+      - name: Install musl tooling
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p rustline
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          # On a real release this is a tag (e.g. "v0.1.0") and is already a
+          # safe path component. On a manual `workflow_dispatch` dry run,
+          # though, `GITHUB_REF_NAME` is a BRANCH name, which may contain `/`
+          # (e.g. "feat/my-branch") — left as-is that would make `mkdir -p`
+          # create nested directories for `${stage}`, and the later
+          # `dist/*.tar.gz` glob (both the upload-artifact `path:` and the
+          # Checksums step) would then miss the asset entirely, tripping
+          # `if-no-files-found: error`. Flatten any slashes so a dry run
+          # packages exactly like a real one, just under a branch-derived name.
+          version="${version//\//-}"
+          stage="rustline-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${stage}/completions"
+
+          bin="target/${{ matrix.target }}/release/rustline"
+          cp "$bin" "dist/${stage}/rustline"
+          cp README.md LICENSE "dist/${stage}/"
+
+          # Every target is native to its runner (the static musl binary runs on
+          # the gnu host), so the freshly built binary can generate its own
+          # completions.
+          "$bin" completions bash > "dist/${stage}/completions/rustline.bash"
+          "$bin" completions zsh  > "dist/${stage}/completions/_rustline"
+          "$bin" completions fish > "dist/${stage}/completions/rustline.fish"
+
+          tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustline-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      # Skipped on a manual `workflow_dispatch` dry run — a dispatch runs on a
+      # branch, not a tag, so there is no real version to publish under; every
+      # other step above (build, package, checksum) still runs and can be
+      # inspected via the uploaded artifacts, so the whole pipeline gets
+      # exercised without creating a real GitHub release.
+      - uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS
+          prerelease: true
+          generate_release_notes: true

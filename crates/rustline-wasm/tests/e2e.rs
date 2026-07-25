@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rustline_core::{Config, Context, PluginConfig, Registry, Widget, WidgetSource};
 use rustline_wasm::capability::CapabilityCtx;
-use rustline_wasm::{WasmWidget, build_plugin, register_plugins};
+use rustline_wasm::{WasmWidget, build_plugin, register_plugins, sha256_hex};
 
 const WTTR_BODY: &str = r#"{"current_condition":[{"temp_F":"72","weatherCode":"113","weatherDesc":[{"value":"Sunny"}]}]}"#;
 
@@ -190,5 +190,113 @@ fn cross_zip_isolation_no_leak() {
     assert!(
         sb.is_empty(),
         "no entry for 90210 + failed fetch -> empty: {sb:?}"
+    );
+}
+
+/// Stage the real weather plugin into a fresh dir, returning (dir, bytes) so a
+/// test can compute — or deliberately corrupt — its digest.
+fn staged_weather() -> (tempfile::TempDir, Vec<u8>) {
+    let bytes = weather_wasm();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("weather.wasm"), &bytes).expect("stage plugin");
+    (dir, bytes)
+}
+
+/// A Config pinning `weather` to `checksum`.
+fn cfg_with_checksum(checksum: Option<String>) -> Config {
+    let mut cfg = Config::default();
+    cfg.plugins.insert(
+        "weather".to_string(),
+        PluginConfig {
+            checksum,
+            ..Default::default()
+        },
+    );
+    cfg
+}
+
+fn register_weather(cfg: &Config, dir: &std::path::Path) -> Registry {
+    let mut reg = Registry::new();
+    register_plugins(&mut reg, cfg, dir, &["weather".to_string()]);
+    reg
+}
+
+/// Producer 1: a hand-installed plugin (or one built by `just build-plugin`)
+/// has no recorded digest and must keep loading.
+#[test]
+fn plugin_without_a_recorded_checksum_still_registers() {
+    let (dir, _bytes) = staged_weather();
+    let reg = register_weather(&cfg_with_checksum(None), dir.path());
+    assert!(
+        reg.contains("weather"),
+        "an unpinned plugin must still load"
+    );
+}
+
+/// Producer 2: a plugin installed via `plugin install` records the digest of
+/// exactly these bytes, so it must verify.
+#[test]
+fn plugin_with_a_matching_checksum_registers() {
+    let (dir, bytes) = staged_weather();
+    let reg = register_weather(&cfg_with_checksum(Some(sha256_hex(&bytes))), dir.path());
+    assert!(
+        reg.contains("weather"),
+        "a correctly pinned plugin must load"
+    );
+}
+
+/// The threat this feature exists for: the file on disk was swapped after the
+/// digest was recorded. Note the module itself is perfectly valid here — only
+/// the digest disagrees — so this can only pass if the gate is real.
+#[test]
+fn plugin_with_a_mismatched_checksum_does_not_register() {
+    let (dir, _bytes) = staged_weather();
+    let wrong = sha256_hex(b"different bytes entirely");
+    let reg = register_weather(&cfg_with_checksum(Some(wrong)), dir.path());
+    assert!(
+        !reg.contains("weather"),
+        "a tampered plugin must be refused even though the module is valid"
+    );
+}
+
+/// Fail closed: an unparseable digest is a request to verify that we cannot honour.
+#[test]
+fn plugin_with_a_malformed_checksum_does_not_register() {
+    let (dir, _bytes) = staged_weather();
+    let reg = register_weather(
+        &cfg_with_checksum(Some("not-a-digest".to_string())),
+        dir.path(),
+    );
+    assert!(!reg.contains("weather"), "a malformed pin must fail closed");
+}
+
+/// The load gate accepts a canonically-shaped digest: 64 lowercase hex chars,
+/// computed via `sha256_hex` over the exact bytes staged on disk.
+///
+/// NOTE on scope: this test calls `sha256_hex` from the same import the
+/// verification gate itself uses internally, so it does NOT span the real
+/// `plugin install` -> load seam — it cannot catch a bug where the install
+/// path hashes different bytes than it writes, or where `write_install_record`
+/// mangles the digest in transit to disk (`crates/rustline`'s
+/// `write_install_record` is a private fn of the bin crate, unreachable from
+/// this integration test — see that crate's module docs). It is
+/// functionally the load-side half of `plugin_with_a_matching_checksum_registers`
+/// above, plus the length pin. The real write -> load seam test — which
+/// drives the actual `write_install_record` and `rustline_core::Config::load`
+/// — lives in `crates/rustline/src/plugin_install.rs` as
+/// `write_install_record_then_config_load_verifies_the_real_bytes` (and its
+/// negative counterpart, `..._rejects_swapped_bytes`).
+#[test]
+fn a_canonically_shaped_digest_is_accepted_at_load_time() {
+    let (dir, bytes) = staged_weather();
+    // The shape `plugin install` would record: sha256_hex over the exact
+    // bytes staged at <plugin_dir>/<name>.wasm.
+    let recorded = sha256_hex(&bytes);
+    assert_eq!(recorded.len(), 64, "recorded digest shape must stay stable");
+
+    let reg = register_weather(&cfg_with_checksum(Some(recorded)), dir.path());
+    assert!(
+        reg.contains("weather"),
+        "a digest of this shape matching the staged bytes must satisfy load-time verification"
     );
 }
