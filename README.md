@@ -759,7 +759,10 @@ just preview
 
 Other recipes: `just build`, `just test`, `just lint`, `just lint-plugins` and
 `just test-plugins` (fmt/clippy/tests for the excluded example plugins under
-`plugins/*`, which the root `cargo` commands never see).
+`plugins/*`, which the root `cargo` commands never see), and `just check-lock`
+(verifies every committed `Cargo.lock` — the workspace's plus each plugin's —
+is up to date; CI runs it, so it is what catches a forgotten lock refresh
+before a release build with `--locked` would).
 
 ## Benchmarking
 
