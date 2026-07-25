@@ -240,35 +240,59 @@ fn clock_from_format(fmt: &str) -> Option<ClockStyle> {
     .find(|c| c.formats().0 == fmt)
 }
 
-/// Pre-fill wizard answers from an existing config.toml. Recovers only what
-/// config stores (theme, optional-widget membership, clock); the tmux-only
-/// answers (mouse/two_line/interval) keep their recommended defaults.
-fn seed_answers(config_path: &Path) -> InitAnswers {
+/// Pre-fill wizard answers from what a previous run left on disk, so a re-run
+/// shows the user's own choices as its defaults instead of resetting them.
+///
+/// Two sources, because the answers live in two places: `config.toml` records
+/// the theme, optional-widget membership, and clock; `two_line`/`mouse`/
+/// `interval` are tmux settings that only ever land in `~/.tmux.conf`'s managed
+/// block, so they're recovered by reverse-parsing that block (see
+/// [`tmux_conf::parse_block_answers`]). Recovering the block matters most for
+/// `two_line`: its recommended default is one-line, so seeding it from
+/// [`defaults`] meant an Enter-through re-run quietly rewrote a two-line status
+/// bar back to one line.
+///
+/// Each source degrades independently: a missing/unreadable config keeps the
+/// recommended answers (with `battery` hardware-probed, as on a fresh install),
+/// and a missing/blockless tmux conf keeps the recommended tmux answers.
+fn seed_answers(config_path: &Path, tmux_conf_path: &Path) -> InitAnswers {
     use rustline_core::Config;
-    if !config_path.exists() {
+    let mut a = if config_path.exists() {
+        let cfg = Config::load(config_path);
+        let in_layout = |name: &str| {
+            cfg.layout
+                .left
+                .iter()
+                .chain(&cfg.layout.center)
+                .chain(&cfg.layout.right)
+                .any(|w| w == name)
+        };
+        InitAnswers {
+            theme: cfg.theme.base.clone().unwrap_or_else(|| defaults().theme),
+            two_line: defaults().two_line,
+            mouse: defaults().mouse,
+            battery: in_layout("battery"),
+            tailscale: in_layout("tailscale_ip"),
+            lan_ip: in_layout("lan_ip"),
+            clock: clock_from_format(&cfg.widgets.datetime.format)
+                .unwrap_or_else(|| defaults().clock),
+            interval: defaults().interval,
+        }
+    } else {
         let mut a = defaults();
         a.battery = crate::battery::read_battery().is_some();
-        return a;
-    }
-    let cfg = Config::load(config_path);
-    let in_layout = |name: &str| {
-        cfg.layout
-            .left
-            .iter()
-            .chain(&cfg.layout.center)
-            .chain(&cfg.layout.right)
-            .any(|w| w == name)
+        a
     };
-    InitAnswers {
-        theme: cfg.theme.base.clone().unwrap_or_else(|| defaults().theme),
-        two_line: defaults().two_line,
-        mouse: defaults().mouse,
-        battery: in_layout("battery"),
-        tailscale: in_layout("tailscale_ip"),
-        lan_ip: in_layout("lan_ip"),
-        clock: clock_from_format(&cfg.widgets.datetime.format).unwrap_or_else(|| defaults().clock),
-        interval: defaults().interval,
+    if let Some(block) = fs::read_to_string(tmux_conf_path)
+        .ok()
+        .as_deref()
+        .and_then(tmux_conf::parse_block_answers)
+    {
+        a.two_line = block.two_line;
+        a.mouse = block.mouse;
+        a.interval = block.interval.unwrap_or(a.interval);
     }
+    a
 }
 
 /// A human summary of the collected answers for the pre-write confirmation.
@@ -354,7 +378,7 @@ pub fn run(
     let answers = if args.defaults {
         defaults()
     } else if std::io::stdin().is_terminal() {
-        prompt_answers(themes_dir, &seed_answers(config_path))
+        prompt_answers(themes_dir, &seed_answers(config_path, tmux_conf_path))
     } else {
         eprintln!(
             "rustline init needs a terminal for the interactive wizard.\n\
@@ -1058,21 +1082,83 @@ format = "USER {percent}%"
             ),
         )
         .unwrap();
-        let a = seed_answers(&path);
+        let a = seed_answers(&path, &tmp.path().join("no-such-tmux.conf"));
         assert_eq!(a.theme, "nord");
         assert!(a.lan_ip);
         assert!(a.battery);
         assert!(!a.tailscale);
         assert_eq!(a.clock, ClockStyle::Twelve);
-        // tmux-only answers keep recommended defaults (config-only seed):
+        // With no tmux conf to read a managed block from, the tmux-only
+        // answers fall back to the recommended defaults:
         assert_eq!(a.mouse, defaults().mouse);
         assert_eq!(a.interval, defaults().interval);
         assert_eq!(a.two_line, defaults().two_line);
     }
 
+    /// The bug this closes: `two_line`/`mouse`/`interval` live only in the
+    /// tmux block, so seeding them from `defaults()` meant a plain
+    /// Enter-through re-run silently rewrote a two-line bar back to one line
+    /// (and a 5s refresh back to 1s). The managed block the wizard itself
+    /// wrote is the record of those choices — read it back.
+    #[test]
+    fn seed_answers_recovers_tmux_only_answers_from_the_managed_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config.toml");
+        std::fs::write(&config, "[theme]\nbase = \"nord\"\n").unwrap();
+
+        let tmux = tmp.path().join("tmux.conf");
+        let block = tmux_conf::init_block(&InitBlockOpts {
+            bar_bg: "colour234",
+            fg: "colour255",
+            two_line: true,
+            mouse: false,
+            interval: 5,
+            binary: "/usr/bin/rustline",
+        });
+        std::fs::write(
+            &tmux,
+            tmux_conf::upsert_tmux_block("# user content\n", &block),
+        )
+        .unwrap();
+
+        let a = seed_answers(&config, &tmux);
+        // Recovered from the block, not `defaults()` (true/false/5 vs
+        // false/true/1) — each of the three differs from its default here, so
+        // none of these can pass by coincidence.
+        assert!(a.two_line);
+        assert!(!a.mouse);
+        assert_eq!(a.interval, 5);
+        // Config-derived answers still come from config.toml.
+        assert_eq!(a.theme, "nord");
+    }
+
+    #[test]
+    fn seed_answers_recovers_the_block_even_without_a_config_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmux = tmp.path().join("tmux.conf");
+        let block = tmux_conf::init_block(&InitBlockOpts {
+            bar_bg: "colour234",
+            fg: "colour255",
+            two_line: true,
+            mouse: false,
+            interval: 5,
+            binary: "/usr/bin/rustline",
+        });
+        std::fs::write(&tmux, tmux_conf::upsert_tmux_block("", &block)).unwrap();
+
+        let a = seed_answers(&tmp.path().join("no-such-config.toml"), &tmux);
+        assert!(a.two_line);
+        assert!(!a.mouse);
+        assert_eq!(a.interval, 5);
+        assert_eq!(a.theme, defaults().theme);
+    }
+
     #[test]
     fn seed_answers_missing_file_is_defaults_shaped() {
-        let a = seed_answers(std::path::Path::new("/no/such/config.toml"));
+        let a = seed_answers(
+            std::path::Path::new("/no/such/config.toml"),
+            std::path::Path::new("/no/such/tmux.conf"),
+        );
         assert_eq!(a.theme, defaults().theme);
         assert!(!a.lan_ip && !a.tailscale);
         // battery may be true or false depending on the host probe; assert it does not panic

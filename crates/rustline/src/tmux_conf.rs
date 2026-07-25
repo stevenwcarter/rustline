@@ -205,6 +205,61 @@ pub fn upsert_tmux_block(existing: &str, block: &str) -> String {
     }
 }
 
+/// The three `rustline init` wizard answers that live **only** in the tmux
+/// block. `config.toml` records none of them — they're tmux settings, not
+/// rustline settings — so a previously written managed block is the only
+/// record of what the user chose, and therefore the only way a wizard re-run
+/// can show those choices back as its defaults instead of resetting them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockAnswers {
+    pub two_line: bool,
+    pub mouse: bool,
+    /// `None` when the block carries no parseable `set -g status-interval N`,
+    /// leaving the choice of fallback to the caller.
+    pub interval: Option<u32>,
+}
+
+/// Find an existing `TMUX_BEGIN..=TMUX_END` region in `s`, returning just the
+/// text *between* the markers. `None` if no complete region is found.
+fn region_body(s: &str) -> Option<&str> {
+    let b = s.find(TMUX_BEGIN)?;
+    let e = s.find(TMUX_END)?;
+    if e < b {
+        return None;
+    }
+    Some(&s[b + TMUX_BEGIN.len()..e])
+}
+
+/// Reverse-parse the rustline-managed block in an existing `~/.tmux.conf` back
+/// into the three answers [`init_block`] encodes there — the inverse of that
+/// function for those three knobs. `None` when no complete managed region is
+/// present (nothing to recover).
+///
+/// Matching is **whole-line** on purpose: the block also carries the
+/// discoverability comment `# rustline click-to-toggle … (needs: set -g mouse
+/// on)` *unconditionally*, so a substring search for `set -g mouse on` would
+/// report `mouse: true` even for a mouse-off block (the same trap
+/// `one_line_default_matches_legacy_shape` anchors around). Lines are trimmed
+/// first, so an indented setter still reads correctly.
+pub fn parse_block_answers(existing: &str) -> Option<BlockAnswers> {
+    let body = region_body(existing)?;
+    let mut a = BlockAnswers {
+        two_line: false,
+        mouse: false,
+        interval: None,
+    };
+    for line in body.lines().map(str::trim) {
+        if line == "set -g status 2" {
+            a.two_line = true;
+        } else if line == "set -g mouse on" {
+            a.mouse = true;
+        } else if let Some(rest) = line.strip_prefix("set -g status-interval ") {
+            a.interval = rest.trim().parse().ok();
+        }
+    }
+    Some(a)
+}
+
 /// Strip the rustline-managed block from an existing `~/.tmux.conf`, leaving
 /// the surrounding text byte-identical (whatever its whitespace). A no-op —
 /// returns `existing` unchanged — when no complete region is present, so it's
@@ -357,6 +412,68 @@ mod tests {
             b.contains("set -g mouse on\n"),
             "mouse on emits setter: {b}"
         );
+    }
+
+    /// Load-bearing round-trip: `parse_block_answers` is the inverse of
+    /// `init_block` for the three tmux-only wizard answers, so it must be
+    /// pinned *against the generator* rather than against a hand-written
+    /// block. Change an emitted line (`set -g status 2`, `set -g mouse on`,
+    /// `set -g status-interval N`) without teaching the parser, and this
+    /// fails — which is the whole point: the wizard's re-run seeding silently
+    /// resets a user's choice otherwise (see `init::seed_answers`).
+    #[test]
+    fn parse_block_answers_round_trips_init_block() {
+        for (two_line, mouse, interval) in [
+            (false, false, 1),
+            (true, true, 5),
+            (true, false, 2),
+            (false, true, 10),
+        ] {
+            let mut o = one_line("colour234", "colour255");
+            o.two_line = two_line;
+            o.mouse = mouse;
+            o.interval = interval;
+            let conf = upsert_tmux_block("# user content\n", &init_block(&o));
+            assert_eq!(
+                parse_block_answers(&conf),
+                Some(BlockAnswers {
+                    two_line,
+                    mouse,
+                    interval: Some(interval),
+                }),
+                "round-trip for ({two_line}, {mouse}, {interval})"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_block_answers_needs_a_complete_region() {
+        assert_eq!(parse_block_answers("set -g status 2\n"), None);
+        assert_eq!(
+            parse_block_answers(&format!("{TMUX_BEGIN}\nset -g status 2\n")),
+            None
+        );
+        // Markers in the wrong order aren't a region either.
+        assert_eq!(
+            parse_block_answers(&format!("{TMUX_END}\nx\n{TMUX_BEGIN}\n")),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_block_answers_ignores_the_mouse_hint_comment() {
+        // The `(needs: set -g mouse on)` comment ships in every block; only
+        // the standalone setter line means the user answered yes.
+        let b = init_block(&one_line("colour234", "colour255"));
+        assert!(b.contains("(needs: set -g mouse on)"));
+        let parsed = parse_block_answers(&upsert_tmux_block("", &b)).unwrap();
+        assert!(!parsed.mouse, "hint comment must not read as mouse on");
+    }
+
+    #[test]
+    fn parse_block_answers_unparseable_interval_is_none() {
+        let conf = format!("{TMUX_BEGIN}\nset -g status-interval fast\n{TMUX_END}\n");
+        assert_eq!(parse_block_answers(&conf).unwrap().interval, None);
     }
 
     #[test]
