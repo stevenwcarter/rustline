@@ -4,7 +4,10 @@
 default:
     @just --list
 
-install:
+mold-install: build-weather
+    mold -run cargo install --path crates/rustline
+
+install: build-weather
     cargo install --path crates/rustline
 
 # Build the release binary
