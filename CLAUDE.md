@@ -1368,9 +1368,12 @@ config-file path for every subcommand that reads or writes it (default:
   into `~/.tmux.conf` (also backed up first, to `~/.tmux.conf.rustline.bak`).
   A non-TTY invocation without a flag errors with a hint instead of writing
   silently. **Re-running the wizard (W33) seeds every question's shown default
-  from your existing `config.toml`** (theme, which optional widgets are in
-  your layout, clock style) instead of resetting to the recommended answers —
-  see `init.rs`'s `seed_answers` above — and, before writing anything, prints
+  from your previous choices** instead of resetting to the recommended
+  answers, reading each answer back from wherever it was actually recorded:
+  your existing `config.toml` for theme/optional-widget membership/clock, and
+  the managed block in `~/.tmux.conf` for the three tmux settings config never
+  stores (one-/two-line, mouse, refresh interval) — see `init.rs`'s
+  `seed_answers` above — and, before writing anything, prints
   a one-line-per-answer summary plus a line diff of both files against their
   current contents and asks "Write these changes?"; answering no aborts with
   nothing written. `rustline init --defaults` runs the same two writes
@@ -2534,7 +2537,12 @@ branch on platform.
     from an existing `config.toml` instead of always the recommended answers,
     and `summarize_answers` + a line-diff + "Write these changes?" confirm
     gates the actual write on interactive runs (`--defaults`/`--dry-run`/
-    `--print`/`--uninstall`/non-TTY unchanged).
+    `--print`/`--uninstall`/non-TTY unchanged). Config-only, as shipped here:
+    later extended to also recover `two_line`/`mouse`/`interval` from the
+    managed tmux block via `tmux_conf::parse_block_answers` (config stores
+    none of the three, so seeding them from `defaults()` meant an
+    Enter-through re-run rewrote a two-line bar back to one line — see
+    `init.rs`/`tmux_conf.rs` above).
   - W46 — multiple widget instances: a top-level `[instances.<name>]` table
     (`Config.instances: HashMap<String, toml::Value>`, re-parsed per `kind`
     into that kind's existing Opts struct) lets any of the twelve clickable
