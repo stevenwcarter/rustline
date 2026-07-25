@@ -123,10 +123,15 @@ shell may not share your interactive shell's `$PATH` — run `rustline doctor`
 if the bar ever comes up empty.
 
 Re-running `rustline init` later (say, to turn on mouse mode or switch
-themes) seeds every question's shown default from your *existing*
-`config.toml` instead of resetting to the recommended answers, and — before
-writing anything — shows a summary of what you answered plus a diff of both
-files against their current contents and asks you to confirm.
+themes) seeds every question's shown default from what you chose last time
+instead of resetting to the recommended answers, so you can hold Enter
+through the questions you don't want to change. Your theme, clock style, and
+which optional widgets you use come from your existing `config.toml`; the
+one-/two-line, mouse, and refresh-interval answers are tmux settings that
+config never stores, so those are read back out of the managed block in your
+`~/.tmux.conf`. Then, before writing anything, it shows a summary of what you
+answered plus a diff of both files against their current contents and asks
+you to confirm.
 
 
 
