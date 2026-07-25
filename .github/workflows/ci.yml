@@ -24,8 +24,8 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v3
-      # `just lint` is the same command the CONTRIBUTING/CLAUDE docs tell a
-      # developer to run locally, so the gate and the local check cannot drift.
+      # `just lint` is the same command CLAUDE.md/README.md tell a developer
+      # to run locally, so the gate and the local check cannot drift.
       - run: just lint
 
   test:

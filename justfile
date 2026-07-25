@@ -1,5 +1,10 @@
 # rustline development tasks. Run `just` (or `just --list`) to see them.
 
+# The excluded example plugins (own Cargo.lock, built for wasm32-unknown-unknown).
+# One shared list so lint-plugins/test-plugins can't drift out of sync when a
+# plugin is added to one loop and forgotten in the other.
+plugins := "weather counter filewatch httpget cmdrun"
+
 # Show available recipes
 default:
     @just --list
@@ -27,6 +32,14 @@ test-wasm: build-weather
 lint:
     cargo fmt --all --check
     cargo clippy --all-targets -- -D warnings
+    # crates/rustline-wasm/tests/e2e.rs and crates/rustline/tests/wasm_wiring.rs
+    # are `#![cfg(feature = "wasm-e2e")]`-gated, so the pass above never compiles
+    # them and clippy never checks that code. This pass reaches both (one
+    # `--features` flag applies to every selected package that declares the
+    # feature). It only needs a host-target compile — the tests need a
+    # prebuilt weather.wasm at *runtime* (see `just test-wasm`), not the
+    # wasm32 target at lint time.
+    cargo clippy --workspace --all-targets --features wasm-e2e -- -D warnings
 
 # Preview the rendered bar in colour (live tmux context inside tmux, else samples)
 preview: build
@@ -96,7 +109,7 @@ lint-plugins:
     #!/usr/bin/env bash
     set -euo pipefail
     rustup target add wasm32-unknown-unknown >/dev/null 2>&1 || true
-    for p in weather counter filewatch httpget cmdrun; do
+    for p in {{plugins}}; do
         echo "== $p =="
         cargo fmt --check --manifest-path "plugins/$p/Cargo.toml"
         cargo clippy --manifest-path "plugins/$p/Cargo.toml" --all-targets -- -D warnings
@@ -107,7 +120,7 @@ lint-plugins:
 test-plugins:
     #!/usr/bin/env bash
     set -euo pipefail
-    for p in weather counter filewatch httpget cmdrun; do
+    for p in {{plugins}}; do
         echo "== $p =="
         cargo test --manifest-path "plugins/$p/Cargo.toml"
     done
