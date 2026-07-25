@@ -300,14 +300,19 @@ fn search(config_path: &Path, plugin_dir: &Path, query: Option<&str>, json: bool
     let entries = crate::plugin_index::filter_entries(&loaded.index, query);
     let installed = rustline_wasm::discover_plugin_names(plugin_dir);
 
+    // Emit the staleness warning before the `--json` early return: it's on
+    // stderr, so it never corrupts the machine-readable stdout, and a
+    // scripted `--json` consumer must still be able to see it (the feature's
+    // own requirement carries no `--json` exemption).
+    if loaded.stale {
+        eprintln!("warning: could not refresh the plugin index; showing a cached copy");
+    }
+
     if json {
         println!("{}", crate::plugin_index::search_json(&entries, &installed));
         return;
     }
 
-    if loaded.stale {
-        eprintln!("warning: could not refresh the plugin index; showing a cached copy");
-    }
     if entries.is_empty() {
         match query {
             Some(q) => println!("no plugins in the index match {q:?}"),

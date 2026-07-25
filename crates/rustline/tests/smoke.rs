@@ -2754,3 +2754,123 @@ fn plugin_search_json_emits_an_array() {
     );
     assert_eq!(arr[1]["source"], "o/r2");
 }
+
+#[test]
+fn plugin_search_prints_no_action_hint_when_neither_bundled_nor_sourced() {
+    // Coverage gap the review flagged: the `(false, None)` arm of `search`'s
+    // bundled/source match (not bundled AND no recorded `source`) was never
+    // exercised. An entry with neither must print neither a `just
+    // build-plugin` hint nor a `plugin install` hint.
+    let tmp = tempdir().unwrap();
+    let state = tmp.path().join("data/rustline/state");
+    fs::create_dir_all(&state).expect("state dir");
+    let body = r#"{"fetched_at":99999999999,"index":{"schema_version":1,"plugins":[
+        {"name":"mystery","description":"No source, not bundled"}
+    ]}}"#;
+    fs::write(state.join("plugin-index.json"), body).expect("seed index cache");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search"]);
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("mystery"), "{s}");
+    assert!(
+        !s.contains("build-plugin"),
+        "not bundled, no build hint: {s}"
+    );
+    assert!(
+        !s.contains("plugin install"),
+        "no recorded source, no install hint: {s}"
+    );
+}
+
+#[test]
+fn plugin_search_reports_no_matches_for_an_unmatched_query() {
+    let tmp = tempdir().unwrap();
+    seed_index_cache(tmp.path());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search", "zzz-no-such-plugin"]);
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains(r#"no plugins in the index match "zzz-no-such-plugin""#),
+        "{s}"
+    );
+}
+
+#[test]
+fn plugin_search_reports_an_empty_index() {
+    let tmp = tempdir().unwrap();
+    let state = tmp.path().join("data/rustline/state");
+    fs::create_dir_all(&state).expect("state dir");
+    let body = r#"{"fetched_at":99999999999,"index":{"schema_version":1,"plugins":[]}}"#;
+    fs::write(state.join("plugin-index.json"), body).expect("seed index cache");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search"]);
+    isolate(&mut cmd, tmp.path());
+    let out = cmd.output().unwrap();
+
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("the plugin index is empty"), "{s}");
+}
+
+#[test]
+fn plugin_search_json_warns_of_staleness_on_stderr() {
+    // Pins Defect 2's fix: `search`'s stale-cache warning must reach stderr
+    // even under `--json` — previously the `--json` early return happened
+    // BEFORE the staleness check ran at all, so a scripted `--json` consumer
+    // had no way to learn its result was a day-old cached copy.
+    let tmp = tempdir().unwrap();
+
+    // Seed a STALE cache: `fetched_at=0` is unconditionally outside the 24h
+    // TTL, so `load_index` attempts a refetch and falls back to this cache
+    // (flagged `stale`) when that refetch fails.
+    let state = tmp.path().join("data/rustline/state");
+    fs::create_dir_all(&state).expect("state dir");
+    let body = r#"{"fetched_at":0,"index":{"schema_version":1,"plugins":[
+        {"name":"weather","description":"Weather from wttr.in","source":"o/r","bundled":true,"capabilities":["http_cached"]}
+    ]}}"#;
+    fs::write(state.join("plugin-index.json"), body).expect("seed index cache");
+
+    // Point `plugin_index_url` at a loopback address nothing listens on, so
+    // the refetch this triggers fails fast and offline (connection refused)
+    // instead of ever reaching the real `DEFAULT_INDEX_URL` on GitHub — keeps
+    // this test hermetic.
+    let cfg_dir = tmp.path().join("cfg/rustline");
+    fs::create_dir_all(&cfg_dir).expect("cfg dir");
+    fs::write(
+        cfg_dir.join("config.toml"),
+        r#"plugin_index_url = "http://127.0.0.1:1/index.json""#,
+    )
+    .expect("seed config");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rustline"));
+    cmd.args(["plugin", "search", "--json"]);
+    isolate(&mut cmd, tmp.path());
+    cmd.env("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+    let out = cmd.output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "search must still succeed, serving the stale cache: stderr={stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("stdout must still be valid JSON when serving a stale cache: {e}\n{stdout}")
+    });
+    let arr = v.as_array().expect("a JSON array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "weather");
+
+    assert!(
+        stderr.contains("could not refresh the plugin index"),
+        "the staleness warning must reach stderr even under --json: {stderr}"
+    );
+}

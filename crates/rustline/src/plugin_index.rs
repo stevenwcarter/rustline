@@ -57,7 +57,10 @@ pub struct IndexEntry {
     pub capabilities: Vec<String>,
 }
 
-/// Reject a schema this build cannot read rather than silently misinterpreting it.
+/// Reject a schema this build cannot read rather than silently misinterpreting
+/// it. Called on both paths an index can reach `LoadedIndex` through: a fresh
+/// fetch (via `parse_index_value`) and a cache read (via `read_cache`) —
+/// deliberately the same guard on both, not two copies that could drift.
 fn validate(index: PluginIndex) -> anyhow::Result<PluginIndex> {
     if index.schema_version != SCHEMA_VERSION {
         bail!(
@@ -122,11 +125,21 @@ struct CachedIndex {
     index: PluginIndex,
 }
 
-/// Read and parse the cache, or `None` if absent, unreadable, or corrupt.
-/// A corrupt cache is never fatal — it simply falls through to a fetch.
+/// Read and parse the cache, or `None` if absent, unreadable, corrupt, or
+/// carrying a schema this build cannot read. Schema rejection is treated
+/// exactly like a corrupt cache — never fatal, it simply falls through to a
+/// fetch. This is the single choke point both of `load_index`'s
+/// cache-serving branches (fresh-hit and stale-fallback) go through, so a
+/// cache written by a different-schema build (a downgrade, or a machine
+/// running more than one build) can never be served unvalidated again.
 fn read_cache(state_dir: &Path) -> Option<CachedIndex> {
     let raw = read_sample(state_dir, INDEX_CACHE_FILE)?;
-    serde_json::from_str(&raw).ok()
+    let cached: CachedIndex = serde_json::from_str(&raw).ok()?;
+    let index = validate(cached.index).ok()?;
+    Some(CachedIndex {
+        fetched_at: cached.fetched_at,
+        index,
+    })
 }
 
 /// Best-effort cache write; a failure is logged by `write_sample`, never fatal.
@@ -480,6 +493,62 @@ mod tests {
             .expect("a corrupt cache must fall through to a fetch");
         assert_eq!(dl.calls(), 1);
         assert!(!loaded.stale);
+    }
+
+    /// Defect: a cache whose stored index carries a schema this build cannot
+    /// read must never be served, even though it parses as valid JSON — the
+    /// schema guard has to apply on the cache-read path too, not just the
+    /// fetch path, or a cache written by a different-schema build (a
+    /// downgrade, or a machine running more than one build) is served
+    /// unvalidated on every hit for up to the whole 24h TTL window.
+    #[test]
+    fn a_cached_index_with_an_unsupported_schema_version_is_ignored_and_refetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let future_schema_index = r#"{"schema_version":999,"plugins":[]}"#;
+        std::fs::write(
+            dir.path().join(INDEX_CACHE_FILE),
+            format!(r#"{{"fetched_at":1000,"index":{future_schema_index}}}"#),
+        )
+        .unwrap();
+
+        let dl = FakeDownloader::ok(sample_json());
+        let loaded = load_index(&dl, dir.path(), "http://x", false, 1_050)
+            .expect("an invalid cached schema must fall through to a fetch");
+        assert_eq!(
+            dl.calls(),
+            1,
+            "a cache holding an unsupported schema_version must trigger a fetch, not be served as-is"
+        );
+        assert!(!loaded.stale);
+        assert_eq!(
+            loaded.index.plugins.len(),
+            2,
+            "served the freshly fetched index"
+        );
+    }
+
+    /// Sibling to the above: a cache holding the *current* schema must still
+    /// be served without a fetch — the schema check must reject only what it
+    /// should, not the cache path entirely.
+    #[test]
+    fn a_cached_index_with_the_current_schema_version_is_served_without_a_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(INDEX_CACHE_FILE),
+            format!(r#"{{"fetched_at":1000,"index":{}}}"#, sample_json()),
+        )
+        .unwrap();
+
+        let dl = FakeDownloader::ok(sample_json());
+        let loaded = load_index(&dl, dir.path(), "http://x", false, 1_050)
+            .expect("a validly-schemad cache must be served");
+        assert_eq!(
+            dl.calls(),
+            0,
+            "a valid cached schema must be served without fetching"
+        );
+        assert!(!loaded.stale);
+        assert_eq!(loaded.index.plugins.len(), 2);
     }
 
     #[test]
