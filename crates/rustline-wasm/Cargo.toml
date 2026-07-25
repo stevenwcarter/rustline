@@ -20,6 +20,11 @@ regex = "1"
 walkdir = "2"
 tracing = "0.1"
 thiserror = "2"
+# For `libc::killpg` (run.rs): killing a whole process group so a command
+# that backgrounds a descendant sharing its piped stdout/stderr can't hang
+# the exec capability past its deadline. Already in the workspace graph via
+# `crates/rustline`'s dependency on the same version — adds no new node.
+libc = "0.2"
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 # default-features = false drops Extism's built-in HTTP client (`http`) and
 # module registration over http/fs — our `rl_http_get` / `rl_http_get_cached`

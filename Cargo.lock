@@ -2585,6 +2585,7 @@ dependencies = [
  "chrono",
  "extism",
  "globset",
+ "libc",
  "regex",
  "rustline-abi",
  "rustline-core",

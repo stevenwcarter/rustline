@@ -474,8 +474,10 @@ pub fn perform_exec(ctx: &CapabilityCtx, program: &str, args: &[String], runner:
 
 /// Gate-first (a denied argv spawns nothing and touches no cache), then a
 /// TTL-cached run keyed on the canonical argv. Only a **zero-exit** run is
-/// cached; on a failed/non-zero refresh the last-good entry is served stale.
-/// Exactly `perform_http_get_cached`'s shape, with "2xx" replaced by "exit 0".
+/// cached; a non-zero exit is fresh, real data and is returned as-is, not
+/// cached — only a spawn failure or timeout falls back to the last-good entry
+/// served stale. Exactly `perform_http_get_cached`'s shape, with "2xx"
+/// replaced by "exit 0".
 pub fn perform_exec_cached(
     ctx: &CapabilityCtx, program: &str, args: &[String],
     ttl_secs: i64, now: &str, runner: &dyn Runner,

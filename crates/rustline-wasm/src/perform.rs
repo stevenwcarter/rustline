@@ -187,6 +187,14 @@ pub fn perform_exec(
 /// `EXEC_NAMESPACE` so it can never collide with the HTTP cache (see
 /// `cache::cache_path`). A fresh cache hit is served without re-running; only
 /// a **zero-exit** run is ever written to the cache.
+///
+/// Known round-trip limitation: [`CacheEntry`] persists only `fetched_at`/
+/// `status`/`body`, not `truncated`. So a fresh-hit or stale-serve here always
+/// reports `truncated: false`, even when the run that originally populated
+/// the entry *was* truncated. `truncated` is purely informational (never a
+/// gating/security property), so this isn't worth widening the on-disk cache
+/// format for — but a cached `truncated: false` should not be read as
+/// authoritative.
 pub fn perform_exec_cached(
     ctx: &CapabilityCtx,
     program: &str,
@@ -225,6 +233,8 @@ pub fn perform_exec_cached(
             error: String::new(),
             stale: false,
             age_secs: age,
+            // Round-trip limitation: `CacheEntry` doesn't persist whether the
+            // original run was truncated — see this function's doc comment.
             truncated: false,
         };
     }
@@ -278,6 +288,7 @@ pub fn perform_exec_cached(
                     error,
                     stale: true,
                     age_secs: age,
+                    // Round-trip limitation: see this function's doc comment.
                     truncated: false,
                 }
             }
@@ -973,6 +984,32 @@ mod tests {
         let out = perform_exec_cached(&ctx, "flaky", &[], 3600, NOW, &runner);
         assert_eq!(out.stdout, "good");
         assert_eq!(runner.calls().len(), 1);
+    }
+
+    #[test]
+    fn exec_cached_a_nonzero_refresh_does_not_serve_the_stale_good_entry() {
+        // Unlike a spawn failure/timeout, a non-zero exit is fresh, real data
+        // — it must be returned as-is, not swapped for a stale prior entry.
+        // `exec_cached_does_not_cache_a_nonzero_exit` above never seeded a
+        // prior entry, so it can't distinguish this from the opposite
+        // (HTTP-non-2xx-style) interpretation; this test seeds a good entry
+        // first so the two interpretations actually diverge.
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _o) = ctx_with_commands_in(&["git*"], dir.path());
+        perform_exec_cached(&ctx, "git", &[], 60, NOW, &RecordingRunner::ok(0, "main"));
+        let out = perform_exec_cached(
+            &ctx,
+            "git",
+            &[],
+            60,
+            LATER,
+            &RecordingRunner::ok(128, "fatal: not a repo"),
+        );
+        assert!(
+            !out.stale,
+            "a non-zero exit is fresh data, not a stale fallback"
+        );
+        assert_eq!(out.status, 128);
     }
 
     #[test]
