@@ -12,6 +12,7 @@ pub mod capability;
 pub mod denials;
 pub mod fetch;
 pub mod host;
+pub mod integrity;
 pub mod manifest;
 pub mod paths;
 pub mod perform;
@@ -30,6 +31,7 @@ pub use argv::canonical_argv;
 pub use capability::{CapabilityCtx, DenialKind, DenialObserver};
 pub use denials::{Denial, FileDenialObserver, denials_path, read_denials};
 pub use host::{CompileCache, WasmWidget, build_plugin, build_plugin_with_cache};
+pub use integrity::{ChecksumVerdict, sha256_hex, verify_checksum};
 pub use manifest::{PluginManifest, resolve_manifest};
 pub use paths::{
     data_root, default_plugin_dir, ensure_wasmtime_cache_config, expand_tilde, state_root,
