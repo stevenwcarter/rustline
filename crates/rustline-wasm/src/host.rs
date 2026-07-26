@@ -9,7 +9,7 @@ use extism::{Manifest, PTR, PluginBuilder, UserData, Wasm, host_fn};
 use rustline_abi::ABI_VERSION;
 use rustline_core::{Context, RANGE_NAME_MAX_BYTES, Segment, Widget};
 
-use crate::abi::{CachedExecResult, ExecResult, RenderInput, parse_render_output};
+use crate::abi::{CachedExecResult, ExecResult, RenderInput};
 use crate::capability::CapabilityCtx;
 use crate::fetch::UreqFetcher;
 use crate::paths::wasmtime_cache_config_path;
@@ -225,7 +225,7 @@ impl Widget for WasmWidget {
             Err(_) => return Vec::new(),
         };
         match plugin.call::<&str, &str>("render", &payload) {
-            Ok(out) => parse_render_output(out),
+            Ok(out) => decode_render_output(&self.name, out).0,
             Err(error) => {
                 tracing::warn!(%error, "plugin render failed, rendering empty");
                 Vec::new()
@@ -248,12 +248,35 @@ fn plugin_range_name(name: &str) -> Option<&str> {
     (name.len() <= RANGE_NAME_MAX_BYTES).then_some(name)
 }
 
+/// Decode a guest's `render` output, returning the segments plus the decode
+/// error when there was one.
+///
+/// Split out of [`WasmWidget::render`] so the decode outcome can be asserted by
+/// a hermetic unit test without a real `extism::Plugin`, the same way
+/// `plugin_range_name` is. `parse_render_output` stays as-is (it is `pub`, and
+/// its `unwrap_or_default` contract — malformed output never breaks the bar,
+/// invariant N2 — is unchanged); this only makes the failure *reportable*.
+fn decode_render_output(name: &str, out: &str) -> (Vec<Segment>, Option<serde_json::Error>) {
+    match serde_json::from_str::<Vec<Segment>>(out) {
+        Ok(segments) => (segments, None),
+        Err(error) => {
+            tracing::warn!(
+                plugin = %name,
+                %error,
+                len = out.len(),
+                "malformed plugin render output, rendering empty"
+            );
+            (Vec::new(), Some(error))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rustline_abi::ABI_VERSION;
     use rustline_core::{Config, Context, Registry};
 
-    use super::{decode_args, plugin_range_name};
+    use super::{decode_args, decode_render_output, plugin_range_name};
     use crate::abi::{RenderInput, parse_render_output};
 
     /// A minimal `Context` with `toggled` set to `{name}`, for pinning the
@@ -299,6 +322,26 @@ mod tests {
         assert!(parse_render_output("not json").is_empty());
         let good = r#"[{"text":"x","style":{"fg":null,"bg":null,"bold":false}}]"#;
         assert_eq!(parse_render_output(good).len(), 1);
+    }
+
+    #[test]
+    fn parse_render_output_still_degrades_to_empty() {
+        // The N2 guarantee is unchanged: malformed output never breaks the bar.
+        assert!(parse_render_output("not json").is_empty());
+        assert!(parse_render_output(r#"{"segments":[]}"#).is_empty());
+        assert!(!parse_render_output(r#"[{"text":"hi","style":{}}]"#).is_empty());
+    }
+
+    #[test]
+    fn decode_render_output_reports_the_error_for_malformed_json() {
+        // The distinguishing signal the log was missing: which plugin, and why.
+        let (segs, err) = decode_render_output("weather", r#"{"segments":[]}"#);
+        assert!(segs.is_empty());
+        assert!(err.is_some(), "a decode failure must be reportable");
+
+        let (segs, err) = decode_render_output("weather", r#"[{"text":"hi","style":{}}]"#);
+        assert_eq!(segs.len(), 1);
+        assert!(err.is_none());
     }
 
     #[test]
