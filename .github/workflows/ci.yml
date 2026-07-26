@@ -69,6 +69,31 @@ jobs:
       - run: just lint-plugins
       - run: just test-plugins
 
+  macos-check:
+    name: macOS compile check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch tip
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # Every other job is ubuntu-only, so nothing here ever compiled the
+      # `#[cfg(target_os = "macos")]` arms of battery.rs, cpu.rs (mach FFI),
+      # memory.rs (sysctlbyname FFI), uptime.rs and daemon_service.rs (launchd).
+      # The only macOS build anywhere was release.yml's aarch64-apple-darwin leg,
+      # which runs on a `v*` tag push -- so a compile error in a Mac-gated arm
+      # first surfaced at tag time, the same "most expensive moment to find out"
+      # that `just check-lock` exists to prevent for Cargo.lock.
+      #
+      # Deliberately check-only: this catches the compile break, which is the
+      # failure mode that reaches a release. It does NOT prove the FFI behaves
+      # correctly at runtime -- that still needs a real Mac.
+      #
+      # Also deliberately not wrapped in a `just` recipe, unlike the jobs above:
+      # there is no equivalent command a developer on Linux could run, so a
+      # recipe would be a local no-op pretending to be a check. `--all-targets`
+      # reaches the `#[cfg(any(target_os = "macos", test))]` helpers too.
+      - run: cargo check --workspace --all-targets
+
   wasm-e2e:
     name: wasm end-to-end
     runs-on: ubuntu-latest
