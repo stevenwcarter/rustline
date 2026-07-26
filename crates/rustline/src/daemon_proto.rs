@@ -228,9 +228,17 @@ mod tests {
             Ping,
             Shutdown,
         }
-        for req in [DaemonRequest::Ping, DaemonRequest::Shutdown] {
+        // Compare the decoded variant, not just `is_ok()`: these are unit
+        // variants, so an `is_ok()` assertion would still pass if the two
+        // swapped meanings while keeping their names — which would silently
+        // turn a `daemon status` into a `daemon stop` across a version skew.
+        for (req, expected) in [
+            (DaemonRequest::Ping, OldRequest::Ping),
+            (DaemonRequest::Shutdown, OldRequest::Shutdown),
+        ] {
             let bytes = serde_json::to_vec(&req).unwrap();
-            assert!(serde_json::from_slice::<OldRequest>(&bytes).is_ok());
+            let decoded: OldRequest = serde_json::from_slice(&bytes).expect("old daemon decodes");
+            assert_eq!(decoded, expected);
         }
     }
 

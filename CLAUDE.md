@@ -839,10 +839,20 @@ failure path via `rl_log` (W7) rather than staying silent:
   **or** `alt_format` references `{spark}` (W56).
 - `memory.rs` — `read_memory()`, a `#[cfg(target_os)]` read surface: Linux
   reads `/proc/meminfo` (`MemTotal`/`MemAvailable` in kB, `parse_meminfo`);
-  macOS shells out to `sysctl -n hw.memsize` + `vm_stat` and derives available
-  bytes from free/inactive/speculative pages at the reported page size
-  (`parse_macos_memory`). Same cfg-gated pure-parser pattern as
-  `battery.rs`/`cpu.rs`. Unsupported platform or failed read → `None`. Also
+  macOS reads the total via `libc::sysctlbyname("hw.memsize")` — memoized in a
+  `OnceLock` (installed RAM can't change while the process lives), the file's
+  one `unsafe`, replacing a per-render `sysctl -n hw.memsize` spawn the same way
+  `cpu.rs` replaced its `top -l 2` shell-out — and still shells out to `vm_stat`
+  for the page counters, deriving available bytes from free/inactive/speculative
+  pages at the reported page size (`parse_macos_memory`). So, like `cpu.rs`,
+  macOS memory is now **half FFI, half text parser** rather than the pure
+  shell-out pair the cfg-gated-parser pattern describes: `memsize_to_text`
+  renders the FFI `u64` back into the decimal text `parse_macos_memory` already
+  took, which keeps the parser's contract — and its Linux-run unit tests —
+  unchanged. Same cfg-gated pure-parser pattern as `battery.rs`/`cpu.rs`
+  otherwise. Unsupported platform or failed read → `None` (the `sysctlbyname`
+  failure is latched by the `OnceLock` for the process lifetime; see the
+  function's doc comment). Also
   `read_memory_history(state_dir, current_percent, spark_width) -> Vec<f32>`
   (W45), the `memory` counterpart to `cpu.rs`'s `read_cpu_history`, persisting a
   `<state_root>/memory-history` ring for `memory`'s `{spark}`.
@@ -921,7 +931,26 @@ failure path via `rl_log` (W7) rather than staying silent:
   test); the extra superset fields carry synthetic data no preview widget reads.
 - `daemon_proto.rs` — the optional daemon's wire protocol (W48), pure and
   self-contained (no socket/listener/client here): `DaemonRequest {
-  Render { region: RegionKind, args: RenderArgsWire }, Ping, Shutdown }`,
+  RenderV2 { protocol: u32, region: RegionKind, args: RenderArgsWire }, Ping,
+  Shutdown }` plus `pub const DAEMON_PROTOCOL: u32` — the version handshake that
+  keeps a **stale daemon from silently serving a new client** (the daemon is
+  long-lived and `reload_if_changed` watches only the *config* file's mtime,
+  never the binary's, so after a `cargo install` the old daemon would otherwise
+  keep answering with old widget code and the client would emit that markup as
+  its own). It is fail-closed **by construction** in both directions, not by a
+  check: the request enum is externally tagged, so an old daemon simply cannot
+  deserialize `RenderV2` (and a new daemon cannot deserialize the old `Render`)
+  — the frame errors, that one connection is dropped, and `try_render`'s `None`
+  falls back to the in-process render. A protocol number that merely *differs*
+  is refused explicitly (`daemon.rs`), and `DaemonResponse`'s client-side match
+  is exhaustive with no `_` arm so a future variant is a compile error rather
+  than an accidental accept. `Ping`/`Shutdown` are deliberately left unversioned
+  as unit variants so `daemon status`/`daemon stop` keep working across a skew.
+  Note the `V2` in the variant name is the second generation of the *variant*
+  and is independent of `DAEMON_PROTOCOL`'s value — a protocol bump to 2 does
+  **not** rename it to `RenderV3`. Bumping `DAEMON_PROTOCOL` whenever render
+  semantics change is a hand-maintained discipline; forgetting it reproduces the
+  original silent-skew bug.
   `RegionKind { Left, Right, Window }` (mirrors `cli::Render`'s three
   variants), `RenderArgsWire` (combines `cli::RegionArgs`'s
   `session`/`window`/`pane`/`pane_path` and `cli::WindowArgs`'s

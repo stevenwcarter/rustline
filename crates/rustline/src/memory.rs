@@ -86,7 +86,16 @@ fn memsize_to_text(total_bytes: u64) -> String {
 /// `read_mach_cpu_ticks`, which replaced a `top -l 2` shell-out for the same
 /// reason; `libc` is already a dependency, so this adds no crate.
 ///
-/// `None` if the sysctl fails, which degrades exactly as the failed spawn did.
+/// `None` if the sysctl fails — the widget then renders `down_format` rather
+/// than a fabricated total (invariant #6). Note this does NOT degrade exactly
+/// as the failed spawn did: the `OnceLock` caches the `Option`, so a failure is
+/// latched for the process lifetime, where the old per-call spawn could fail
+/// once and succeed on the next tick. That is a deliberate trade — `hw.memsize`
+/// is installed physical RAM, so a query for it has no transient failure mode
+/// the way a fork+exec does under memory or process-table pressure — but under
+/// the long-lived daemon it does mean one failure disables the memory widget
+/// until restart. Switch to `OnceLock<u64>`, set only on success, if that ever
+/// proves reachable.
 #[cfg(target_os = "macos")]
 fn hw_memsize() -> Option<u64> {
     use std::sync::OnceLock;
@@ -260,7 +269,7 @@ mod tests {
                   Pages inactive:                      2000.\n\
                   Pages speculative:                    500.\n";
         let from_spawn = parse_macos_memory("17179869184\n", vm).expect("parses");
-        let from_ffi = parse_macos_memory(&format!("{}", 17179869184u64), vm).expect("parses");
+        let from_ffi = parse_macos_memory(&memsize_to_text(17_179_869_184), vm).expect("parses");
         assert_eq!(from_spawn, from_ffi);
         assert_eq!(from_spawn.total_bytes, 17179869184);
     }

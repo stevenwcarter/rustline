@@ -569,7 +569,7 @@ mod tests {
 
         let (response, disposition) = handle_request(
             &state,
-            Path::new("/nonexistent/config.toml"),
+            &cfg,
             DaemonRequest::RenderV2 {
                 protocol: daemon_proto::DAEMON_PROTOCOL + 1,
                 region: RegionKind::Right,
@@ -592,7 +592,7 @@ mod tests {
 
         let (response, _) = handle_request(
             &state,
-            Path::new("/nonexistent/config.toml"),
+            &cfg,
             DaemonRequest::RenderV2 {
                 protocol: daemon_proto::DAEMON_PROTOCOL,
                 region: RegionKind::Right,
