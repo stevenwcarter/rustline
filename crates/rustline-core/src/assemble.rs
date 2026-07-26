@@ -26,15 +26,39 @@ pub fn assign_palette(segments: &mut [Segment], theme: &Theme) {
     }
 }
 
+/// Extract a readable message from a panic payload. `panic!` produces either a
+/// `&'static str` (a literal) or a `String` (a formatted message); anything
+/// else is possible via `panic_any` but has no text to show.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        s
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.as_str()
+    } else {
+        "<non-string panic payload>"
+    }
+}
+
 /// Render a widget, converting a panic into an empty segment list plus a
 /// warning instead of letting it unwind through the whole region. A single
 /// misbehaving widget (built-in or plugin) must never take down the rest of
 /// the status line.
-fn render_guarded(widget: &dyn Widget, ctx: &Context) -> Vec<Segment> {
+///
+/// `name` is the layout/registry name the widget was resolved under, and it is
+/// logged: the default panic hook writes the real panic text to STDERR, which
+/// under tmux is the tmux *server's* stderr (typically `/dev/null`), so the
+/// log file is the only channel the user can actually consult. Without the
+/// name, a six-widget bar loses one widget and the log says only that
+/// "a widget" panicked.
+fn render_guarded(name: &str, widget: &dyn Widget, ctx: &Context) -> Vec<Segment> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| widget.render(ctx))) {
         Ok(segments) => segments,
-        Err(_) => {
-            tracing::warn!("widget panicked, skipping");
+        Err(payload) => {
+            tracing::warn!(
+                widget = %name,
+                panic = %panic_message(payload.as_ref()),
+                "widget panicked, skipping"
+            );
             vec![]
         }
     }
@@ -90,7 +114,7 @@ pub fn render_named_region(
     let rendered: Vec<(Option<String>, Vec<Segment>)> = widgets
         .iter()
         .map(|(name, w)| {
-            let mut segments = render_guarded(w.as_ref(), ctx);
+            let mut segments = render_guarded(name, w.as_ref(), ctx);
             if let Some(over) = overrides.get(name) {
                 apply_color_override(&mut segments, over);
             }
@@ -124,7 +148,7 @@ fn window_pill(ctx: &Context, registry: &Registry, theme: &Theme) -> String {
     let widgets = registry.resolve(&["windows".to_string()]);
     let segments: Vec<Segment> = widgets
         .iter()
-        .flat_map(|(_, w)| render_guarded(w.as_ref(), ctx))
+        .flat_map(|(name, w)| render_guarded(name, w.as_ref(), ctx))
         .collect();
     let Some(seg) = segments.first() else {
         return String::new();
@@ -522,6 +546,35 @@ mod tests {
         );
         // Empty slice → empty string.
         assert_eq!(render_windows(&[], &reg, &theme), "");
+    }
+
+    struct PanickingWidget;
+    impl Widget for PanickingWidget {
+        fn render(&self, _ctx: &Context) -> Vec<Segment> {
+            panic!("boom from the test widget");
+        }
+    }
+
+    #[test]
+    fn panic_guard_degrades_to_empty_and_keeps_the_name() {
+        // The guard must still contain the panic (invariant #6 / N2)...
+        let segs = render_guarded("cpu", &PanickingWidget, &Context::default());
+        assert!(segs.is_empty());
+    }
+
+    #[test]
+    fn panic_guard_extracts_the_payload_message() {
+        // ...and the payload must be recoverable, since the default panic hook
+        // writes it to stderr, which under tmux goes to the server's /dev/null.
+        let payload: Box<dyn std::any::Any + Send> = Box::new("boom from the test widget");
+        assert_eq!(panic_message(payload.as_ref()), "boom from the test widget");
+        let payload: Box<dyn std::any::Any + Send> = Box::new(String::from("owned boom"));
+        assert_eq!(panic_message(payload.as_ref()), "owned boom");
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42u8);
+        assert_eq!(
+            panic_message(payload.as_ref()),
+            "<non-string panic payload>"
+        );
     }
 
     #[test]
