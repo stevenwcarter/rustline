@@ -1,0 +1,25 @@
+# Keeps the SHA-pinned actions in .github/workflows/* from rotting.
+#
+# Pinning by commit SHA is what stops an upstream action changing under us
+# (release.yml runs with `contents: write`), but a pin no one refreshes is just
+# a frozen, unpatched version. Dependabot opens a PR when a newer release
+# exists, rewriting both the SHA and its trailing `# vX.Y.Z` comment.
+#
+# Deliberately github-actions only -- no `cargo` ecosystem entry. Rust
+# dependency bumps are handled deliberately via the `/upgrade-packages`
+# workflow described in CLAUDE.md, and a stream of cargo PRs here would bury
+# the action-pin refreshes this file exists to surface.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    # "/" means .github/workflows/, not the repo root -- this is the path
+    # convention the github-actions ecosystem expects.
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+    # One PR per action keeps an unrelated breakage from blocking the others.
+    open-pull-requests-limit: 5

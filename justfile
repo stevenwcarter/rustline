@@ -23,6 +23,24 @@ build:
 test:
     cargo test --workspace
 
+# Verify every committed Cargo.lock is up to date (workspace + the five
+# excluded example plugins, which each carry their own lock).
+#
+# `release.yml` builds with `--locked`, but `just test`/`just lint` do not --
+# so without this gate a stale lock passes every PR check and only fails at
+# tag-push time, the one moment it is most expensive to discover. Kept as its
+# own recipe rather than adding `--locked` to `test`/`lint` so local runs keep
+# their normal auto-refresh behaviour; `cargo metadata` resolves the graph
+# without compiling, so this costs seconds.
+check-lock:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo metadata --locked --format-version 1 --manifest-path Cargo.toml >/dev/null
+    for p in {{plugins}}; do
+        cargo metadata --locked --format-version 1 \
+            --manifest-path "plugins/$p/Cargo.toml" >/dev/null
+    done
+
 # Build the weather plugin and run the end-to-end WASM host tests (opt-in)
 test-wasm: build-weather
     cargo test -p rustline-wasm --features wasm-e2e --test e2e

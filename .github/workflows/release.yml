@@ -1,5 +1,16 @@
 name: Release
 
+# Actions are pinned to full commit SHAs (the trailing comment records the
+# readable version); `.github/dependabot.yml` refreshes them by PR. This
+# workflow runs with `contents: write`, so it is the one where an upstream
+# action changing under us actually matters.
+#
+# dtolnay/rust-toolchain's ref *selects the toolchain* -- each branch
+# (`stable`, `nightly`, `1.90.0`) ships an action.yml defaulting `toolchain` to
+# that branch's name -- so the SHA below is the tip of the `stable` branch.
+# Repointing it at another branch's commit would silently change the Rust
+# version. It has no release tags, so dependabot cannot bump it.
+
 on:
   push:
     tags: ['v*']
@@ -38,13 +49,13 @@ jobs:
           # from source — an aarch64 binary will not run there. Revisit if a
           # supported Intel runner label reappears.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch tip
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: ${{ matrix.target }}
 
@@ -55,6 +66,29 @@ jobs:
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p rustline
+
+      # Nothing else ties the pushed tag to the version compiled into the
+      # binary: tarballs are named from GITHUB_REF_NAME while the binary
+      # reports CARGO_PKG_VERSION, so a `v0.2.0` tag would happily ship a
+      # binary that identifies itself as 0.1.0. Ask the freshly built binary
+      # what it thinks it is rather than re-reading Cargo.toml -- that checks
+      # the artifact actually being shipped, and every target is native to its
+      # runner (the Package step below already runs it to emit completions).
+      #
+      # Only meaningful on a tag: a `workflow_dispatch` dry run is on a branch,
+      # whose name is not a version, so it is skipped rather than failed.
+      - name: Verify tag matches binary version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/rustline"
+          binary_version="$("$bin" --version | awk '{print $2}')"
+          if [ "${GITHUB_REF_NAME}" != "v${binary_version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match binary version ${binary_version} (expected tag v${binary_version}); bump [workspace.package] version in Cargo.toml or retag"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches binary version ${binary_version}"
 
       - name: Package
         shell: bash
@@ -87,7 +121,7 @@ jobs:
 
           tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: rustline-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -98,7 +132,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           merge-multiple: true
@@ -116,7 +150,7 @@ jobs:
       # other step above (build, package, checksum) still runs and can be
       # inspected via the uploaded artifacts, so the whole pipeline gets
       # exercised without creating a real GitHub release.
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         with:
           files: |

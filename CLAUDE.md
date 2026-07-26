@@ -2472,7 +2472,12 @@ branch on platform.
 ## Development
 
 - **`just`** recipes: `just build`, `just test` (hermetic — no wasm toolchain
-  needed), `just lint`, `just preview` (colour preview via `cargo run --`, live
+  needed), `just lint`, `just check-lock` (verifies all **six** committed
+  `Cargo.lock` files — the workspace plus each of the five excluded
+  `plugins/*` — are up to date, via `cargo metadata --locked`, which resolves
+  without compiling and so runs in about a second; deliberately its own recipe
+  rather than `--locked` bolted onto `test`/`lint`, so a local `just test`
+  keeps auto-refreshing the lock as before), `just preview` (colour preview via `cargo run --`, live
   tmux context when inside tmux, else samples — needs a Nerd/powerline font for
   the glyphs), `just build-plugin NAME` (builds `plugins/<NAME>` for
   `wasm32-unknown-unknown` and installs `<NAME>.wasm` into the plugin dir —
@@ -2517,8 +2522,12 @@ branch on platform.
   wrapper around an existing `just` recipe so the gate and the documented
   local command can't drift apart: `lint` → `just lint`, `test` → `just test`,
   `plugins` → `just lint-plugins` + `just test-plugins`, and `wasm-e2e` →
-  `just test-wasm`. Toolchain via `dtolnay/rust-toolchain@stable` +
-  `Swatinem/rust-cache@v2`; `just` itself via `extractions/setup-just@v3`.
+  `just test-wasm`. The `test` job runs `just check-lock` ahead of `just test`:
+  `release.yml` builds with `--locked` and nothing else did, so before this a
+  stale `Cargo.lock` passed every PR check and first failed at tag-push time —
+  the most expensive moment to discover it. Toolchain via
+  `dtolnay/rust-toolchain` + `Swatinem/rust-cache`; `just` itself via
+  `extractions/setup-just`.
   Deliberately no `rust-toolchain.toml` (would change every developer's local
   toolchain resolution) and no workspace-level `RUSTFLAGS: -D warnings`
   (redundant — `just lint`'s own clippy `-D warnings` already enforces the
@@ -2526,7 +2535,24 @@ branch on platform.
   `.github/workflows/release.yml` — see the Roadmap entry below for what it
   builds/publishes and README's install section for verifying a downloaded
   tarball against `SHA256SUMS`.
-- Commit `Cargo.lock` alongside any dependency change.
+- **Actions are pinned to full commit SHAs** in both workflows, each with a
+  trailing `# vX.Y.Z` comment, and `.github/dependabot.yml` (github-actions
+  ecosystem, weekly) opens PRs to refresh them — a pin nothing refreshes is
+  just a frozen unpatched version. Dependabot is deliberately **not** given a
+  `cargo` entry: Rust bumps go through the `/upgrade-packages` flow, and cargo
+  PRs would bury the action refreshes. One wrinkle worth knowing before
+  touching those pins: **`dtolnay/rust-toolchain`'s ref selects the
+  toolchain** — each branch (`stable`, `nightly`, `1.90.0`) ships an
+  `action.yml` whose `toolchain` input defaults to that branch's own name — so
+  its pin is the tip of the **`stable` branch**, and repointing it at a commit
+  from another branch would silently change the Rust version with nothing in
+  the diff to say so. It publishes no release tags, so dependabot cannot bump
+  that one; refresh it by hand. Note this pins the *action code*, not the Rust
+  version: `stable` still resolves to whatever stable is on the day a job runs,
+  so a new stable release can still redden CI with no repo change.
+- Commit `Cargo.lock` alongside any dependency change — `just check-lock` (run
+  in CI's `test` job) fails the build if you forget, for the workspace lock and
+  all five plugin locks alike.
 - Tests are TDD unit tests in each core module (incl. the powerline renderer and
   the ANSI transcoder) plus `crates/rustline/tests/smoke.rs` integration tests.
   `rustline-wasm` adds unit tests for allow-patterns, path sandboxing, and
@@ -2907,7 +2933,16 @@ branch on platform.
     `x86_64-apple-darwin` leg — GitHub's `macos-13` label no longer picks up
     jobs (a dry run sat queued indefinitely while the other legs finished),
     and since `publish` declares `needs: build`, a never-scheduled leg would
-    hang the entire release rather than fail it.
+    hang the entire release rather than fail it. A **`Verify tag matches
+    binary version`** step sits between Build and Package on every leg:
+    tarballs are named from `GITHUB_REF_NAME` while the binary reports
+    `CARGO_PKG_VERSION`, so nothing otherwise stopped a `v0.2.0` tag shipping a
+    binary that identifies itself as `0.1.0`. It asks the freshly built binary
+    (`"$bin" --version`) rather than re-reading `Cargo.toml`, so it checks the
+    artifact actually being shipped — free, since Package already runs that
+    binary to emit completions. Gated on `github.ref_type == 'tag'`, because a
+    `workflow_dispatch` dry run is on a *branch* whose name is not a version
+    and would otherwise fail every time.
 - Per-widget richer customization; naming the widget in the panic-guard `warn!`.
 - Range-on-binding — today a `run`/`open_url` click binding only fires on a
   widget that already emits a clickable range (i.e. has a non-empty

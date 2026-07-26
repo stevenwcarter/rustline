@@ -1,5 +1,17 @@
 name: CI
 
+# Actions are pinned to full commit SHAs (the trailing comment records the
+# readable version); `.github/dependabot.yml` refreshes them by PR.
+#
+# dtolnay/rust-toolchain is the exception worth knowing about: its ref is not
+# just a version, it *selects the toolchain* -- each branch (`stable`,
+# `nightly`, `1.90.0`) ships an action.yml whose `toolchain` input defaults to
+# that branch's own name. The SHA below is the tip of the `stable` branch, so
+# it still installs stable Rust; repointing it at a commit from any other
+# branch would silently change the Rust version with nothing else in the diff
+# to show it. It publishes no release tags, so dependabot cannot bump it --
+# refresh that one by hand.
+
 on:
   pull_request:
   push:
@@ -18,12 +30,12 @@ jobs:
     name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch tip
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - uses: extractions/setup-just@v3
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
       # `just lint` is the same command CLAUDE.md/README.md tell a developer
       # to run locally, so the gate and the local check cannot drift.
       - run: just lint
@@ -32,23 +44,27 @@ jobs:
     name: workspace tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: extractions/setup-just@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch tip
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
+      # `release.yml` builds with `--locked`; nothing else does. Without this a
+      # stale Cargo.lock passes every PR check and first fails at tag-push time.
+      # Covers all six committed locks (workspace + the excluded plugins).
+      - run: just check-lock
       - run: just test
 
   plugins:
     name: example plugins
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch tip
         with:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - uses: extractions/setup-just@v3
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
       # plugins/* are excluded workspace members — invisible to the jobs above.
       - run: just lint-plugins
       - run: just test-plugins
@@ -57,12 +73,12 @@ jobs:
     name: wasm end-to-end
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch tip
         with:
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - uses: extractions/setup-just@v3
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
       # Builds weather.wasm, then runs both opt-in suites — the only coverage of
       # the Extism host boundary. Both bind localhost mock servers; no network.
       - run: just test-wasm
