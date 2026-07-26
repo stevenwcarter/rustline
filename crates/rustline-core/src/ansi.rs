@@ -34,15 +34,24 @@ enum Token {
 /// Split markup into literal-text and directive tokens.
 ///
 /// An unterminated `#[` is not a directive — the characters we consumed looking
-/// for the `]` are folded back into literal text, verbatim. A `#` not followed
-/// by `[` is ordinary text (rustline emits bare `#` in window names and format
-/// strings).
+/// for the `]` are folded back into literal text, verbatim.
+/// `##` is tmux's escape for a literal `#` and collapses to one `#` (this is
+/// the inverse of `render::sanitize_text`, so a preview renders exactly what
+/// tmux draws). A single `#` not followed by `[` or `#` is ordinary text.
 fn scan(markup: &str) -> Vec<Token> {
     let mut tokens: Vec<Token> = Vec::new();
     let mut text = String::new();
     let mut chars = markup.chars().peekable();
 
     while let Some(c) = chars.next() {
+        // `##` is tmux's escape for a literal '#' (see `render::sanitize_text`).
+        // Checked BEFORE the `#[` arm: `##[` is an escaped '#' followed by a
+        // literal '[', not a directive.
+        if c == '#' && chars.peek() == Some(&'#') {
+            chars.next(); // consume the second '#'
+            text.push('#');
+            continue;
+        }
         // A style directive is the two-char sequence "#[" … "]".
         if c == '#' && chars.peek() == Some(&'[') {
             chars.next(); // consume '['
@@ -431,5 +440,25 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn escaped_hash_collapses_to_one_literal_hash() {
+        // `##` is a literal '#', not the start of a directive.
+        assert_eq!(tmux_to_ansi("a##[bg=red]b"), "a#[bg=red]b");
+        let spans = parse_markup("a##[bg=red]b");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "a#[bg=red]b");
+        assert_eq!(spans[0].style, Style::default());
+    }
+
+    #[test]
+    fn a_real_directive_after_an_escaped_hash_still_applies() {
+        let spans = parse_markup("##[x]#[fg=red]y");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].text, "#[x]");
+        assert_eq!(spans[0].style.fg, None);
+        assert_eq!(spans[1].text, "y");
+        assert_eq!(spans[1].style.fg, Some(Color::Named("red".into())));
     }
 }
