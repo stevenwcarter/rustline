@@ -13,6 +13,15 @@ const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█
 /// `max` (clamped `0.0..=1.0`) maps to one of the 8 block-eighths glyphs.
 /// `max <= 0.0` treats every reading as maxed out (`█`) rather than dividing
 /// by zero. An empty slice yields `""`.
+///
+/// No width clamp of its own: unlike `bar::gauge_bar`, this function takes no
+/// `width` parameter at all — it emits exactly one glyph per `samples` entry,
+/// so its output length is already bounded by `samples.len()`. The unbounded
+/// input is `spark_width`, which only ever reaches this function indirectly,
+/// by sizing the persisted history ring `samples` is read from; that ring is
+/// where `history::push_truncate`'s `MAX_HISTORY_WIDTH` clamp lives. Clamping
+/// here too would be redundant, not defense in depth — this was considered,
+/// not overlooked.
 pub(crate) fn sparkline(samples: &[f32], max: f32) -> String {
     samples.iter().map(|&v| glyph_for(v, max)).collect()
 }
@@ -63,5 +72,13 @@ mod tests {
     fn zero_or_negative_max_treats_every_reading_as_maxed() {
         assert_eq!(sparkline(&[0.0, 50.0], 0.0), "██");
         assert_eq!(sparkline(&[10.0], -1.0), "█");
+    }
+
+    #[test]
+    fn sparkline_output_length_follows_the_sample_count_only() {
+        // sparkline maps one glyph per sample, so its own bound is the ring
+        // length; the ring is what history::push_truncate caps.
+        let samples = vec![50.0f32; 12];
+        assert_eq!(sparkline(&samples, 100.0).chars().count(), 12);
     }
 }

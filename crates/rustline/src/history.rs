@@ -31,10 +31,18 @@ pub fn serialize_history(history: &[f32]) -> String {
     format!("{line}\n")
 }
 
+/// Upper bound on the persisted `{spark}` history ring, mirroring
+/// `bar.rs`'s `MAX_BAR_WIDTH`: `spark_width` is unbounded user config, and the
+/// ring is both allocated and written to disk on every render.
+pub(crate) const MAX_HISTORY_WIDTH: usize = 256;
+
 /// Push `value` onto `history`, keeping only the most recent `max_len`
 /// readings (oldest dropped first). `max_len == 0` drains the ring entirely,
-/// mirroring `bar::gauge_bar`'s `width == 0` -> empty convention.
+/// mirroring `bar::gauge_bar`'s `width == 0` -> empty convention. `max_len` is
+/// clamped to `MAX_HISTORY_WIDTH` first, so a hostile `spark_width` can't grow
+/// the ring (and the file it's persisted to) without bound.
 pub fn push_truncate(history: &mut Vec<f32>, value: f32, max_len: usize) {
+    let max_len = max_len.min(MAX_HISTORY_WIDTH);
     history.push(value);
     if history.len() > max_len {
         let excess = history.len() - max_len;
@@ -88,5 +96,24 @@ mod tests {
         let mut h: Vec<f32> = Vec::new();
         push_truncate(&mut h, 42.0, 8);
         assert_eq!(h, vec![42.0]);
+    }
+
+    #[test]
+    fn push_truncate_clamps_an_absurd_width() {
+        let mut h: Vec<f32> = (0..10).map(|i| i as f32).collect();
+        push_truncate(&mut h, 99.0, usize::MAX);
+        assert!(
+            h.len() <= MAX_HISTORY_WIDTH,
+            "ring grew to {} entries",
+            h.len()
+        );
+    }
+
+    #[test]
+    fn push_truncate_default_width_is_unchanged() {
+        let mut h: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        push_truncate(&mut h, 99.0, 8);
+        assert_eq!(h.len(), 8);
+        assert_eq!(h.last().copied(), Some(99.0));
     }
 }
