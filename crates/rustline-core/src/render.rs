@@ -130,6 +130,59 @@ fn write_hard(out: &mut String, theme: &Theme, dir: Direction, left: &Color, rig
     );
 }
 
+/// Make a widget's text safe to interpolate into tmux markup.
+///
+/// Two distinct hazards, one pass:
+///
+/// 1. **`#` is live markup.** tmux parses `#[...]` directives inside the
+///    output of a `#()` job — that is how this renderer colours the bar — so a
+///    `#` in *content* is a directive. Content reaching here is frequently
+///    external and untrusted: a tmux window name, a git branch from a cloned
+///    repo, an MPRIS now-playing title, a directory name, or a WASM guest's
+///    `Segment.text`. Doubling `#` is tmux's documented escape for a literal
+///    `#`. Without it a zero-capability plugin can emit
+///    `#[norange]#[range=user|cpu]` and forge another widget's clickable
+///    range, which `rustline click` then dispatches as that widget's binding.
+///
+/// 2. **A control character truncates or misaligns the region.** tmux inserts
+///    only the LAST line of a `#()` job's output, and this renderer prints one
+///    unterminated line per region — so a `\n` in content silently deletes
+///    every widget to its left along with the opening style directive and the
+///    leading edge glyph. A `\t` jumps to the next tab stop and misaligns
+///    every pill after it (window names legitimately carry tabs — see
+///    `parse_list_windows`, which preserves them on purpose).
+///
+/// Sanitizing at the render boundary rather than in each reader is deliberate:
+/// it is the only place that also covers plugin-supplied `Segment.text`, which
+/// no reader touches.
+///
+/// Only segment TEXT goes through this. The separator, edge, style and
+/// `range=user|` bytes are written unescaped, because the renderer produces
+/// them rather than content doing so. One caveat worth stating rather than
+/// implying: the separator and cap glyphs come from `Theme`, which can be
+/// populated from a themes-dir `*.toml` a third party wrote. That is
+/// config-level trust — the same trust a `run =` click binding already
+/// carries, and a user who installs a theme file has accepted it — but it is
+/// not literally renderer-produced, so the boundary is "not untrusted
+/// content", not "not external".
+///
+/// Borrows when there is nothing to change, so the common path allocates nothing.
+fn sanitize_text(s: &str) -> std::borrow::Cow<'_, str> {
+    let needs_work = s.chars().any(|c| c == '#' || c.is_control());
+    if !needs_work {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '#' => out.push_str("##"),
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// Render `segments` into tmux status-line markup for the given `dir`.
 ///
 /// Each segment becomes `#[fg=<F>,bg=<B>] text ` where `F`/`B` are the
@@ -174,7 +227,7 @@ pub fn render_region(dir: Direction, segments: &[Segment], theme: &Theme) -> Str
             "#[fg={},bg={}{bold}] {} ",
             eff_fg(s, theme).to_tmux(),
             cur_bg.to_tmux(),
-            s.text,
+            sanitize_text(&s.text),
         );
         prev_bg = Some(cur_bg);
     }
@@ -257,7 +310,7 @@ pub fn render_region_ranged(dir: Direction, groups: &[RangeGroup], theme: &Theme
                 "#[fg={},bg={}{bold}] {} ",
                 eff_fg(s, theme).to_tmux(),
                 cur_bg.to_tmux(),
-                s.text,
+                sanitize_text(&s.text),
             );
             prev_bg = Some(cur_bg);
         }
@@ -288,6 +341,7 @@ pub fn render_window_pill(text: &str, is_current: bool, theme: &Theme) -> String
     };
     let (pill, fg) = (pill.to_tmux(), fg.to_tmux());
     let bar = theme.bar_bg.to_tmux();
+    let text = sanitize_text(text);
     format!(
         "#[fg={pill},bg={bar}]{cap_l}#[fg={fg},bg={pill}{bold}] {text} #[fg={pill},bg={bar}]{cap_r}#[default]",
         cap_l = theme.win_cap_left,
@@ -554,5 +608,143 @@ mod tests {
         assert_eq!(c.info, t.info);
         assert_eq!(c.warning, t.warning);
         assert_eq!(c.error, t.error);
+    }
+
+    #[test]
+    fn segment_text_hash_is_escaped_not_a_directive() {
+        let theme = Theme::default();
+        let segs = vec![Segment::new("#[bg=red]")];
+        let out = render_region(Direction::Right, &segs, &theme);
+        // The literal text must be escaped, so tmux draws it instead of obeying it.
+        assert!(out.contains("##[bg=red]"), "got: {out}");
+        // Exactly the directives the renderer itself emitted, and no more:
+        // one style directive for the single segment, plus the trailing reset.
+        assert_eq!(count_real_directives(&out), 2, "got: {out}");
+    }
+
+    #[test]
+    fn guest_text_cannot_forge_a_range() {
+        let theme = Theme::default();
+        let groups = vec![RangeGroup {
+            range: Some("weather".to_string()),
+            segments: vec![Segment::new("#[norange]#[range=user|cpu]x")],
+        }];
+        let out = render_region_ranged(Direction::Right, &groups, &theme);
+        // A naive substring search over the raw output is unreliable here: the
+        // '#' -> "##" escape means a doubled `#[range=user|cpu]` still contains
+        // the two-byte sequence `#[` starting at its SECOND `#`, so
+        // `out.matches("#[range=user|")` would (wrongly) count that escaped
+        // text as a second real directive even though tmux never parses it as
+        // one (confirmed empirically: an escaped `##[...]` draws literally,
+        // see `sanitize_text`'s doc comment). So, like `count_real_directives`
+        // above, walk the bytes the way tmux itself does and inspect only the
+        // REAL (non-escaped) directives.
+        let directives = real_directives(&out);
+        let ranges: Vec<&&str> = directives
+            .iter()
+            .filter(|d| d.starts_with("range=user|"))
+            .collect();
+        assert_eq!(
+            ranges,
+            vec![&"range=user|weather"],
+            "the guest's forged range must not become a second real directive: {out}"
+        );
+        assert_eq!(
+            directives.iter().filter(|d| **d == "norange").count(),
+            1,
+            "only the renderer's own closing norange is real: {out}"
+        );
+    }
+
+    #[test]
+    fn window_pill_text_hash_is_escaped() {
+        let theme = Theme::default();
+        let out = render_window_pill("#[bg=red]win", true, &theme);
+        assert!(out.contains("##[bg=red]win"), "got: {out}");
+    }
+
+    #[test]
+    fn newline_in_segment_text_cannot_truncate_the_region() {
+        let theme = Theme::default();
+        let segs = vec![Segment::new("a"), Segment::new("x\n#[bg=red]y")];
+        let out = render_region(Direction::Right, &segs, &theme);
+        assert!(!out.contains('\n'), "region must stay single-line: {out:?}");
+        // The first segment survives — tmux would otherwise drop everything left
+        // of the newline, including the opening directive and the edge glyph.
+        assert!(out.contains(" a "), "got: {out}");
+    }
+
+    #[test]
+    fn tab_and_carriage_return_are_replaced() {
+        let theme = Theme::default();
+        let segs = vec![Segment::new("a\tb\rc")];
+        let out = render_region(Direction::Right, &segs, &theme);
+        assert!(!out.contains('\t'), "got: {out:?}");
+        assert!(!out.contains('\r'), "got: {out:?}");
+        assert!(out.contains("a b c"), "got: {out}");
+    }
+
+    #[test]
+    fn window_pill_text_controls_are_replaced() {
+        let theme = Theme::default();
+        let out = render_window_pill("a\nb", false, &theme);
+        assert!(!out.contains('\n'), "got: {out:?}");
+        assert!(out.contains("a b"), "got: {out}");
+    }
+
+    #[test]
+    fn ordinary_text_is_untouched_and_still_borrows() {
+        // The common path must not allocate or alter anything.
+        let s = "cpu 42%";
+        assert!(matches!(sanitize_text(s), std::borrow::Cow::Borrowed(_)));
+        assert_eq!(sanitize_text(s), "cpu 42%");
+        // Multi-byte glyphs the bar is full of must pass through unchanged.
+        let glyphs = "\u{e0b0}\u{f011b} ~/src";
+        assert_eq!(sanitize_text(glyphs), glyphs);
+    }
+
+    /// The inner content of every REAL (non-escaped) `#[...]` directive in
+    /// `s`, walking bytes the same way `count_real_directives` does: an
+    /// escaped `##` collapses to one literal `#` and is never the start of a
+    /// directive.
+    fn real_directives(s: &str) -> Vec<&str> {
+        let b = s.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        while i < b.len() {
+            if i + 1 < b.len() && b[i] == b'#' && b[i + 1] == b'#' {
+                i += 2; // escaped literal '#': skip both, never a directive
+            } else if i + 1 < b.len() && b[i] == b'#' && b[i + 1] == b'[' {
+                let start = i + 2;
+                match s[start..].find(']') {
+                    Some(rel) => {
+                        out.push(&s[start..start + rel]);
+                        i = start + rel + 1;
+                    }
+                    None => break, // unterminated directive: nothing more to parse
+                }
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Count directives the RENDERER emitted, i.e. `#[` occurrences that are not
+    /// part of an escaped `##`. Walks bytes so an escaped `##[` is skipped whole.
+    fn count_real_directives(s: &str) -> usize {
+        let b = s.as_bytes();
+        let (mut i, mut n) = (0usize, 0usize);
+        while i + 1 < b.len() {
+            if b[i] == b'#' && b[i + 1] == b'#' {
+                i += 2; // escaped literal '#': skip both, never counts
+            } else if b[i] == b'#' && b[i + 1] == b'[' {
+                n += 1;
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        n
     }
 }

@@ -6,9 +6,28 @@
 //! Follows the same pure-parser / thin-I/O-shell split as `battery.rs`:
 //! `parse_tmux_version`, `truecolor_from_env`, and `block_installed` are
 //! pure and unit-tested directly; `run` is the I/O shell that spawns `tmux`,
-//! reads env vars and `~/.tmux.conf`, and prints the report. A doctor run
-//! never writes anything — it only reads and prints, like the other
-//! stdout-is-for-humans commands (`theme list`, `plugin list`).
+//! reads env vars and `~/.tmux.conf`, and prints the report.
+//!
+//! **What doctor writes.** A doctor run writes no configuration, theme, or
+//! plugin-registry file — in that sense it's still a read-and-print command
+//! like the other stdout-is-for-humans commands (`theme list`, `plugin
+//! list`). It is not entirely write-free, though: [`check_readers`] probes
+//! each platform reader whose widget kind is in the active layout by calling
+//! the exact same function a render calls, and one of those,
+//! `crate::cpu::read_cpu`, has a genuine write side effect — it best-effort
+//! persists its `<state_root>/cpu-sample` delta-snapshot cache (see
+//! `cpu.rs`) so the *next* call can take the zero-sleep fast path. That
+//! write is not new or doctor-specific: it is the identical file a normal
+//! `render right` already writes on every `status-interval` whenever `cpu`
+//! is in the layout (the default), so running `doctor` just adds one more
+//! instance of a write that is already continuous — never a write a render
+//! wouldn't have produced moments later anyway. A write failure (e.g. an
+//! unwritable or foreign-owned state dir) only ever `warn!`s into the log
+//! file, exactly as it already would on every normal render in that same
+//! environment — doctor introduces no new failure mode there, and the
+//! warning never reaches doctor's own stdout report. Every other probed
+//! reader (`memory`, `battery`, `uptime`, `disk`, `git`, `media`) performs no
+//! persisted write at all.
 
 use std::collections::HashMap;
 use std::env;
@@ -17,7 +36,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use rustline_core::PluginConfig;
+use rustline_core::{Config, PluginConfig};
 
 use crate::plugin_checksum::{PluginChecksumStatus, status_for};
 use crate::{daemon, daemon_client};
@@ -70,6 +89,10 @@ pub(crate) struct DoctorPaths<'a> {
     /// [`check_plugin_checksums`]) can report on every plugin the user has
     /// configured, not just ones that happen to be discovered on disk.
     pub plugins: &'a HashMap<String, PluginConfig>,
+    /// The whole effective config, so [`check_readers`] can resolve which
+    /// reader kinds the active layout actually uses (including
+    /// `[instances.*]`) rather than guessing from widget names.
+    pub cfg: &'a Config,
 }
 
 /// Parse `tmux -V` output (e.g. `"tmux 3.4\n"`, `"tmux 3.1a"`,
@@ -402,6 +425,110 @@ fn check_plugin_checksums(plugins: &HashMap<String, PluginConfig>, plugin_dir: &
     }
 }
 
+/// The widget names doctor's `widget readers` check should probe: every name
+/// actually rendered through the ordinary widget pipeline — `left` ∪
+/// `right` (`run` passes this to [`check_readers`], which resolves it to
+/// reader *kinds* via `Config::layout_kinds`/`disk_mounts`, both of which
+/// collect into a `BTreeSet`; a kind or mount repeated across regions, or
+/// across several `[instances.*]` of the same kind, is naturally probed
+/// once, not once per placement).
+///
+/// `center` is deliberately excluded. Nothing in the render pipeline reads
+/// it — `assemble.rs`'s window-list render hardcodes
+/// `registry.resolve(&["windows".to_string()])` rather than resolving
+/// `center`'s contents (see the Config doc's "`[layout].center` is inert"
+/// note) — so a reader for a widget kind placed only in `center` is never
+/// actually invoked by a real render. Probing it here would report a
+/// "reader failure" for a widget that isn't broken, it simply isn't
+/// rendered at all — a different problem this check isn't meant to surface
+/// (that one's already flagged by `widget enable/move --region center`'s
+/// stderr note and `widget edit`'s outright refusal to edit `center`).
+fn readable_layout(cfg: &Config) -> Vec<String> {
+    let mut names = cfg.layout.left.clone();
+    names.extend(cfg.layout.right.iter().cloned());
+    names
+}
+
+/// Probe every reader whose widget kind is actually in `layout` and report
+/// which ones currently yield nothing. This is the only diagnostic channel for
+/// a reader failure: each one degrades to `down_format` (default `""`), so a
+/// missing `git`/`playerctl` binary, an unmountable `[widgets.disk].mount`, or
+/// a tmux that won't list windows all look identical to "widget not
+/// configured" in the rendered bar. Run with `-vvv` to see each failed
+/// reader's concrete cause via its `debug!` log line.
+///
+/// `run` calls this with [`readable_layout`] (the union of `left`/`right`),
+/// so a reader-backed widget is probed regardless of which of those two
+/// regions it's placed in.
+///
+/// **Never `Fail`.** `doctor`'s exit code is reserved for setup that is
+/// outright broken, and a `None` reading is frequently legitimate — no
+/// battery, not inside a repository, no media player running. Same rule
+/// [`check_plugin_checksums`] follows.
+fn check_readers(cfg: &Config, layout: &[String]) -> Check {
+    const NAME: &str = "widget readers";
+    let kinds = cfg.layout_kinds(layout);
+
+    // (kind, is-currently-readable). Only probe what the layout actually uses,
+    // so `doctor` never pays for a reader the user doesn't have configured.
+    let mut probed: Vec<(&str, bool)> = Vec::new();
+    if kinds.contains("git") {
+        probed.push(("git", crate::git::read_git(".").is_some()));
+    }
+    if kinds.contains("media") {
+        probed.push(("media", crate::media::read_media().is_some()));
+    }
+    if kinds.contains("battery") {
+        probed.push(("battery", crate::battery::read_battery().is_some()));
+    }
+    if kinds.contains("uptime") {
+        probed.push(("uptime", crate::uptime::read_uptime().is_some()));
+    }
+    if kinds.contains("cpu") {
+        probed.push(("cpu", crate::cpu::read_cpu().is_some()));
+    }
+    if kinds.contains("memory") {
+        probed.push(("memory", crate::memory::read_memory().is_some()));
+    }
+    if kinds.contains("disk") {
+        for mount in cfg.disk_mounts(layout) {
+            probed.push(("disk", crate::disk::read_disk(&mount).is_some()));
+        }
+    }
+
+    if probed.is_empty() {
+        return Check {
+            name: NAME,
+            status: CheckStatus::Ok,
+            detail: "no readers in the active layout".to_string(),
+        };
+    }
+
+    let quiet: Vec<&str> = probed
+        .iter()
+        .filter(|(_, ok)| !ok)
+        .map(|(kind, _)| *kind)
+        .collect();
+    let ok_count = probed.len() - quiet.len();
+
+    if quiet.is_empty() {
+        Check {
+            name: NAME,
+            status: CheckStatus::Ok,
+            detail: format!("{ok_count} reading"),
+        }
+    } else {
+        Check {
+            name: NAME,
+            status: CheckStatus::Warn,
+            detail: format!(
+                "{ok_count} reading; nothing to report from: {} (run with -vvv for the cause)",
+                quiet.join(", ")
+            ),
+        }
+    }
+}
+
 /// Whether a resolved directory (config/themes/plugin/log) already exists.
 /// Absence is only a `Warn` — every one of these is created on first use
 /// (invariant: `Config::load` is total), so a fresh install legitimately has
@@ -442,6 +569,7 @@ pub(crate) fn run(paths: &DoctorPaths) -> i32 {
         check_daemon(),
         check_popup(tmux_version),
         check_plugin_checksums(paths.plugins, paths.plugin_dir),
+        check_readers(paths.cfg, &readable_layout(paths.cfg)),
         check_dir("config dir", config_dir),
         check_dir("themes dir", paths.themes_dir),
         check_dir("plugin dir", paths.plugin_dir),
@@ -611,5 +739,76 @@ mod tests {
         assert!(check.detail.contains("malformed"), "{}", check.detail);
         assert!(check.detail.contains("ghost"), "{}", check.detail);
         assert!(check.detail.contains("not found"), "{}", check.detail);
+    }
+
+    #[test]
+    fn reader_check_never_fails_the_run() {
+        // doctor's exit code is reserved for setup that is outright broken. A
+        // reader returning None is frequently legitimate (no battery, not in a
+        // repo, no player running), so this row must never produce Fail — the
+        // same rule check_plugin_checksums follows.
+        let cfg = Config::default();
+        for layout in [
+            vec![],
+            vec!["cpu".to_string(), "memory".to_string()],
+            vec![
+                "git".to_string(),
+                "media".to_string(),
+                "battery".to_string(),
+            ],
+        ] {
+            let check = check_readers(&cfg, &layout);
+            assert_ne!(check.status, CheckStatus::Fail, "layout {layout:?}");
+            assert_eq!(check.name, "widget readers");
+        }
+    }
+
+    #[test]
+    fn reader_check_reports_nothing_to_probe_for_an_empty_layout() {
+        let cfg = Config::default();
+        let check = check_readers(&cfg, &[]);
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.detail.contains("no readers"), "got: {}", check.detail);
+    }
+
+    #[test]
+    fn readable_layout_unions_left_and_right_but_excludes_center() {
+        // Regression coverage for the code-health finding: `check_readers`
+        // used to only ever see `cfg.layout.right`, so a reader-backed
+        // widget placed in `left` (legal via `widget enable --region left`)
+        // was silently never probed. `center` stays excluded on purpose —
+        // nothing in the render pipeline reads it, so a reader for a
+        // center-only widget was never actually invoked by a real render.
+        let mut cfg = Config::default();
+        cfg.layout.left = vec!["git".to_string()];
+        cfg.layout.right = vec!["cpu".to_string()];
+        cfg.layout.center = vec!["battery".to_string()];
+
+        let layout = readable_layout(&cfg);
+        assert!(layout.iter().any(|n| n == "git"), "{layout:?}");
+        assert!(layout.iter().any(|n| n == "cpu"), "{layout:?}");
+        assert!(
+            !layout.iter().any(|n| n == "battery"),
+            "center must stay excluded: {layout:?}"
+        );
+    }
+
+    #[test]
+    fn a_reader_kind_placed_in_left_is_probed() {
+        // The bug: `run` used to call `check_readers(paths.cfg,
+        // &paths.cfg.layout.right)`, so a `git`/`battery`/`disk` widget
+        // living only in `left` was invisible to this check. Wiring `run`
+        // through `readable_layout` fixes that; assert it end to end
+        // through `check_readers` itself, not just the layout union.
+        let mut cfg = Config::default();
+        cfg.layout.left = vec!["git".to_string()];
+        cfg.layout.right = vec![];
+
+        let check = check_readers(&cfg, &readable_layout(&cfg));
+        assert_ne!(check.status, CheckStatus::Fail);
+        assert_ne!(
+            check.detail, "no readers in the active layout",
+            "a `left`-only reader kind must still be probed"
+        );
     }
 }

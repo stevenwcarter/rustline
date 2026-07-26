@@ -157,10 +157,19 @@ mod tests {
         assert_eq!(wire.arch, ctx.arch);
         assert_eq!(wire.toggled, ctx.toggled);
         assert_eq!(wire.colors, ctx.colors);
-        assert_eq!(
-            wire.window.map(|w| w.is_current),
-            ctx.window.map(|w| w.is_current)
-        );
+        // Compared as a whole `WireWindowCtx` struct literal (not per-field,
+        // and not `..Default::default()`) so a future field added to
+        // `WireWindowCtx` fails to *compile* here until this literal is
+        // updated, rather than silently going unasserted the way struct-level
+        // `#[serde(default)]` (B7) lets an unasserted field decode to its
+        // default with nothing to catch it.
+        let expected_window = ctx.window.map(|w| rustline_abi::WireWindowCtx {
+            index: w.index,
+            name: w.name,
+            flags: w.flags,
+            is_current: w.is_current,
+        });
+        assert_eq!(wire.window, expected_window);
     }
 
     /// The full guest input shape (`GuestRender`) parses the host's

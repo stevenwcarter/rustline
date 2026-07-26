@@ -4,22 +4,46 @@
 
 use rustline_core::GitInfo;
 
+/// Wall-clock budget for a render-path subprocess read. Comfortably under a
+/// 1 s `status-interval` so a wedged `git`/`playerctl`/`tmux` degrades to
+/// `down_format` within one tick instead of blocking the region forever — and,
+/// under the daemon, instead of pinning the shared render lock (`daemon.rs`'s
+/// `handle_request` holds it across the whole render).
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Read the git branch/status for `path` via `git status --porcelain=v2
 /// --branch`, or `None` on any failure: `git` missing from `PATH`, `path` not
-/// inside a repository, or a non-zero exit — never a fabricated "clean"
-/// reading (invariant #6). Called once at Context-build time, only when the
-/// `git` widget is in the active layout (see `build_context.rs`).
+/// inside a repository, a non-zero exit, or the read exceeding
+/// [`READ_TIMEOUT`] (e.g. `path` on an unresponsive network mount) — never a
+/// fabricated "clean" reading (invariant #6). Called once at Context-build
+/// time, only when the `git` widget is in the active layout (see
+/// `build_context.rs`).
 pub fn read_git(path: &str) -> Option<GitInfo> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["status", "--porcelain=v2", "--branch"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    let args = [
+        "-C".to_string(),
+        path.to_string(),
+        "status".to_string(),
+        "--porcelain=v2".to_string(),
+        "--branch".to_string(),
+    ];
+    let (code, stdout, _stderr) = match rustline_wasm::run_bounded("git", &args, READ_TIMEOUT) {
+        Ok(t) => t,
+        Err(error) => {
+            // Covers both a spawn failure (git missing) and a timeout (a
+            // pane cwd on an unresponsive network mount).
+            tracing::debug!(reader = "git", %error, path, "git read failed");
+            return None;
+        }
+    };
+    if code != 0 {
+        tracing::debug!(
+            reader = "git",
+            code,
+            path,
+            "git exited non-zero (not a repository?)"
+        );
         return None;
     }
-    let stdout = String::from_utf8(output.stdout).ok()?;
     Some(parse_git_status(&stdout))
 }
 

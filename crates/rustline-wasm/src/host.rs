@@ -2,14 +2,15 @@
 //! plugin instance's `CapabilityCtx`, and wrap the instance as a `Widget` that
 //! degrades to empty segments on any error.
 
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LockResult, Mutex, MutexGuard};
 use std::time::Duration;
 
 use extism::{Manifest, PTR, PluginBuilder, UserData, Wasm, host_fn};
 use rustline_abi::ABI_VERSION;
 use rustline_core::{Context, RANGE_NAME_MAX_BYTES, Segment, Widget};
 
-use crate::abi::{CachedExecResult, ExecResult, RenderInput, parse_render_output};
+use crate::abi::{CachedExecResult, ExecResult, RenderInput};
 use crate::capability::CapabilityCtx;
 use crate::fetch::UreqFetcher;
 use crate::paths::wasmtime_cache_config_path;
@@ -194,6 +195,16 @@ pub struct WasmWidget {
     plugin: Arc<Mutex<extism::Plugin>>,
     options: Arc<serde_json::Value>,
     name: Arc<str>,
+    /// One-shot latch for the poisoned-mutex warning. The daemon renders this
+    /// widget every tick, so without it a single earlier panic would log once
+    /// per refresh forever.
+    poison_reported: Arc<AtomicBool>,
+    /// One-shot latch for the malformed-output warning, for the same reason.
+    /// A guest whose wire shape disagrees with this host returns malformed
+    /// output on *every* tick, not once — so an unlatched warn here would be
+    /// ~86k lines/day at the default 1 s interval, rotating away the very log
+    /// this warning exists to appear in.
+    decode_reported: Arc<AtomicBool>,
 }
 
 impl WasmWidget {
@@ -202,6 +213,8 @@ impl WasmWidget {
             plugin: Arc::new(Mutex::new(plugin)),
             options: Arc::new(options),
             name: Arc::from(name),
+            poison_reported: Arc::new(AtomicBool::new(false)),
+            decode_reported: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -220,12 +233,22 @@ impl Widget for WasmWidget {
                 return Vec::new();
             }
         };
-        let mut plugin = match self.plugin.lock() {
-            Ok(p) => p,
-            Err(_) => return Vec::new(),
-        };
+        // A poisoned mutex means an EARLIER render panicked while holding it.
+        // Bailing out returned empty segments forever — in the CLI path each
+        // render is a fresh process so it self-heals, but under the W48 daemon
+        // this widget is warm for the process lifetime, so one panic killed
+        // the plugin permanently and silently, fixable only by restarting the
+        // daemon. `daemon.rs`'s `handle_request` already recovers ITS state
+        // mutex the same way. Recovery is sound because the guarded value is
+        // an `extism::Plugin` whose own state lives in the wasm instance: a
+        // panic in `plugin.call` unwinds Rust-side without leaving a
+        // partially-updated Rust struct behind, and genuinely broken guest
+        // state surfaces as the next `call` returning `Err`, which the arm
+        // below already degrades to empty segments (N2).
+        let (mut plugin, _) =
+            recover_poisoned(self.plugin.lock(), &self.poison_reported, &self.name);
         match plugin.call::<&str, &str>("render", &payload) {
-            Ok(out) => parse_render_output(out),
+            Ok(out) => decode_render_output(&self.name, out, &self.decode_reported).0,
             Err(error) => {
                 tracing::warn!(%error, "plugin render failed, rendering empty");
                 Vec::new()
@@ -248,12 +271,85 @@ fn plugin_range_name(name: &str) -> Option<&str> {
     (name.len() <= RANGE_NAME_MAX_BYTES).then_some(name)
 }
 
+/// Decode a guest's `render` output, returning the segments plus the decode
+/// error when there was one.
+///
+/// Split out of [`WasmWidget::render`] so the decode outcome can be asserted by
+/// a hermetic unit test without a real `extism::Plugin`, the same way
+/// `plugin_range_name` is. `parse_render_output` stays as-is (it is `pub`, and
+/// its `unwrap_or_default` contract — malformed output never breaks the bar,
+/// invariant N2 — is unchanged); this only makes the failure *reportable*.
+///
+/// `reported` latches the warning for the same reason [`recover_poisoned`]
+/// does: this condition does not clear by itself. A guest whose wire shape
+/// disagrees with the host fails to decode on every tick, so warning each time
+/// would bury the log rather than inform it. The `Option<Error>` is still
+/// returned unconditionally, so suppressing the *warning* never suppresses the
+/// caller's ability to see that a decode failed.
+fn decode_render_output(
+    name: &str,
+    out: &str,
+    reported: &AtomicBool,
+) -> (Vec<Segment>, Option<serde_json::Error>) {
+    match serde_json::from_str::<Vec<Segment>>(out) {
+        Ok(segments) => (segments, None),
+        Err(error) => {
+            if !reported.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    plugin = %name,
+                    %error,
+                    len = out.len(),
+                    "malformed plugin render output, rendering empty"
+                );
+            }
+            (Vec::new(), Some(error))
+        }
+    }
+}
+
+/// Resolve a possibly-poisoned plugin lock: hand back the guard either way, and
+/// warn at most once per widget. Returns the guard plus whether this call was
+/// the one that emitted the warning.
+///
+/// Split out of [`WasmWidget::render`] for the same reason as
+/// [`decode_render_output`]: so a hermetic unit test can drive a genuinely
+/// poisoned mutex through the real decision instead of re-modelling it. It is
+/// generic over the guarded type only so a test can use a plain `Mutex<i32>` —
+/// the latch and recovery it exercises are this same code, just instantiated at
+/// a different `T`.
+///
+/// The one-shot latch matters because a warm daemon renders this widget every
+/// tick; suppressing the *warning* must never suppress the *recovery*, which is
+/// why the guard is returned unconditionally.
+fn recover_poisoned<'a, T>(
+    locked: LockResult<MutexGuard<'a, T>>,
+    reported: &AtomicBool,
+    name: &str,
+) -> (MutexGuard<'a, T>, bool) {
+    match locked {
+        Ok(guard) => (guard, false),
+        Err(poisoned) => {
+            let first = !reported.swap(true, Ordering::Relaxed);
+            if first {
+                tracing::warn!(
+                    plugin = %name,
+                    "plugin mutex was poisoned by an earlier panic; recovering"
+                );
+            }
+            (poisoned.into_inner(), first)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rustline_abi::ABI_VERSION;
     use rustline_core::{Config, Context, Registry};
 
-    use super::{decode_args, plugin_range_name};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use super::{decode_args, decode_render_output, plugin_range_name, recover_poisoned};
     use crate::abi::{RenderInput, parse_render_output};
 
     /// A minimal `Context` with `toggled` set to `{name}`, for pinning the
@@ -299,6 +395,123 @@ mod tests {
         assert!(parse_render_output("not json").is_empty());
         let good = r#"[{"text":"x","style":{"fg":null,"bg":null,"bold":false}}]"#;
         assert_eq!(parse_render_output(good).len(), 1);
+    }
+
+    #[test]
+    fn parse_render_output_still_degrades_to_empty() {
+        // `parse_render_output` is no longer on the render path — that is
+        // `decode_render_output` above, which has its own tests and holds the
+        // N2 guarantee for the bar. This pins the `pub` fn's own contract,
+        // since it stays part of the crate's API for external callers.
+        assert!(parse_render_output("not json").is_empty());
+        assert!(parse_render_output(r#"{"segments":[]}"#).is_empty());
+        assert!(!parse_render_output(r#"[{"text":"hi","style":{}}]"#).is_empty());
+    }
+
+    #[test]
+    fn decode_render_output_reports_the_error_for_malformed_json() {
+        // The distinguishing signal the log was missing: which plugin, and why.
+        let reported = AtomicBool::new(false);
+        let (segs, err) = decode_render_output("weather", r#"{"segments":[]}"#, &reported);
+        assert!(segs.is_empty());
+        assert!(err.is_some(), "a decode failure must be reportable");
+
+        let (segs, err) =
+            decode_render_output("weather", r#"[{"text":"hi","style":{}}]"#, &reported);
+        assert_eq!(segs.len(), 1);
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn a_repeatedly_malformed_guest_is_reported_once_but_still_decodes_every_tick() {
+        // A guest whose wire shape disagrees with the host fails on EVERY
+        // tick, so the warn is latched — but, exactly as with
+        // `recover_poisoned`, suppressing the warning must never suppress the
+        // outcome: the caller still gets the error and the empty segments.
+        let reported = AtomicBool::new(false);
+        for _ in 0..3 {
+            let (segs, err) = decode_render_output("weather", r#"{"segments":[]}"#, &reported);
+            assert!(segs.is_empty(), "still degrades to empty (N2)");
+            assert!(err.is_some(), "and still reports the error to the caller");
+        }
+        assert!(
+            reported.load(Ordering::Relaxed),
+            "the latch is armed after the first failure"
+        );
+    }
+
+    #[test]
+    fn a_well_formed_guest_leaves_the_decode_latch_unarmed() {
+        // So a plugin that only later starts emitting garbage still gets its
+        // one warning.
+        let reported = AtomicBool::new(false);
+        let (segs, err) =
+            decode_render_output("weather", r#"[{"text":"hi","style":{}}]"#, &reported);
+        assert_eq!(segs.len(), 1);
+        assert!(err.is_none());
+        assert!(!reported.load(Ordering::Relaxed));
+    }
+
+    /// A genuinely poisoned `Mutex`, for driving `recover_poisoned`'s real
+    /// `Err` arm rather than a stand-in for it.
+    fn poisoned_mutex(value: u32) -> Arc<Mutex<u32>> {
+        let m = Arc::new(Mutex::new(value));
+        let m2 = Arc::clone(&m);
+        let _ = std::thread::spawn(move || {
+            let _g = m2.lock().unwrap();
+            panic!("poison it");
+        })
+        .join();
+        assert!(m.lock().is_err(), "the mutex must actually be poisoned");
+        m
+    }
+
+    #[test]
+    fn a_poisoned_lock_is_recovered_rather_than_disabling_the_plugin() {
+        // In the daemon this widget is warm for the process lifetime, so
+        // bailing out on Err(_) meant one panic killed that plugin
+        // permanently and silently.
+        let m = poisoned_mutex(7);
+        let reported = AtomicBool::new(false);
+
+        let (guard, first) = recover_poisoned(m.lock(), &reported, "weather");
+        assert_eq!(*guard, 7, "recovery must still hand back the value");
+        assert!(first, "the first poisoned lock reports");
+    }
+
+    #[test]
+    fn poison_is_reported_once_but_recovered_every_time() {
+        // The latch must suppress the WARNING without ever suppressing the
+        // RECOVERY — a widget that logged once and then went silently empty
+        // forever would be the original bug wearing a hat.
+        let m = poisoned_mutex(7);
+        let reported = AtomicBool::new(false);
+
+        let (first_guard, first) = recover_poisoned(m.lock(), &reported, "weather");
+        assert!(first, "first report happens");
+        assert_eq!(*first_guard, 7);
+        drop(first_guard);
+
+        for _ in 0..3 {
+            let (guard, reported_again) = recover_poisoned(m.lock(), &reported, "weather");
+            assert!(!reported_again, "subsequent ticks stay quiet");
+            assert_eq!(*guard, 7, "but still recover the guard");
+        }
+    }
+
+    #[test]
+    fn a_healthy_lock_neither_reports_nor_arms_the_latch() {
+        let m: Arc<Mutex<u32>> = Arc::new(Mutex::new(7));
+        let reported = AtomicBool::new(false);
+
+        let (guard, first) = recover_poisoned(m.lock(), &reported, "weather");
+        assert_eq!(*guard, 7);
+        assert!(!first, "an unpoisoned lock reports nothing");
+        drop(guard);
+        assert!(
+            !reported.load(Ordering::Relaxed),
+            "and must leave the latch unarmed for a real poisoning later"
+        );
     }
 
     #[test]

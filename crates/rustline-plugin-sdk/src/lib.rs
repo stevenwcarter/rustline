@@ -119,7 +119,16 @@ where
 {
     match serde_json::from_str::<GuestRender>(input) {
         Ok(render) => f(&render),
-        Err(_) => Vec::new(),
+        Err(error) => {
+            // A silent empty render is indistinguishable from "the plugin had
+            // nothing to show". Host/guest wire skew is the likeliest cause,
+            // so say so through the host's own logger.
+            log(
+                LogLevel::Warn,
+                &format!("could not decode the host's render input: {error}"),
+            );
+            Vec::new()
+        }
     }
 }
 

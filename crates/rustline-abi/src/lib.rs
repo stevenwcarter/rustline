@@ -220,7 +220,12 @@ pub struct Throughput {
 
 /// The guest-side wire mirror of `rustline_core::WindowCtx`. A WASM guest
 /// deserializes this typed struct rather than hand-walking the JSON.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Struct-level `#[serde(default)]` (see [`WireContext`]'s doc comment for the
+/// full rationale) keeps this decode total even when an older/newer host
+/// omits a field.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WireWindowCtx {
     pub index: String,
     pub name: String,
@@ -242,7 +247,18 @@ pub struct WireWindowCtx {
 /// round-trip seam test in `rustline-wasm` pins the two together). No
 /// `deny_unknown_fields` — host/guest version skew must stay total, matching
 /// `Context`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// Struct-level `#[serde(default)]` (matching `HttpResult`/`ExecResult` and
+/// the other host-effect result types) makes the decode total in BOTH
+/// directions of version skew. Without it, a guest built against a newer SDK
+/// and run on an older host hit a "missing field" error on `git`/`disk`/
+/// `os`/`arch`/…, `render_with` returned an empty `Vec`, and the widget
+/// silently disappeared — with `abi_decision` unable to catch it, since both
+/// sides honestly report the same `ABI_VERSION`. Still no
+/// `deny_unknown_fields`: skew must stay total in the other direction too
+/// (invariant #2).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WireContext {
     pub session_name: String,
     pub window_index: String,
@@ -258,24 +274,17 @@ pub struct WireContext {
     pub interfaces: Vec<NetIface>,
     pub battery: Option<Battery>,
     pub cpu: Option<CpuUsage>,
-    #[serde(default)]
     pub cpu_history: Vec<f32>,
     pub memory: Option<MemInfo>,
-    #[serde(default)]
     pub mem_history: Vec<f32>,
     pub git: Option<GitInfo>,
     pub disk: Option<DiskInfo>,
-    #[serde(default)]
     pub throughput: Option<Throughput>,
-    #[serde(default)]
     pub uptime: Option<u64>,
-    #[serde(default)]
     pub media: Option<MediaInfo>,
     pub os: String,
     pub arch: String,
-    #[serde(default)]
     pub toggled: BTreeSet<String>,
-    #[serde(default)]
     pub colors: ThemeColors,
 }
 
@@ -425,6 +434,40 @@ mod tests {
         let json = serde_json::to_string(&d).unwrap();
         let back: ThemeColors = serde_json::from_str(&json).unwrap();
         assert_eq!(back, d);
+    }
+
+    #[test]
+    fn wire_context_decodes_from_an_older_host_missing_later_fields() {
+        // A guest built against today's SDK, run on a host that predates
+        // git/disk/os/arch/interfaces/battery/cpu/memory. Every absent field must
+        // fall back to its default rather than failing the whole decode — a decode
+        // failure makes the widget silently render empty.
+        let json = r#"{"session_name":"0","window_index":"1","pane_index":"2",
+            "pane_current_path":"/","home":"/home/x","hostname":"h",
+            "loadavg":null,"now":"2026-07-26T00:00:00+00:00","window":null}"#;
+        let ctx: WireContext = serde_json::from_str(json).expect("must decode");
+        assert_eq!(ctx.hostname, "h");
+        assert!(ctx.git.is_none());
+        assert!(ctx.disk.is_none());
+        assert_eq!(ctx.os, "");
+        assert_eq!(ctx.arch, "");
+        assert!(ctx.interfaces.is_empty());
+    }
+
+    #[test]
+    fn wire_context_decodes_from_an_empty_object() {
+        // The degenerate case: struct-level default means even {} is decodable.
+        let ctx: WireContext = serde_json::from_str("{}").expect("must decode");
+        assert_eq!(ctx.session_name, "");
+        assert!(ctx.window.is_none());
+    }
+
+    #[test]
+    fn guest_render_decodes_with_a_sparse_context() {
+        let json = r#"{"context":{"hostname":"h"},"config":{"format":"x"}}"#;
+        let g: GuestRender = serde_json::from_str(json).expect("must decode");
+        assert_eq!(g.context.hostname, "h");
+        assert_eq!(g.config["format"], "x");
     }
 
     #[test]

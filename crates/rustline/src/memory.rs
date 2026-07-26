@@ -21,6 +21,7 @@ pub fn read_memory() -> Option<MemInfo> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
+        tracing::debug!(reader = "memory", "unsupported platform");
         None
     }
 }
@@ -51,20 +52,101 @@ pub fn read_memory_history(state_dir: &Path, current_percent: f32, spark_width: 
 
 #[cfg(target_os = "linux")]
 fn read_memory_linux() -> Option<MemInfo> {
-    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-    parse_meminfo(&text)
+    let text = std::fs::read_to_string("/proc/meminfo")
+        .inspect_err(
+            |error| tracing::debug!(reader = "memory", %error, "failed to read /proc/meminfo"),
+        )
+        .ok()?;
+    let info = parse_meminfo(&text);
+    if info.is_none() {
+        tracing::debug!(
+            reader = "memory",
+            "failed to parse /proc/meminfo (missing MemTotal/MemAvailable?)"
+        );
+    }
+    info
 }
 
+/// Render a `hw.memsize` byte count as the decimal text `parse_macos_memory`
+/// expects. Trivial, but it is the seam that keeps the FFI migration a pure
+/// *source* change: the parser's contract is untouched, so everything except
+/// the syscall wrapper itself stays unit-tested on any host.
+#[cfg(any(target_os = "macos", test))]
+fn memsize_to_text(total_bytes: u64) -> String {
+    total_bytes.to_string()
+}
+
+/// Total physical memory (`hw.memsize`) via `sysctlbyname`, memoized for the
+/// process lifetime.
+///
+/// This replaced a `sysctl -n hw.memsize` subprocess spawn. `memory` is in the
+/// default right layout, so that spawn ran on every `render right` — every
+/// tmux tick, forever, on every macOS machine — to re-read a value that is
+/// constant for the machine's lifetime. Mirrors `cpu.rs`'s
+/// `read_mach_cpu_ticks`, which replaced a `top -l 2` shell-out for the same
+/// reason; `libc` is already a dependency, so this adds no crate.
+///
+/// `None` if the sysctl fails — the widget then renders `down_format` rather
+/// than a fabricated total (invariant #6). Note this does NOT degrade exactly
+/// as the failed spawn did: the `OnceLock` caches the `Option`, so a failure is
+/// latched for the process lifetime, where the old per-call spawn could fail
+/// once and succeed on the next tick. That is a deliberate trade — `hw.memsize`
+/// is installed physical RAM, so a query for it has no transient failure mode
+/// the way a fork+exec does under memory or process-table pressure — but under
+/// the long-lived daemon it does mean one failure disables the memory widget
+/// until restart. Switch to `OnceLock<u64>`, set only on success, if that ever
+/// proves reachable.
+#[cfg(target_os = "macos")]
+fn hw_memsize() -> Option<u64> {
+    use std::sync::OnceLock;
+
+    static MEMSIZE: OnceLock<Option<u64>> = OnceLock::new();
+    *MEMSIZE.get_or_init(|| {
+        let mut value: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        // SAFETY: `sysctlbyname` writes at most `len` bytes into `value`'s
+        // storage and updates `len` to what it actually wrote. `value` is a
+        // live, correctly-aligned `u64` we own, and `len` starts as exactly
+        // its size, so the write cannot overrun. The name is a NUL-terminated
+        // literal. We read `value` only when the call returned 0 (success) AND
+        // reported writing a full `u64`, so it is always fully initialized
+        // before use. No pointer outlives this block.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                c"hw.memsize".as_ptr(),
+                (&raw mut value).cast::<libc::c_void>(),
+                &raw mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (rc == 0 && len == std::mem::size_of::<u64>()).then_some(value)
+    })
+}
+
+/// `vm_stat` stays a spawn for now: migrating it to
+/// `host_statistics64(HOST_VM_INFO64)` is a separate, higher-risk change that
+/// cannot be validated from a Linux dev box (see this file's history).
 #[cfg(target_os = "macos")]
 fn read_memory_macos() -> Option<MemInfo> {
-    let memsize = std::process::Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
+    let Some(memsize) = hw_memsize() else {
+        tracing::debug!(reader = "memory", "sysctlbyname(hw.memsize) failed");
+        return None;
+    };
+    let vm = std::process::Command::new("vm_stat")
         .output()
+        .inspect_err(|error| tracing::debug!(reader = "memory", %error, "vm_stat spawn failed"))
         .ok()?;
-    let vm = std::process::Command::new("vm_stat").output().ok()?;
-    let memsize = String::from_utf8(memsize.stdout).ok()?;
-    let vm = String::from_utf8(vm.stdout).ok()?;
-    parse_macos_memory(&memsize, &vm)
+    let vm = String::from_utf8(vm.stdout)
+        .inspect_err(
+            |error| tracing::debug!(reader = "memory", %error, "vm_stat output was not utf-8"),
+        )
+        .ok()?;
+    let info = parse_macos_memory(&memsize_to_text(memsize), &vm);
+    if info.is_none() {
+        tracing::debug!(reader = "memory", "failed to parse sysctl/vm_stat output");
+    }
+    info
 }
 
 /// Parse `/proc/meminfo`. Needs `MemTotal` + `MemAvailable` (both kB);
@@ -174,6 +256,33 @@ mod tests {
         // Valid hw.memsize, but the vm_stat header lacks "page size of N bytes" -> None.
         let vm = "Mach Virtual Memory Statistics:\nPages free:                          100.\n";
         assert!(parse_macos_memory("17179869184", vm).is_none());
+    }
+
+    #[test]
+    fn memsize_text_parses_the_same_whatever_produced_it() {
+        // parse_macos_memory's contract is unchanged by the sysctl migration: it
+        // still takes the total as text. Pinning it here is what makes the FFI
+        // swap a *source* change rather than a behaviour change — the only part
+        // that cannot be compiled on this box is the syscall wrapper itself.
+        let vm = "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n\
+                  Pages free:                          1000.\n\
+                  Pages inactive:                      2000.\n\
+                  Pages speculative:                    500.\n";
+        let from_spawn = parse_macos_memory("17179869184\n", vm).expect("parses");
+        let from_ffi = parse_macos_memory(&memsize_to_text(17_179_869_184), vm).expect("parses");
+        assert_eq!(from_spawn, from_ffi);
+        assert_eq!(from_spawn.total_bytes, 17179869184);
+    }
+
+    #[test]
+    fn memsize_text_round_trips_through_the_ffi_formatting() {
+        // The FFI path formats a u64 into the same text parse_macos_memory reads.
+        for total in [0u64, 1, 8 * 1024 * 1024 * 1024, u64::MAX] {
+            assert_eq!(
+                memsize_to_text(total).trim().parse::<u64>().ok(),
+                Some(total)
+            );
+        }
     }
 
     #[test]

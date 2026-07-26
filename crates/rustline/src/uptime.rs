@@ -32,7 +32,16 @@ pub(crate) fn parse_kern_boottime(sysctl_output: &str, now_epoch: u64) -> Option
 /// the read failed. Called once at Context-build time.
 #[cfg(target_os = "linux")]
 pub fn read_uptime() -> Option<u64> {
-    parse_proc_uptime(&std::fs::read_to_string("/proc/uptime").ok()?)
+    let text = std::fs::read_to_string("/proc/uptime")
+        .inspect_err(
+            |error| tracing::debug!(reader = "uptime", %error, "failed to read /proc/uptime"),
+        )
+        .ok()?;
+    let uptime = parse_proc_uptime(&text);
+    if uptime.is_none() {
+        tracing::debug!(reader = "uptime", "failed to parse /proc/uptime contents");
+    }
+    uptime
 }
 
 #[cfg(target_os = "macos")]
@@ -40,17 +49,30 @@ pub fn read_uptime() -> Option<u64> {
     let output = std::process::Command::new("sysctl")
         .args(["-n", "kern.boottime"])
         .output()
+        .inspect_err(|error| tracing::debug!(reader = "uptime", %error, "sysctl spawn failed"))
         .ok()?;
-    let stdout = String::from_utf8(output.stdout).ok()?;
+    let stdout = String::from_utf8(output.stdout)
+        .inspect_err(
+            |error| tracing::debug!(reader = "uptime", %error, "sysctl output was not utf-8"),
+        )
+        .ok()?;
     let now_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
+        .inspect_err(
+            |error| tracing::debug!(reader = "uptime", %error, "system clock before unix epoch"),
+        )
         .ok()?
         .as_secs();
-    parse_kern_boottime(&stdout, now_epoch)
+    let uptime = parse_kern_boottime(&stdout, now_epoch);
+    if uptime.is_none() {
+        tracing::debug!(reader = "uptime", "failed to parse kern.boottime output");
+    }
+    uptime
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn read_uptime() -> Option<u64> {
+    tracing::debug!(reader = "uptime", "unsupported platform");
     None
 }
 

@@ -20,6 +20,7 @@ pub fn read_battery() -> Option<Battery> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
+        tracing::debug!(reader = "battery", "unsupported platform");
         None
     }
 }
@@ -27,7 +28,14 @@ pub fn read_battery() -> Option<Battery> {
 #[cfg(target_os = "linux")]
 fn read_battery_linux() -> Option<Battery> {
     let base = std::path::Path::new("/sys/class/power_supply");
-    for entry in std::fs::read_dir(base).ok()? {
+    let entries = match std::fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::debug!(reader = "battery", %error, "failed to read /sys/class/power_supply");
+            return None;
+        }
+    };
+    for entry in entries {
         let Ok(entry) = entry else { continue };
         let dir = entry.path();
         // Only real batteries (type == "Battery"), not Mains/AC adapters.
@@ -45,6 +53,10 @@ fn read_battery_linux() -> Option<Battery> {
         };
         return parse_linux(&capacity, &status);
     }
+    tracing::debug!(
+        reader = "battery",
+        "no battery device found under /sys/class/power_supply"
+    );
     None
 }
 
@@ -53,8 +65,13 @@ fn read_battery_macos() -> Option<Battery> {
     let output = std::process::Command::new("pmset")
         .args(["-g", "batt"])
         .output()
+        .inspect_err(|error| tracing::debug!(reader = "battery", %error, "pmset spawn failed"))
         .ok()?;
-    let stdout = String::from_utf8(output.stdout).ok()?;
+    let stdout = String::from_utf8(output.stdout)
+        .inspect_err(
+            |error| tracing::debug!(reader = "battery", %error, "pmset output was not utf-8"),
+        )
+        .ok()?;
     parse_pmset(&stdout)
 }
 

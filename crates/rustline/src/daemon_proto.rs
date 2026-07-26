@@ -6,35 +6,61 @@
 //! encoding. No socket, listener, or client lives here yet — later tasks
 //! build the server and client on top of this seam.
 //!
-//! `DaemonRequest::Render` mirrors the CLI's `render left|right|window`
+//! `DaemonRequest::RenderV2` mirrors the CLI's `render left|right|window`
 //! subcommands (see `cli::Render`) so a daemon client can build the same
 //! request shape it already builds today, just routed over a socket instead
 //! of a process spawn. `RenderArgsWire` combines `cli::RegionArgs`'s
 //! left/right fields and `cli::WindowArgs`'s window fields into one struct
 //! covering all three `RegionKind`s — fields that don't apply to the
-//! requested kind are simply absent/default.
+//! requested kind are simply absent/default. The `protocol` field on
+//! `RenderV2` is [`DAEMON_PROTOCOL`]; see its doc comment for why the wire
+//! protocol is versioned via an enum variant rather than a struct field.
 
 use std::io::{self, Read, Write};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+/// The daemon wire-protocol version. Bump this whenever [`RenderArgsWire`]
+/// gains or loses a field, or whenever the render semantics behind a request
+/// change.
+///
+/// The daemon is long-lived and only reloads on the *config file's* mtime —
+/// never the binary's — so after `cargo install` an old daemon keeps serving a
+/// new client. Without a version it did so silently, rendering with old config
+/// semantics, old theme resolution and old widget code, which the client then
+/// emitted as its own output. Serde also ignores unknown struct fields, so a
+/// field addition skewed silently too; only an unknown *enum variant* fails
+/// loudly, which is why the version rides a new variant rather than a new
+/// field on the old one.
+pub const DAEMON_PROTOCOL: u32 = 1;
+
 /// A request the daemon client sends to the daemon server.
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub enum DaemonRequest {
-    /// Render one status-line region or window segment.
-    Render {
+    /// Render one status-line region or window segment, tagged with the
+    /// client's [`DAEMON_PROTOCOL`]. A daemon predating this variant cannot
+    /// deserialize it at all, drops the connection, and the client falls back
+    /// to an in-process render — fail-closed by construction. A daemon that
+    /// understands it still refuses a `protocol` it does not equal, so a
+    /// *newer* daemon also declines an older client.
+    RenderV2 {
+        protocol: u32,
         region: RegionKind,
         args: RenderArgsWire,
     },
     /// Liveness check; the server replies [`DaemonResponse::Pong`].
+    ///
+    /// Deliberately NOT versioned, along with [`DaemonRequest::Shutdown`]: if
+    /// a version skew made `daemon status`/`daemon stop` fail too, the user
+    /// would have no way to stop the stale daemon that caused the problem.
     Ping,
     /// Ask the server to stop; it replies [`DaemonResponse::ShuttingDown`]
     /// before exiting.
     Shutdown,
 }
 
-/// Which status-line region (or window segment) a `DaemonRequest::Render`
+/// Which status-line region (or window segment) a `DaemonRequest::RenderV2`
 /// asks for — the wire equivalent of `cli::Render`'s three variants. `Copy`
 /// so a caller (e.g. the bench `daemon` pass) can capture one by value in a
 /// closure that's invoked repeatedly, without a per-call clone.
@@ -49,7 +75,7 @@ pub enum RegionKind {
 /// `cli::RegionArgs` (`session`/`window`/`pane`/`pane_path`, used by
 /// `RegionKind::Left`/`Right`) and `cli::WindowArgs`
 /// (`index`/`name`/`flags`/`current`, used by `RegionKind::Window`) into one
-/// shape, since a single `DaemonRequest::Render` message must serve all three
+/// shape, since a single `DaemonRequest::RenderV2` message must serve all three
 /// region kinds — fields that don't apply to the requested kind are left at
 /// their `Default` (`None`/`false`).
 #[derive(Serialize, Deserialize, PartialEq, Debug, Default)]
@@ -68,7 +94,8 @@ pub struct RenderArgsWire {
 /// The daemon server's reply to a `DaemonRequest`.
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub enum DaemonResponse {
-    /// A rendered region/window's tmux markup (`DaemonRequest::Render`'s reply).
+    /// A rendered region/window's tmux markup (`DaemonRequest::RenderV2`'s
+    /// reply).
     Markup(String),
     /// Reply to `DaemonRequest::Ping`.
     Pong,
@@ -122,7 +149,8 @@ mod tests {
         for req in [
             DaemonRequest::Ping,
             DaemonRequest::Shutdown,
-            DaemonRequest::Render {
+            DaemonRequest::RenderV2 {
+                protocol: DAEMON_PROTOCOL,
                 region: RegionKind::Right,
                 args: RenderArgsWire::default(),
             },
@@ -157,6 +185,61 @@ mod tests {
         let bytes = [10u8, 0, 0, 0, b'{'];
         let r: io::Result<DaemonRequest> = read_frame(&mut &bytes[..]);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn an_old_daemon_cannot_decode_a_versioned_render_request() {
+        // This is the whole mechanism: a daemon predating RenderV2 sees an unknown
+        // enum variant, fails to deserialize, drops the connection, and the client
+        // falls back in-process. Fail-closed by construction.
+        //
+        // `allow(dead_code)`: this type exists only to shape what an old daemon
+        // would try to deserialize into; its fields are never read because the
+        // assertion below only cares that decoding fails.
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        enum OldRequest {
+            Render {
+                region: RegionKind,
+                args: RenderArgsWire,
+            },
+            Ping,
+            Shutdown,
+        }
+        let new = DaemonRequest::RenderV2 {
+            protocol: DAEMON_PROTOCOL,
+            region: RegionKind::Right,
+            args: RenderArgsWire::default(),
+        };
+        let bytes = serde_json::to_vec(&new).unwrap();
+        assert!(serde_json::from_slice::<OldRequest>(&bytes).is_err());
+    }
+
+    #[test]
+    fn ping_and_shutdown_stay_wire_compatible_across_the_bump() {
+        // daemon status/stop must keep working against a skewed daemon —
+        // otherwise the user cannot stop the stale daemon that caused the problem.
+        #[derive(serde::Deserialize, PartialEq, Debug)]
+        enum OldRequest {
+            Render {
+                region: RegionKind,
+                args: RenderArgsWire,
+            },
+            Ping,
+            Shutdown,
+        }
+        // Compare the decoded variant, not just `is_ok()`: these are unit
+        // variants, so an `is_ok()` assertion would still pass if the two
+        // swapped meanings while keeping their names — which would silently
+        // turn a `daemon status` into a `daemon stop` across a version skew.
+        for (req, expected) in [
+            (DaemonRequest::Ping, OldRequest::Ping),
+            (DaemonRequest::Shutdown, OldRequest::Shutdown),
+        ] {
+            let bytes = serde_json::to_vec(&req).unwrap();
+            let decoded: OldRequest = serde_json::from_slice(&bytes).expect("old daemon decodes");
+            assert_eq!(decoded, expected);
+        }
     }
 
     #[test]

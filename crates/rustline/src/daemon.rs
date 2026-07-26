@@ -174,7 +174,27 @@ fn handle_request(
     req: DaemonRequest,
 ) -> (DaemonResponse, Disposition) {
     match req {
-        DaemonRequest::Render { region, args } => {
+        DaemonRequest::RenderV2 {
+            protocol,
+            region,
+            args,
+        } => {
+            // A client built against a different protocol must not be handed
+            // markup this daemon's semantics produced. Refusing sends it back
+            // to its in-process fallback, which is always correct (N2).
+            // Reusing `ShuttingDown` here (rather than a new variant) is
+            // deliberate and safe: `try_render_at` already maps every
+            // non-`Markup` response to `None`, so the client falls back
+            // correctly with no protocol-aware handling needed on its end.
+            if protocol != daemon_proto::DAEMON_PROTOCOL {
+                tracing::warn!(
+                    client_protocol = protocol,
+                    daemon_protocol = daemon_proto::DAEMON_PROTOCOL,
+                    "refusing a render request from a client with a different protocol; \
+                     restart the daemon to pick up the new binary"
+                );
+                return (DaemonResponse::ShuttingDown, Disposition::Continue);
+            }
             // A poisoned mutex (a prior render panicked mid-lock) must not kill
             // the daemon: recover the guard and carry on (never break the bar).
             let mut st = state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -486,7 +506,8 @@ mod tests {
         let (resp, disp) = handle_request(
             &state,
             &cfg,
-            DaemonRequest::Render {
+            DaemonRequest::RenderV2 {
+                protocol: daemon_proto::DAEMON_PROTOCOL,
                 region: RegionKind::Right,
                 args: RenderArgsWire::default(),
             },
@@ -537,6 +558,48 @@ mod tests {
         // The accept loop's `Shutdown` cleanup (minus `process::exit`).
         remove_socket(&sock);
         assert!(!sock.exists(), "Shutdown must remove the socket file");
+    }
+
+    #[test]
+    fn a_mismatched_protocol_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(&cfg, "").unwrap();
+        let state = Mutex::new(DaemonState::build(&cfg, dir.path().join("plugins")));
+
+        let (response, disposition) = handle_request(
+            &state,
+            &cfg,
+            DaemonRequest::RenderV2 {
+                protocol: daemon_proto::DAEMON_PROTOCOL + 1,
+                region: RegionKind::Right,
+                args: RenderArgsWire::default(),
+            },
+        );
+        assert!(
+            !matches!(response, DaemonResponse::Markup(_)),
+            "a newer client must not receive markup from this daemon"
+        );
+        assert!(matches!(disposition, Disposition::Continue));
+    }
+
+    #[test]
+    fn a_matching_protocol_renders() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(&cfg, "").unwrap();
+        let state = Mutex::new(DaemonState::build(&cfg, dir.path().join("plugins")));
+
+        let (response, _) = handle_request(
+            &state,
+            &cfg,
+            DaemonRequest::RenderV2 {
+                protocol: daemon_proto::DAEMON_PROTOCOL,
+                region: RegionKind::Right,
+                args: RenderArgsWire::default(),
+            },
+        );
+        assert!(matches!(response, DaemonResponse::Markup(_)));
     }
 
     #[test]

@@ -47,6 +47,7 @@ pub fn read_cpu() -> Option<CpuUsage> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
+        tracing::debug!(reader = "cpu", "unsupported platform");
         None
     }
 }
@@ -90,7 +91,13 @@ fn read_cpu_linux() -> Option<CpuUsage> {
 /// `state_root()` default.
 #[cfg(target_os = "linux")]
 fn read_cpu_linux_in(state_dir: &Path) -> Option<CpuUsage> {
-    let cur_times = parse_proc_stat(&std::fs::read_to_string("/proc/stat").ok()?)?;
+    let text = std::fs::read_to_string("/proc/stat")
+        .inspect_err(|error| tracing::debug!(reader = "cpu", %error, "failed to read /proc/stat"))
+        .ok()?;
+    let Some(cur_times) = parse_proc_stat(&text) else {
+        tracing::debug!(reader = "cpu", "failed to parse /proc/stat aggregate line");
+        return None;
+    };
     let current = CpuSnapshot {
         idle: cur_times.idle,
         total: cur_times.total,
@@ -105,7 +112,18 @@ fn read_cpu_linux_in(state_dir: &Path) -> Option<CpuUsage> {
         Some(p) => p,
         None => {
             std::thread::sleep(CPU_SAMPLE_WINDOW);
-            let second = parse_proc_stat(&std::fs::read_to_string("/proc/stat").ok()?)?;
+            let text = std::fs::read_to_string("/proc/stat")
+                .inspect_err(|error| {
+                    tracing::debug!(reader = "cpu", %error, "failed to read /proc/stat (second sample)")
+                })
+                .ok()?;
+            let Some(second) = parse_proc_stat(&text) else {
+                tracing::debug!(
+                    reader = "cpu",
+                    "failed to parse /proc/stat aggregate line (second sample)"
+                );
+                return None;
+            };
             busy_percent(cur_times, second)
         }
     };
@@ -223,7 +241,10 @@ fn read_cpu_macos() -> Option<CpuUsage> {
 /// stalled the whole refresh burst and dropped queued clients with EPIPE.
 #[cfg(target_os = "macos")]
 fn read_cpu_macos_in(state_dir: &Path) -> Option<CpuUsage> {
-    let cur_times = read_mach_cpu_ticks()?;
+    let Some(cur_times) = read_mach_cpu_ticks() else {
+        tracing::debug!(reader = "cpu", "host_statistics(HOST_CPU_LOAD_INFO) failed");
+        return None;
+    };
     let current = CpuSnapshot {
         idle: cur_times.idle,
         total: cur_times.total,
@@ -238,7 +259,13 @@ fn read_cpu_macos_in(state_dir: &Path) -> Option<CpuUsage> {
         Some(p) => p,
         None => {
             std::thread::sleep(CPU_SAMPLE_WINDOW);
-            let second = read_mach_cpu_ticks()?;
+            let Some(second) = read_mach_cpu_ticks() else {
+                tracing::debug!(
+                    reader = "cpu",
+                    "host_statistics(HOST_CPU_LOAD_INFO) failed (second sample)"
+                );
+                return None;
+            };
             busy_percent(cur_times, second)
         }
     };
