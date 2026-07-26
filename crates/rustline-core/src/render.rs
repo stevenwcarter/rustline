@@ -132,15 +132,29 @@ fn write_hard(out: &mut String, theme: &Theme, dir: Direction, left: &Color, rig
 
 /// Make a widget's text safe to interpolate into tmux markup.
 ///
-/// tmux parses `#[...]` directives inside the output of a `#()` job — that is
-/// how this renderer colours the bar — so a `#` in *content* is live markup.
-/// Content reaching here is frequently external and untrusted: a tmux window
-/// name, a git branch from a cloned repo, an MPRIS now-playing title, a
-/// directory name, or a WASM guest's `Segment.text`. Doubling `#` is tmux's
-/// documented escape for a literal `#`, so the text is drawn rather than
-/// obeyed. Without this, a zero-capability plugin can emit
-/// `#[norange]#[range=user|cpu]` and forge another widget's clickable range,
-/// which `rustline click` then dispatches as that widget's binding.
+/// Two distinct hazards, one pass:
+///
+/// 1. **`#` is live markup.** tmux parses `#[...]` directives inside the
+///    output of a `#()` job — that is how this renderer colours the bar — so a
+///    `#` in *content* is a directive. Content reaching here is frequently
+///    external and untrusted: a tmux window name, a git branch from a cloned
+///    repo, an MPRIS now-playing title, a directory name, or a WASM guest's
+///    `Segment.text`. Doubling `#` is tmux's documented escape for a literal
+///    `#`. Without it a zero-capability plugin can emit
+///    `#[norange]#[range=user|cpu]` and forge another widget's clickable
+///    range, which `rustline click` then dispatches as that widget's binding.
+///
+/// 2. **A control character truncates or misaligns the region.** tmux inserts
+///    only the LAST line of a `#()` job's output, and this renderer prints one
+///    unterminated line per region — so a `\n` in content silently deletes
+///    every widget to its left along with the opening style directive and the
+///    leading edge glyph. A `\t` jumps to the next tab stop and misaligns
+///    every pill after it (window names legitimately carry tabs — see
+///    `parse_list_windows`, which preserves them on purpose).
+///
+/// Sanitizing at the render boundary rather than in each reader is deliberate:
+/// it is the only place that also covers plugin-supplied `Segment.text`, which
+/// no reader touches.
 ///
 /// Only segment TEXT goes through this. The separator, edge, style and
 /// `range=user|` bytes are produced by the renderer itself, not by content,
@@ -148,10 +162,19 @@ fn write_hard(out: &mut String, theme: &Theme, dir: Direction, left: &Color, rig
 ///
 /// Borrows when there is nothing to change, so the common path allocates nothing.
 fn sanitize_text(s: &str) -> std::borrow::Cow<'_, str> {
-    if !s.contains('#') {
+    let needs_work = s.chars().any(|c| c == '#' || c.is_control());
+    if !needs_work {
         return std::borrow::Cow::Borrowed(s);
     }
-    std::borrow::Cow::Owned(s.replace('#', "##"))
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '#' => out.push_str("##"),
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// Render `segments` into tmux status-line markup for the given `dir`.
@@ -632,6 +655,46 @@ mod tests {
         let theme = Theme::default();
         let out = render_window_pill("#[bg=red]win", true, &theme);
         assert!(out.contains("##[bg=red]win"), "got: {out}");
+    }
+
+    #[test]
+    fn newline_in_segment_text_cannot_truncate_the_region() {
+        let theme = Theme::default();
+        let segs = vec![Segment::new("a"), Segment::new("x\n#[bg=red]y")];
+        let out = render_region(Direction::Right, &segs, &theme);
+        assert!(!out.contains('\n'), "region must stay single-line: {out:?}");
+        // The first segment survives — tmux would otherwise drop everything left
+        // of the newline, including the opening directive and the edge glyph.
+        assert!(out.contains(" a "), "got: {out}");
+    }
+
+    #[test]
+    fn tab_and_carriage_return_are_replaced() {
+        let theme = Theme::default();
+        let segs = vec![Segment::new("a\tb\rc")];
+        let out = render_region(Direction::Right, &segs, &theme);
+        assert!(!out.contains('\t'), "got: {out:?}");
+        assert!(!out.contains('\r'), "got: {out:?}");
+        assert!(out.contains("a b c"), "got: {out}");
+    }
+
+    #[test]
+    fn window_pill_text_controls_are_replaced() {
+        let theme = Theme::default();
+        let out = render_window_pill("a\nb", false, &theme);
+        assert!(!out.contains('\n'), "got: {out:?}");
+        assert!(out.contains("a b"), "got: {out}");
+    }
+
+    #[test]
+    fn ordinary_text_is_untouched_and_still_borrows() {
+        // The common path must not allocate or alter anything.
+        let s = "cpu 42%";
+        assert!(matches!(sanitize_text(s), std::borrow::Cow::Borrowed(_)));
+        assert_eq!(sanitize_text(s), "cpu 42%");
+        // Multi-byte glyphs the bar is full of must pass through unchanged.
+        let glyphs = "\u{e0b0}\u{f011b} ~/src";
+        assert_eq!(sanitize_text(glyphs), glyphs);
     }
 
     /// The inner content of every REAL (non-escaped) `#[...]` directive in
