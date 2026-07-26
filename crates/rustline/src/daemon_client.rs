@@ -60,7 +60,15 @@ pub(crate) fn try_render_at(
     let mut stream = UnixStream::connect(sock).ok()?;
     stream.set_read_timeout(Some(SOCKET_TIMEOUT)).ok()?;
     stream.set_write_timeout(Some(SOCKET_TIMEOUT)).ok()?;
-    daemon_proto::write_frame(&mut stream, &DaemonRequest::Render { region, args }).ok()?;
+    daemon_proto::write_frame(
+        &mut stream,
+        &DaemonRequest::RenderV2 {
+            protocol: daemon_proto::DAEMON_PROTOCOL,
+            region,
+            args,
+        },
+    )
+    .ok()?;
     let response: DaemonResponse = daemon_proto::read_frame(&mut stream).ok()?;
     match response {
         DaemonResponse::Markup(markup) => Some(markup),
