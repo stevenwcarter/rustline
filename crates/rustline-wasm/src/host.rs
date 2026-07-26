@@ -3,7 +3,7 @@
 //! degrades to empty segments on any error.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LockResult, Mutex, MutexGuard};
 use std::time::Duration;
 
 use extism::{Manifest, PTR, PluginBuilder, UserData, Wasm, host_fn};
@@ -238,18 +238,8 @@ impl Widget for WasmWidget {
         // partially-updated Rust struct behind, and genuinely broken guest
         // state surfaces as the next `call` returning `Err`, which the arm
         // below already degrades to empty segments (N2).
-        let mut plugin = match self.plugin.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                if !self.poison_reported.swap(true, Ordering::Relaxed) {
-                    tracing::warn!(
-                        plugin = %self.name,
-                        "plugin mutex was poisoned by an earlier panic; recovering"
-                    );
-                }
-                poisoned.into_inner()
-            }
-        };
+        let (mut plugin, _) =
+            recover_poisoned(self.plugin.lock(), &self.poison_reported, &self.name);
         match plugin.call::<&str, &str>("render", &payload) {
             Ok(out) => decode_render_output(&self.name, out).0,
             Err(error) => {
@@ -297,12 +287,49 @@ fn decode_render_output(name: &str, out: &str) -> (Vec<Segment>, Option<serde_js
     }
 }
 
+/// Resolve a possibly-poisoned plugin lock: hand back the guard either way, and
+/// warn at most once per widget. Returns the guard plus whether this call was
+/// the one that emitted the warning.
+///
+/// Split out of [`WasmWidget::render`] for the same reason as
+/// [`decode_render_output`]: so a hermetic unit test can drive a genuinely
+/// poisoned mutex through the real decision instead of re-modelling it. It is
+/// generic over the guarded type only so a test can use a plain `Mutex<i32>` —
+/// the latch and recovery it exercises are this same code, just instantiated at
+/// a different `T`.
+///
+/// The one-shot latch matters because a warm daemon renders this widget every
+/// tick; suppressing the *warning* must never suppress the *recovery*, which is
+/// why the guard is returned unconditionally.
+fn recover_poisoned<'a, T>(
+    locked: LockResult<MutexGuard<'a, T>>,
+    reported: &AtomicBool,
+    name: &str,
+) -> (MutexGuard<'a, T>, bool) {
+    match locked {
+        Ok(guard) => (guard, false),
+        Err(poisoned) => {
+            let first = !reported.swap(true, Ordering::Relaxed);
+            if first {
+                tracing::warn!(
+                    plugin = %name,
+                    "plugin mutex was poisoned by an earlier panic; recovering"
+                );
+            }
+            (poisoned.into_inner(), first)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rustline_abi::ABI_VERSION;
     use rustline_core::{Config, Context, Registry};
 
-    use super::{decode_args, decode_render_output, plugin_range_name};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use super::{decode_args, decode_render_output, plugin_range_name, recover_poisoned};
     use crate::abi::{RenderInput, parse_render_output};
 
     /// A minimal `Context` with `toggled` set to `{name}`, for pinning the
@@ -370,15 +397,10 @@ mod tests {
         assert!(err.is_none());
     }
 
-    #[test]
-    fn a_poisoned_lock_is_recovered_rather_than_disabling_the_plugin() {
-        use std::sync::{Arc, Mutex};
-
-        // Model the exact shape WasmWidget uses: poison the mutex, then confirm
-        // the recovery path still yields the guard. In the daemon the widget is
-        // warm for the process lifetime, so bailing out on Err(_) meant one
-        // panic killed that plugin permanently and silently.
-        let m: Arc<Mutex<u32>> = Arc::new(Mutex::new(7));
+    /// A genuinely poisoned `Mutex`, for driving `recover_poisoned`'s real
+    /// `Err` arm rather than a stand-in for it.
+    fn poisoned_mutex(value: u32) -> Arc<Mutex<u32>> {
+        let m = Arc::new(Mutex::new(value));
         let m2 = Arc::clone(&m);
         let _ = std::thread::spawn(move || {
             let _g = m2.lock().unwrap();
@@ -386,18 +408,55 @@ mod tests {
         })
         .join();
         assert!(m.lock().is_err(), "the mutex must actually be poisoned");
-
-        let guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(*guard, 7, "recovery must still hand back the value");
+        m
     }
 
     #[test]
-    fn poison_is_reported_only_once() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        // The daemon renders every tick; a poison warning must not repeat forever.
-        let flag = AtomicBool::new(false);
-        assert!(!flag.swap(true, Ordering::Relaxed), "first report happens");
-        assert!(flag.swap(true, Ordering::Relaxed), "second is suppressed");
+    fn a_poisoned_lock_is_recovered_rather_than_disabling_the_plugin() {
+        // In the daemon this widget is warm for the process lifetime, so
+        // bailing out on Err(_) meant one panic killed that plugin
+        // permanently and silently.
+        let m = poisoned_mutex(7);
+        let reported = AtomicBool::new(false);
+
+        let (guard, first) = recover_poisoned(m.lock(), &reported, "weather");
+        assert_eq!(*guard, 7, "recovery must still hand back the value");
+        assert!(first, "the first poisoned lock reports");
+    }
+
+    #[test]
+    fn poison_is_reported_once_but_recovered_every_time() {
+        // The latch must suppress the WARNING without ever suppressing the
+        // RECOVERY — a widget that logged once and then went silently empty
+        // forever would be the original bug wearing a hat.
+        let m = poisoned_mutex(7);
+        let reported = AtomicBool::new(false);
+
+        let (first_guard, first) = recover_poisoned(m.lock(), &reported, "weather");
+        assert!(first, "first report happens");
+        assert_eq!(*first_guard, 7);
+        drop(first_guard);
+
+        for _ in 0..3 {
+            let (guard, reported_again) = recover_poisoned(m.lock(), &reported, "weather");
+            assert!(!reported_again, "subsequent ticks stay quiet");
+            assert_eq!(*guard, 7, "but still recover the guard");
+        }
+    }
+
+    #[test]
+    fn a_healthy_lock_neither_reports_nor_arms_the_latch() {
+        let m: Arc<Mutex<u32>> = Arc::new(Mutex::new(7));
+        let reported = AtomicBool::new(false);
+
+        let (guard, first) = recover_poisoned(m.lock(), &reported, "weather");
+        assert_eq!(*guard, 7);
+        assert!(!first, "an unpoisoned lock reports nothing");
+        drop(guard);
+        assert!(
+            !reported.load(Ordering::Relaxed),
+            "and must leave the latch unarmed for a real poisoning later"
+        );
     }
 
     #[test]
