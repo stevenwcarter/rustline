@@ -20,10 +20,19 @@ pub fn read_windows(session: Option<&str>) -> Vec<WindowCtx> {
         "-F",
         "#{window_index}\t#{window_active}\t#{window_flags}\t#{window_name}",
     ]);
-    let Ok(out) = cmd.output() else {
-        return Vec::new();
+    let out = match cmd.output() {
+        Ok(o) => o,
+        Err(error) => {
+            tracing::debug!(reader = "windows", %error, "tmux list-windows spawn failed");
+            return Vec::new();
+        }
     };
     if !out.status.success() {
+        tracing::debug!(
+            reader = "windows",
+            code = out.status.code(),
+            "tmux list-windows exited non-zero"
+        );
         return Vec::new();
     }
     parse_list_windows(&String::from_utf8_lossy(&out.stdout))

@@ -21,6 +21,7 @@ pub fn read_memory() -> Option<MemInfo> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
+        tracing::debug!(reader = "memory", "unsupported platform");
         None
     }
 }
@@ -51,8 +52,19 @@ pub fn read_memory_history(state_dir: &Path, current_percent: f32, spark_width: 
 
 #[cfg(target_os = "linux")]
 fn read_memory_linux() -> Option<MemInfo> {
-    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-    parse_meminfo(&text)
+    let text = std::fs::read_to_string("/proc/meminfo")
+        .inspect_err(
+            |error| tracing::debug!(reader = "memory", %error, "failed to read /proc/meminfo"),
+        )
+        .ok()?;
+    let info = parse_meminfo(&text);
+    if info.is_none() {
+        tracing::debug!(
+            reader = "memory",
+            "failed to parse /proc/meminfo (missing MemTotal/MemAvailable?)"
+        );
+    }
+    info
 }
 
 #[cfg(target_os = "macos")]
@@ -60,11 +72,27 @@ fn read_memory_macos() -> Option<MemInfo> {
     let memsize = std::process::Command::new("sysctl")
         .args(["-n", "hw.memsize"])
         .output()
+        .inspect_err(|error| tracing::debug!(reader = "memory", %error, "sysctl spawn failed"))
         .ok()?;
-    let vm = std::process::Command::new("vm_stat").output().ok()?;
-    let memsize = String::from_utf8(memsize.stdout).ok()?;
-    let vm = String::from_utf8(vm.stdout).ok()?;
-    parse_macos_memory(&memsize, &vm)
+    let vm = std::process::Command::new("vm_stat")
+        .output()
+        .inspect_err(|error| tracing::debug!(reader = "memory", %error, "vm_stat spawn failed"))
+        .ok()?;
+    let memsize = String::from_utf8(memsize.stdout)
+        .inspect_err(
+            |error| tracing::debug!(reader = "memory", %error, "sysctl output was not utf-8"),
+        )
+        .ok()?;
+    let vm = String::from_utf8(vm.stdout)
+        .inspect_err(
+            |error| tracing::debug!(reader = "memory", %error, "vm_stat output was not utf-8"),
+        )
+        .ok()?;
+    let info = parse_macos_memory(&memsize, &vm);
+    if info.is_none() {
+        tracing::debug!(reader = "memory", "failed to parse sysctl/vm_stat output");
+    }
+    info
 }
 
 /// Parse `/proc/meminfo`. Needs `MemTotal` + `MemAvailable` (both kB);

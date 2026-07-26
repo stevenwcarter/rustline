@@ -20,7 +20,13 @@ use rustline_core::DiskInfo;
 /// active layout (see `build_context.rs`).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn read_disk(mount: &str) -> Option<DiskInfo> {
-    let path = CString::new(mount).ok()?;
+    let path = match CString::new(mount) {
+        Ok(p) => p,
+        Err(error) => {
+            tracing::debug!(reader = "disk", %error, mount, "mount path contains a nul byte");
+            return None;
+        }
+    };
     let mut stat = MaybeUninit::<libc::statvfs>::zeroed();
     // SAFETY: `path` is a valid, nul-terminated C string and `stat` is a
     // properly aligned, zero-initialized buffer sized for `libc::statvfs`;
@@ -28,6 +34,8 @@ pub fn read_disk(mount: &str) -> Option<DiskInfo> {
     // (return nonzero) on failure, which we check before reading it.
     let rc = unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) };
     if rc != 0 {
+        let error = std::io::Error::last_os_error();
+        tracing::debug!(reader = "disk", %error, mount, "statvfs failed");
         return None;
     }
     // SAFETY: `rc == 0` means `statvfs` filled in every field.
@@ -51,7 +59,8 @@ pub fn read_disk(mount: &str) -> Option<DiskInfo> {
 /// as `read_battery`/`read_cpu`/`read_memory` on an unsupported platform,
 /// never a fabricated `0` reading (invariant #6).
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn read_disk(_mount: &str) -> Option<DiskInfo> {
+pub fn read_disk(mount: &str) -> Option<DiskInfo> {
+    tracing::debug!(reader = "disk", mount, "unsupported platform");
     None
 }
 

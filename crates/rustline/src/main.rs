@@ -330,6 +330,7 @@ fn main() {
                 log_file: &logging::log_path(&cfg.log),
                 tmux_conf: &tmux_conf_path(),
                 plugins: &cfg.plugins,
+                cfg: &cfg,
             };
             std::process::exit(doctor::run(&paths));
         }

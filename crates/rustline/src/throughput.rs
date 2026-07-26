@@ -68,8 +68,19 @@ fn fnv1a(s: &str) -> u32 {
 /// active layout (see `build_context.rs`).
 #[cfg(target_os = "linux")]
 pub fn read_throughput(state_dir: &Path, interface: Option<&str>) -> Option<Throughput> {
-    let text = std::fs::read_to_string("/proc/net/dev").ok()?;
-    let (rx, tx) = aggregate(&parse_proc_net_dev(&text), interface)?;
+    let text = std::fs::read_to_string("/proc/net/dev")
+        .inspect_err(
+            |error| tracing::debug!(reader = "throughput", %error, "failed to read /proc/net/dev"),
+        )
+        .ok()?;
+    let Some((rx, tx)) = aggregate(&parse_proc_net_dev(&text), interface) else {
+        tracing::debug!(
+            reader = "throughput",
+            interface,
+            "no matching non-loopback interface counters found"
+        );
+        return None;
+    };
     let now = crate::sample_store::now_unix_secs();
 
     let name = sample_name(interface);
@@ -80,7 +91,13 @@ pub fn read_throughput(state_dir: &Path, interface: Option<&str>) -> Option<Thro
     // sample to diff against, mirroring `cpu.rs`'s `store_snapshot`.
     crate::sample_store::write_sample(state_dir, &name, &serialize_sample(rx, tx, now));
 
-    let (prev_rx, prev_tx, prev_ts) = prev?;
+    // A rate is a delta: on the first invocation there is nothing yet to diff
+    // against. That's an expected, not a broken, condition (see the module
+    // doc), so it's logged distinctly from a real read failure.
+    let Some((prev_rx, prev_tx, prev_ts)) = prev else {
+        tracing::debug!(reader = "throughput", interface, "no prior sample yet");
+        return None;
+    };
     let dt_secs = now as i64 - prev_ts as i64;
     Some(throughput_rate(
         (prev_rx, prev_tx),
@@ -90,7 +107,8 @@ pub fn read_throughput(state_dir: &Path, interface: Option<&str>) -> Option<Thro
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn read_throughput(_state_dir: &Path, _interface: Option<&str>) -> Option<Throughput> {
+pub fn read_throughput(_state_dir: &Path, interface: Option<&str>) -> Option<Throughput> {
+    tracing::debug!(reader = "throughput", interface, "unsupported platform");
     None
 }
 

@@ -17,7 +17,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use rustline_core::PluginConfig;
+use rustline_core::{Config, PluginConfig};
 
 use crate::plugin_checksum::{PluginChecksumStatus, status_for};
 use crate::{daemon, daemon_client};
@@ -70,6 +70,10 @@ pub(crate) struct DoctorPaths<'a> {
     /// [`check_plugin_checksums`]) can report on every plugin the user has
     /// configured, not just ones that happen to be discovered on disk.
     pub plugins: &'a HashMap<String, PluginConfig>,
+    /// The whole effective config, so [`check_readers`] can resolve which
+    /// reader kinds the active layout actually uses (including
+    /// `[instances.*]`) rather than guessing from widget names.
+    pub cfg: &'a Config,
 }
 
 /// Parse `tmux -V` output (e.g. `"tmux 3.4\n"`, `"tmux 3.1a"`,
@@ -402,6 +406,82 @@ fn check_plugin_checksums(plugins: &HashMap<String, PluginConfig>, plugin_dir: &
     }
 }
 
+/// Probe every reader whose widget kind is actually in the layout and report
+/// which ones currently yield nothing. This is the only diagnostic channel for
+/// a reader failure: each one degrades to `down_format` (default `""`), so a
+/// missing `git`/`playerctl` binary, an unmountable `[widgets.disk].mount`, or
+/// a tmux that won't list windows all look identical to "widget not
+/// configured" in the rendered bar. Run with `-vvv` to see each failed
+/// reader's concrete cause via its `debug!` log line.
+///
+/// **Never `Fail`.** `doctor`'s exit code is reserved for setup that is
+/// outright broken, and a `None` reading is frequently legitimate — no
+/// battery, not inside a repository, no media player running. Same rule
+/// [`check_plugin_checksums`] follows.
+fn check_readers(cfg: &Config, layout: &[String]) -> Check {
+    const NAME: &str = "widget readers";
+    let kinds = cfg.layout_kinds(layout);
+
+    // (kind, is-currently-readable). Only probe what the layout actually uses,
+    // so `doctor` never pays for a reader the user doesn't have configured.
+    let mut probed: Vec<(&str, bool)> = Vec::new();
+    if kinds.contains("git") {
+        probed.push(("git", crate::git::read_git(".").is_some()));
+    }
+    if kinds.contains("media") {
+        probed.push(("media", crate::media::read_media().is_some()));
+    }
+    if kinds.contains("battery") {
+        probed.push(("battery", crate::battery::read_battery().is_some()));
+    }
+    if kinds.contains("uptime") {
+        probed.push(("uptime", crate::uptime::read_uptime().is_some()));
+    }
+    if kinds.contains("cpu") {
+        probed.push(("cpu", crate::cpu::read_cpu().is_some()));
+    }
+    if kinds.contains("memory") {
+        probed.push(("memory", crate::memory::read_memory().is_some()));
+    }
+    if kinds.contains("disk") {
+        for mount in cfg.disk_mounts(layout) {
+            probed.push(("disk", crate::disk::read_disk(&mount).is_some()));
+        }
+    }
+
+    if probed.is_empty() {
+        return Check {
+            name: NAME,
+            status: CheckStatus::Ok,
+            detail: "no readers in the active layout".to_string(),
+        };
+    }
+
+    let quiet: Vec<&str> = probed
+        .iter()
+        .filter(|(_, ok)| !ok)
+        .map(|(kind, _)| *kind)
+        .collect();
+    let ok_count = probed.len() - quiet.len();
+
+    if quiet.is_empty() {
+        Check {
+            name: NAME,
+            status: CheckStatus::Ok,
+            detail: format!("{ok_count} reading"),
+        }
+    } else {
+        Check {
+            name: NAME,
+            status: CheckStatus::Warn,
+            detail: format!(
+                "{ok_count} reading; nothing to report from: {} (run with -vvv for the cause)",
+                quiet.join(", ")
+            ),
+        }
+    }
+}
+
 /// Whether a resolved directory (config/themes/plugin/log) already exists.
 /// Absence is only a `Warn` — every one of these is created on first use
 /// (invariant: `Config::load` is total), so a fresh install legitimately has
@@ -442,6 +522,7 @@ pub(crate) fn run(paths: &DoctorPaths) -> i32 {
         check_daemon(),
         check_popup(tmux_version),
         check_plugin_checksums(paths.plugins, paths.plugin_dir),
+        check_readers(paths.cfg, &paths.cfg.layout.right),
         check_dir("config dir", config_dir),
         check_dir("themes dir", paths.themes_dir),
         check_dir("plugin dir", paths.plugin_dir),
@@ -611,5 +692,35 @@ mod tests {
         assert!(check.detail.contains("malformed"), "{}", check.detail);
         assert!(check.detail.contains("ghost"), "{}", check.detail);
         assert!(check.detail.contains("not found"), "{}", check.detail);
+    }
+
+    #[test]
+    fn reader_check_never_fails_the_run() {
+        // doctor's exit code is reserved for setup that is outright broken. A
+        // reader returning None is frequently legitimate (no battery, not in a
+        // repo, no player running), so this row must never produce Fail — the
+        // same rule check_plugin_checksums follows.
+        let cfg = Config::default();
+        for layout in [
+            vec![],
+            vec!["cpu".to_string(), "memory".to_string()],
+            vec![
+                "git".to_string(),
+                "media".to_string(),
+                "battery".to_string(),
+            ],
+        ] {
+            let check = check_readers(&cfg, &layout);
+            assert_ne!(check.status, CheckStatus::Fail, "layout {layout:?}");
+            assert_eq!(check.name, "widget readers");
+        }
+    }
+
+    #[test]
+    fn reader_check_reports_nothing_to_probe_for_an_empty_layout() {
+        let cfg = Config::default();
+        let check = check_readers(&cfg, &[]);
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.detail.contains("no readers"), "got: {}", check.detail);
     }
 }

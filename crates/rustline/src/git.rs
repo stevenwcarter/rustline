@@ -10,16 +10,30 @@ use rustline_core::GitInfo;
 /// reading (invariant #6). Called once at Context-build time, only when the
 /// `git` widget is in the active layout (see `build_context.rs`).
 pub fn read_git(path: &str) -> Option<GitInfo> {
-    let output = std::process::Command::new("git")
+    let output = match std::process::Command::new("git")
         .arg("-C")
         .arg(path)
         .args(["status", "--porcelain=v2", "--branch"])
         .output()
-        .ok()?;
+    {
+        Ok(o) => o,
+        Err(error) => {
+            tracing::debug!(reader = "git", %error, path, "git spawn failed");
+            return None;
+        }
+    };
     if !output.status.success() {
+        tracing::debug!(
+            reader = "git",
+            code = output.status.code(),
+            path,
+            "git exited non-zero (not a repository?)"
+        );
         return None;
     }
-    let stdout = String::from_utf8(output.stdout).ok()?;
+    let stdout = String::from_utf8(output.stdout)
+        .inspect_err(|error| tracing::debug!(reader = "git", %error, "git output was not utf-8"))
+        .ok()?;
     Some(parse_git_status(&stdout))
 }
 

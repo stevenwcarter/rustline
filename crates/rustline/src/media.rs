@@ -38,11 +38,22 @@ pub(crate) fn parse_playerctl(s: &str) -> Option<MediaInfo> {
 /// active layout (see `build_context.rs`).
 #[cfg(target_os = "linux")]
 pub fn read_media() -> Option<MediaInfo> {
-    let output = std::process::Command::new("playerctl")
+    let output = match std::process::Command::new("playerctl")
         .args(["metadata", "--format", "{{artist}}\t{{title}}\t{{status}}"])
         .output()
-        .ok()?;
+    {
+        Ok(o) => o,
+        Err(error) => {
+            tracing::debug!(reader = "media", %error, "playerctl spawn failed");
+            return None;
+        }
+    };
     if !output.status.success() {
+        tracing::debug!(
+            reader = "media",
+            code = output.status.code(),
+            "playerctl exited non-zero (no player running?)"
+        );
         return None;
     }
     parse_playerctl(&String::from_utf8_lossy(&output.stdout))
@@ -50,6 +61,7 @@ pub fn read_media() -> Option<MediaInfo> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn read_media() -> Option<MediaInfo> {
+    tracing::debug!(reader = "media", "unsupported platform");
     None
 }
 
