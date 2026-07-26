@@ -100,12 +100,29 @@ mod tests {
 
     #[test]
     fn push_truncate_clamps_an_absurd_width() {
-        let mut h: Vec<f32> = (0..10).map(|i| i as f32).collect();
+        // The ring must START longer than MAX_HISTORY_WIDTH or this asserts
+        // nothing: with a 10-entry ring, `11 <= 256` holds whether or not the
+        // clamp exists, because an unclamped `max_len = usize::MAX` also
+        // declines to drain. This is the half of B9 that bounds a FILE
+        // rewritten every render, so it has to bite on a ring that already
+        // grew — which is exactly how an oversized one reaches this code: it
+        // was persisted by an earlier build that had no clamp.
+        let mut h: Vec<f32> = (0..300).map(|i| i as f32).collect();
         push_truncate(&mut h, 99.0, usize::MAX);
-        assert!(
-            h.len() <= MAX_HISTORY_WIDTH,
-            "ring grew to {} entries",
-            h.len()
+        assert_eq!(
+            h.len(),
+            MAX_HISTORY_WIDTH,
+            "an absurd width must clamp to the cap, not preserve the ring"
+        );
+        assert_eq!(
+            h.last().copied(),
+            Some(99.0),
+            "and must keep the newest reading"
+        );
+        assert_eq!(
+            h.first().copied(),
+            Some(45.0),
+            "dropping oldest-first: 301 entries, keep the last 256"
         );
     }
 

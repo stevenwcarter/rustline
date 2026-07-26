@@ -184,6 +184,16 @@ pub fn render_windows(windows: &[WindowCtx], registry: &Registry, theme: &Theme)
             if pill.is_empty() {
                 String::new()
             } else {
+                // `wc.index` is interpolated unescaped, unlike segment text
+                // (which goes through `render.rs`'s `sanitize_text`). That is
+                // safe because the only production feed is `windows.rs`'s
+                // `parse_list_windows`, taking field 0 of tmux's own
+                // `#{window_index}` — always an integer; it is a `String` only
+                // because the whole tab-split is string-shaped. This is the
+                // one remaining site where text the renderer did not produce
+                // reaches markup, so a future front-end populating
+                // `WindowCtx.index` from anywhere else must uphold that or
+                // route through the sanitizer.
                 format!("#[range=window|{}]{}#[norange]", wc.index, pill)
             }
         })

@@ -157,8 +157,14 @@ fn write_hard(out: &mut String, theme: &Theme, dir: Direction, left: &Color, rig
 /// no reader touches.
 ///
 /// Only segment TEXT goes through this. The separator, edge, style and
-/// `range=user|` bytes are produced by the renderer itself, not by content,
-/// and are written unescaped.
+/// `range=user|` bytes are written unescaped, because the renderer produces
+/// them rather than content doing so. One caveat worth stating rather than
+/// implying: the separator and cap glyphs come from `Theme`, which can be
+/// populated from a themes-dir `*.toml` a third party wrote. That is
+/// config-level trust — the same trust a `run =` click binding already
+/// carries, and a user who installs a theme file has accepted it — but it is
+/// not literally renderer-produced, so the boundary is "not untrusted
+/// content", not "not external".
 ///
 /// Borrows when there is nothing to change, so the common path allocates nothing.
 fn sanitize_text(s: &str) -> std::borrow::Cow<'_, str> {

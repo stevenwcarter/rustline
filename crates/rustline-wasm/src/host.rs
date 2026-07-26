@@ -199,6 +199,12 @@ pub struct WasmWidget {
     /// widget every tick, so without it a single earlier panic would log once
     /// per refresh forever.
     poison_reported: Arc<AtomicBool>,
+    /// One-shot latch for the malformed-output warning, for the same reason.
+    /// A guest whose wire shape disagrees with this host returns malformed
+    /// output on *every* tick, not once — so an unlatched warn here would be
+    /// ~86k lines/day at the default 1 s interval, rotating away the very log
+    /// this warning exists to appear in.
+    decode_reported: Arc<AtomicBool>,
 }
 
 impl WasmWidget {
@@ -208,6 +214,7 @@ impl WasmWidget {
             options: Arc::new(options),
             name: Arc::from(name),
             poison_reported: Arc::new(AtomicBool::new(false)),
+            decode_reported: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -241,7 +248,7 @@ impl Widget for WasmWidget {
         let (mut plugin, _) =
             recover_poisoned(self.plugin.lock(), &self.poison_reported, &self.name);
         match plugin.call::<&str, &str>("render", &payload) {
-            Ok(out) => decode_render_output(&self.name, out).0,
+            Ok(out) => decode_render_output(&self.name, out, &self.decode_reported).0,
             Err(error) => {
                 tracing::warn!(%error, "plugin render failed, rendering empty");
                 Vec::new()
@@ -272,16 +279,29 @@ fn plugin_range_name(name: &str) -> Option<&str> {
 /// `plugin_range_name` is. `parse_render_output` stays as-is (it is `pub`, and
 /// its `unwrap_or_default` contract — malformed output never breaks the bar,
 /// invariant N2 — is unchanged); this only makes the failure *reportable*.
-fn decode_render_output(name: &str, out: &str) -> (Vec<Segment>, Option<serde_json::Error>) {
+///
+/// `reported` latches the warning for the same reason [`recover_poisoned`]
+/// does: this condition does not clear by itself. A guest whose wire shape
+/// disagrees with the host fails to decode on every tick, so warning each time
+/// would bury the log rather than inform it. The `Option<Error>` is still
+/// returned unconditionally, so suppressing the *warning* never suppresses the
+/// caller's ability to see that a decode failed.
+fn decode_render_output(
+    name: &str,
+    out: &str,
+    reported: &AtomicBool,
+) -> (Vec<Segment>, Option<serde_json::Error>) {
     match serde_json::from_str::<Vec<Segment>>(out) {
         Ok(segments) => (segments, None),
         Err(error) => {
-            tracing::warn!(
-                plugin = %name,
-                %error,
-                len = out.len(),
-                "malformed plugin render output, rendering empty"
-            );
+            if !reported.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    plugin = %name,
+                    %error,
+                    len = out.len(),
+                    "malformed plugin render output, rendering empty"
+                );
+            }
             (Vec::new(), Some(error))
         }
     }
@@ -379,7 +399,10 @@ mod tests {
 
     #[test]
     fn parse_render_output_still_degrades_to_empty() {
-        // The N2 guarantee is unchanged: malformed output never breaks the bar.
+        // `parse_render_output` is no longer on the render path — that is
+        // `decode_render_output` above, which has its own tests and holds the
+        // N2 guarantee for the bar. This pins the `pub` fn's own contract,
+        // since it stays part of the crate's API for external callers.
         assert!(parse_render_output("not json").is_empty());
         assert!(parse_render_output(r#"{"segments":[]}"#).is_empty());
         assert!(!parse_render_output(r#"[{"text":"hi","style":{}}]"#).is_empty());
@@ -388,13 +411,45 @@ mod tests {
     #[test]
     fn decode_render_output_reports_the_error_for_malformed_json() {
         // The distinguishing signal the log was missing: which plugin, and why.
-        let (segs, err) = decode_render_output("weather", r#"{"segments":[]}"#);
+        let reported = AtomicBool::new(false);
+        let (segs, err) = decode_render_output("weather", r#"{"segments":[]}"#, &reported);
         assert!(segs.is_empty());
         assert!(err.is_some(), "a decode failure must be reportable");
 
-        let (segs, err) = decode_render_output("weather", r#"[{"text":"hi","style":{}}]"#);
+        let (segs, err) =
+            decode_render_output("weather", r#"[{"text":"hi","style":{}}]"#, &reported);
         assert_eq!(segs.len(), 1);
         assert!(err.is_none());
+    }
+
+    #[test]
+    fn a_repeatedly_malformed_guest_is_reported_once_but_still_decodes_every_tick() {
+        // A guest whose wire shape disagrees with the host fails on EVERY
+        // tick, so the warn is latched — but, exactly as with
+        // `recover_poisoned`, suppressing the warning must never suppress the
+        // outcome: the caller still gets the error and the empty segments.
+        let reported = AtomicBool::new(false);
+        for _ in 0..3 {
+            let (segs, err) = decode_render_output("weather", r#"{"segments":[]}"#, &reported);
+            assert!(segs.is_empty(), "still degrades to empty (N2)");
+            assert!(err.is_some(), "and still reports the error to the caller");
+        }
+        assert!(
+            reported.load(Ordering::Relaxed),
+            "the latch is armed after the first failure"
+        );
+    }
+
+    #[test]
+    fn a_well_formed_guest_leaves_the_decode_latch_unarmed() {
+        // So a plugin that only later starts emitting garbage still gets its
+        // one warning.
+        let reported = AtomicBool::new(false);
+        let (segs, err) =
+            decode_render_output("weather", r#"[{"text":"hi","style":{}}]"#, &reported);
+        assert_eq!(segs.len(), 1);
+        assert!(err.is_none());
+        assert!(!reported.load(Ordering::Relaxed));
     }
 
     /// A genuinely poisoned `Mutex`, for driving `recover_poisoned`'s real

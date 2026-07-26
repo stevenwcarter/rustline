@@ -188,7 +188,12 @@ these shared types, not a design shortcut. Keep them serializable.
   (palette, glyphs, colors, incl. the six `win_*` pill fields and the four
   `success`/`info`/`warning`/`error` semantic colors) with `Default`, plus
   `Theme::colors() -> ThemeColors` (projects the fg/bar_bg/semantic fields for
-  `Context.colors`).
+  `Context.colors`). Also the private `sanitize_text` — the single
+  markup-escaping choke point (invariant #8): it doubles `#` and replaces C0
+  control characters, and is applied by all three of `render_region`,
+  `render_region_ranged` and `render_window_pill` to segment text and nothing
+  else. It borrows when there is nothing to change, so the common path
+  allocates nothing.
 - `themes.rs` — `builtin_theme(name) -> Option<Theme>` and
   `builtin_theme_names() -> &[&str]`, the seven built-in themes (`default`,
   `pastel-rainbow`, `nord`, `gruvbox`, `catppuccin-mocha`, `tokyo-night`,
@@ -254,7 +259,17 @@ these shared types, not a design shortcut. Keep them serializable.
   `bar.rs` is `pub(crate) fn gauge_bar(fraction: f64, width:
   usize) -> String`, a shared pure Unicode block-eighths gauge (full `█`
   cells, one sub-cell partial, `░` track) used by the `{bar}` placeholder in
-  both `cpu.rs` and `memory.rs`. `spark.rs` is `pub(crate) fn sparkline(samples:
+  both `cpu.rs` and `memory.rs`. It clamps `width` to `MAX_BAR_WIDTH` (256 — a
+  status line is never wider), and `history.rs`'s `push_truncate` clamps
+  `spark_width` to `MAX_HISTORY_WIDTH` the same way. Both are load-bearing for
+  invariant #3, not tidiness: `bar_width`/`spark_width` are unbounded `usize`
+  config, so a fat-fingered `bar_width = 1000000000` made every render allocate
+  gigabytes, and at `usize::MAX` the internal `width * 8` wrapped and the loop
+  effectively never terminated. `render_named_region`'s `catch_unwind` cannot
+  save either case — it catches a panic, not an allocation abort or a hang — so
+  the clamp has to live in the renderer, where it holds for every caller
+  regardless of how the value arrived. The `spark_width` clamp additionally
+  bounds a *file*, since the ring is persisted on every render. `spark.rs` is `pub(crate) fn sparkline(samples:
   &[f32], max: f32) -> String` (W45), a shared pure Unicode block-eighths
   sparkline (one glyph per historical reading, clamped `0..=1` of `max`) backing
   the `{spark}` placeholder in both `cpu.rs` and `memory.rs`; the history itself
@@ -859,11 +874,28 @@ failure path via `rl_log` (W7) rather than staying silent:
 - `git.rs` — `read_git(path) -> Option<GitInfo>`, a platform-agnostic (no
   `#[cfg(target_os)]`) shell-out read: runs `git -C <path> status
   --porcelain=v2 --branch`, `None` on ANY failure (`git` missing, non-repo,
-  non-zero exit). Delegates to the pure `parse_git_status(&str) -> GitInfo`
+  non-zero exit, **or the spawn exceeding its timeout**). Delegates to the pure
+  `parse_git_status(&str) -> GitInfo`
   (unconditionally unit-tested, no cfg-gating needed since there's no OS
   branching) — same pure-parser-behind-the-read-surface shape as
   `battery.rs`/`cpu.rs`/`memory.rs`, just keyed on tool availability rather
   than platform.
+  This spawn, and the siblings in `media.rs`/`windows.rs`, go through
+  `rustline_wasm::run::run_bounded` rather than a bare `Command::output()`:
+  `pane_current_path` comes straight from tmux, so with the pane sitting on an
+  unresponsive NFS/sshfs mount a blocking `git status` never returns, the
+  `#()` job never completes, and the region goes permanently blank — and under
+  the daemon it pins the shared render lock for the process's life, so every
+  other client times out and falls back in-process onto the same hang. This is
+  the protection the exec capability always had (`run.rs`'s `EXEC_TIMEOUT` +
+  process-group kill, documented there as guarding exactly that lock); the
+  built-in readers simply never got it. A timeout is treated like the existing
+  non-zero-exit arm. Caveat worth knowing: `run_bounded` also inherits that
+  capability's 64 KiB per-stream output cap, which was sized for plugin
+  commands — a repo with roughly 600+ changed *tracked* files can undercount
+  `{staged}`/`{unstaged}`. Porcelain v2 emits its headers first, so
+  `{branch}`/`{ahead}`/`{behind}` are unaffected, and `tmux list-windows` /
+  `playerctl` are nowhere near the cap.
 - `disk.rs` — `read_disk(mount) -> Option<DiskInfo>`, a `statvfs(2)` read.
   Unlike `battery`/`cpu`/`memory`, the syscall itself is POSIX and needs no
   `#[cfg(target_os)]` split at all (it's available unconditionally on Linux
@@ -1522,7 +1554,20 @@ config-file path for every subcommand that reads or writes it (default:
   checksum gate itself already degrades a bad plugin to "widget missing,"
   never to a broken bar (N2) — structurally, `run()`'s exit-code count only
   ever tallies `CheckStatus::Fail` entries, and this row is coded to never
-  produce one.
+  produce one. Finally, another advisory-only row, **"widget readers"**
+  (`check_readers`): for each reader kind actually present in the configured
+  layout (via `cfg.layout_kinds`, so both regions and `[instances.*]` count),
+  it calls that reader and reports `warn` naming any that yield `None`. This
+  is the diagnostic channel those readers otherwise lack — they each collapse
+  every failure into `None`, so a missing `git`/`playerctl` binary, a
+  configured `mount` that no longer exists, or a failing `tmux list-windows`
+  produced a widget that silently vanished with nothing in the log. `warn`,
+  never `fail`, like the rows above. Two deliberate exclusions: `throughput`
+  is omitted because it legitimately returns `None` on a first invocation (a
+  rate is a delta — invariant #6), which would warn on every fresh state dir;
+  and `read_git` is probed against `doctor`'s own CWD rather than a pane path,
+  so running `doctor` outside a repo reports git as unavailable even though
+  the widget works fine in a pane that is inside one.
 - `rustline completions <bash|zsh|fish>` — print a shell-completion script
   (via `clap_complete`) to stdout.
 - `rustline plugin list [--json]` — discovered/configured plugins with their
@@ -2447,6 +2492,34 @@ info|debug|trace` and is parsed leniently (a typo falls back to the default).
    the same `is_builtin_widget_name` precedence guard so a colliding
    instance's config can't hijack the built-in's projected color/click
    binding either (a W46 review-caught bug — see `config.rs` above).
+8. **Segment text is never interpolated into tmux markup unsanitized.** tmux
+   parses `#[...]` in the output of a `#()` job — that is exactly how this
+   renderer colours the bar — so a `#` in *content* is a live directive, and
+   content reaching the renderer is routinely external and untrusted: a tmux
+   window name, a git branch from a cloned repo, an MPRIS now-playing title, a
+   directory name, or a WASM guest's `Segment.text`. `render.rs`'s private
+   `sanitize_text` doubles `#` (tmux's documented literal-`#` escape) and
+   replaces C0 control characters, and it is applied at the **three and only
+   three** sites that write segment text: `render_region`,
+   `render_region_ranged`, and `render_window_pill`. Without it a
+   zero-capability plugin can emit `#[norange]#[range=user|cpu]`, forge another
+   widget's clickable range, and have `rustline click` dispatch that widget's
+   configured `run =` binding through `sh -c` — authority `CapabilityCtx` never
+   granted (N1) and a direct break of invariant #7's identity chain. A newline
+   is just as damaging without any injection intent: tmux inserts only the LAST
+   line of a `#()` job's output, so a `\n` in a path silently deletes every
+   widget to its left. Sanitizing at the render boundary rather than in each
+   reader is deliberate — it is the only place that also covers plugin-supplied
+   `Segment.text`, which no reader touches. `ansi.rs`'s scanner collapses `##`
+   back to a literal `#` so `--preview`, `theme show` and the `widget edit`
+   preview strip agree with what tmux actually draws. **Adding a fourth site
+   that writes non-renderer-produced text into markup means routing it through
+   `sanitize_text` too.** The one deliberate exemption is
+   `assemble.rs`'s `#[range=window|{index}]`, whose only production feed is
+   tmux's own integer `#{window_index}` (documented at that call site). Note
+   this is the *output* direction; invariant #4 covers the opposite one (tmux
+   format vars into rustline's argv), and `#{q:}` escapes for `/bin/sh`, not
+   for tmux markup, so the two are unrelated defences.
 
 **Platform-specific reads stay at the `Context`-build edge.** `read_battery()`
 (`crates/rustline/src/battery.rs`), `read_cpu()` (`crates/rustline/src/cpu.rs`),
@@ -2467,7 +2540,7 @@ branch on platform.
 **WASM plugin invariants (added by the plugin system — re-check when touching
 `rustline-wasm` or `plugins/*`):**
 
-8. **N1. Zero ambient authority.** A guest runs with `with_wasi(false)` and no
+9. **N1. Zero ambient authority.** A guest runs with `with_wasi(false)` and no
    Extism built-in HTTP/FS/process-spawn; every network/filesystem/exec
    effect goes through a host function that checks the plugin's
    `CapabilityCtx` first. Adding a new host capability means adding its gate
@@ -2485,16 +2558,16 @@ branch on platform.
    `FileDenialObserver` records the `(kind, target)` for `rustline plugin
    denials` (W28) — recording is best-effort and never changes the gate
    outcome.
-9. **N2. A plugin never breaks the bar.** Any instantiation error, render
+10. **N2. A plugin never breaks the bar.** Any instantiation error, render
    error, timeout, or malformed output degrades to empty segments
    (`WasmWidget::render`), bounded by fuel + wall-clock timeout + memory caps.
    This composes with, not replaces, the existing `catch_unwind` per-widget
    guard in `render_named_region`.
-10. **N3. State writes are dir-sandboxed and quota-bounded.** `rl_state_*` is
+11. **N3. State writes are dir-sandboxed and quota-bounded.** `rl_state_*` is
     confined to `<state_root>/<name>/` (`sanitize_relpath` rejects absolute
     paths and any `..` component) and refuses a write that would push the
     plugin's state dir over `max_state_bytes` (`check_cap`).
-11. **N4. Per-plugin capability scope.** Allowlists/state root/quota come from
+12. **N4. Per-plugin capability scope.** Allowlists/state root/quota come from
     that plugin instance's own `CapabilityCtx` (Extism `UserData`); one
     plugin can never use another's grants.
 
@@ -2547,11 +2620,25 @@ branch on platform.
   in this repo — run `cargo fmt --all` yourself before committing.
 - **CI** (`.github/workflows/ci.yml`, greenfield — the repo had no CI before
   this branch): runs on every pull request and on a push to `main`, cancelling
-  a superseded run on the same ref. Four independent jobs, each just a thin
+  a superseded run on the same ref. **Five** independent jobs. Four are a thin
   wrapper around an existing `just` recipe so the gate and the documented
   local command can't drift apart: `lint` → `just lint`, `test` → `just test`,
   `plugins` → `just lint-plugins` + `just test-plugins`, and `wasm-e2e` →
-  `just test-wasm`. The `test` job runs `just check-lock` ahead of `just test`:
+  `just test-wasm`. The fifth, **`macos-check`**, is the deliberate exception:
+  it runs `cargo check --workspace --all-targets` on `macos-latest` directly,
+  NOT through a `just` recipe, because there is no equivalent command a
+  developer on Linux could run — a recipe would be a local no-op pretending to
+  be a check. It exists because every other job is ubuntu-only, so nothing in
+  CI ever compiled the `#[cfg(target_os = "macos")]` arms of `battery.rs`,
+  `cpu.rs` (mach FFI), `memory.rs` (`sysctlbyname` FFI), `uptime.rs` or
+  `daemon_service.rs` (launchd); the only macOS build anywhere was
+  `release.yml`'s `aarch64-apple-darwin` leg on a `v*` tag push, so a compile
+  error in a Mac-gated arm first surfaced at tag time — the same
+  discovered-too-late shape `just check-lock` exists to prevent for
+  `Cargo.lock`. It is check-only on purpose: it catches the compile break that
+  would reach a release, and does NOT prove the FFI behaves correctly at
+  runtime, which still needs a real Mac.
+  The `test` job runs `just check-lock` ahead of `just test`:
   `release.yml` builds with `--locked` and nothing else did, so before this a
   stale `Cargo.lock` passed every PR check and first failed at tag-push time —
   the most expensive moment to discover it. Toolchain via
@@ -2949,9 +3036,10 @@ branch on platform.
     Strictly read-only: `search` never writes config or the toggle state.
   - **Greenfield CI and release workflows** — not previously tracked here as
     a roadmap item, since the repo had no CI at all before this branch.
-    `.github/workflows/ci.yml` runs `lint`/`test`/`plugins`/`wasm-e2e` as
-    four independent jobs on every PR and `main` push, each routed through an
-    existing `just` recipe (see the Development section above).
+    `.github/workflows/ci.yml` runs `lint`/`test`/`plugins`/`wasm-e2e` plus
+    `macos-check` as five independent jobs on every PR and `main` push; the
+    first four are each routed through an existing `just` recipe, and
+    `macos-check` deliberately is not (see the Development section above).
     `.github/workflows/release.yml` builds three native targets
     (`x86_64-unknown-linux-{gnu,musl}`, `aarch64-apple-darwin`) on a
     `v*` tag push and publishes a GitHub pre-release with a per-target
