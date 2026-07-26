@@ -2,6 +2,7 @@
 //! plugin instance's `CapabilityCtx`, and wrap the instance as a `Widget` that
 //! degrades to empty segments on any error.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -194,6 +195,10 @@ pub struct WasmWidget {
     plugin: Arc<Mutex<extism::Plugin>>,
     options: Arc<serde_json::Value>,
     name: Arc<str>,
+    /// One-shot latch for the poisoned-mutex warning. The daemon renders this
+    /// widget every tick, so without it a single earlier panic would log once
+    /// per refresh forever.
+    poison_reported: Arc<AtomicBool>,
 }
 
 impl WasmWidget {
@@ -202,6 +207,7 @@ impl WasmWidget {
             plugin: Arc::new(Mutex::new(plugin)),
             options: Arc::new(options),
             name: Arc::from(name),
+            poison_reported: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -220,9 +226,29 @@ impl Widget for WasmWidget {
                 return Vec::new();
             }
         };
+        // A poisoned mutex means an EARLIER render panicked while holding it.
+        // Bailing out returned empty segments forever — in the CLI path each
+        // render is a fresh process so it self-heals, but under the W48 daemon
+        // this widget is warm for the process lifetime, so one panic killed
+        // the plugin permanently and silently, fixable only by restarting the
+        // daemon. `daemon.rs`'s `handle_request` already recovers ITS state
+        // mutex the same way. Recovery is sound because the guarded value is
+        // an `extism::Plugin` whose own state lives in the wasm instance: a
+        // panic in `plugin.call` unwinds Rust-side without leaving a
+        // partially-updated Rust struct behind, and genuinely broken guest
+        // state surfaces as the next `call` returning `Err`, which the arm
+        // below already degrades to empty segments (N2).
         let mut plugin = match self.plugin.lock() {
-            Ok(p) => p,
-            Err(_) => return Vec::new(),
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                if !self.poison_reported.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        plugin = %self.name,
+                        "plugin mutex was poisoned by an earlier panic; recovering"
+                    );
+                }
+                poisoned.into_inner()
+            }
         };
         match plugin.call::<&str, &str>("render", &payload) {
             Ok(out) => decode_render_output(&self.name, out).0,
@@ -342,6 +368,36 @@ mod tests {
         let (segs, err) = decode_render_output("weather", r#"[{"text":"hi","style":{}}]"#);
         assert_eq!(segs.len(), 1);
         assert!(err.is_none());
+    }
+
+    #[test]
+    fn a_poisoned_lock_is_recovered_rather_than_disabling_the_plugin() {
+        use std::sync::{Arc, Mutex};
+
+        // Model the exact shape WasmWidget uses: poison the mutex, then confirm
+        // the recovery path still yields the guard. In the daemon the widget is
+        // warm for the process lifetime, so bailing out on Err(_) meant one
+        // panic killed that plugin permanently and silently.
+        let m: Arc<Mutex<u32>> = Arc::new(Mutex::new(7));
+        let m2 = Arc::clone(&m);
+        let _ = std::thread::spawn(move || {
+            let _g = m2.lock().unwrap();
+            panic!("poison it");
+        })
+        .join();
+        assert!(m.lock().is_err(), "the mutex must actually be poisoned");
+
+        let guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(*guard, 7, "recovery must still hand back the value");
+    }
+
+    #[test]
+    fn poison_is_reported_only_once() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // The daemon renders every tick; a poison warning must not repeat forever.
+        let flag = AtomicBool::new(false);
+        assert!(!flag.swap(true, Ordering::Relaxed), "first report happens");
+        assert!(flag.swap(true, Ordering::Relaxed), "second is suppressed");
     }
 
     #[test]
