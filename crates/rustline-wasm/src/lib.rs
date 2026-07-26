@@ -37,7 +37,7 @@ pub use paths::{
     data_root, default_plugin_dir, ensure_wasmtime_cache_config, expand_tilde, state_root,
     wasmtime_cache_config_path,
 };
-pub use run::{ProcessRunner, Runner};
+pub use run::{ProcessRunner, Runner, run_bounded};
 
 /// The outcome of comparing the host's [`ABI_VERSION`] against a guest's
 /// declared version (its optional `abi_version` export).

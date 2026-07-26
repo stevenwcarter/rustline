@@ -87,113 +87,134 @@ pub struct ProcessRunner;
 
 impl Runner for ProcessRunner {
     fn run(&self, program: &str, args: &[String]) -> Result<(i32, String, String), String> {
-        let mut cmd = Command::new(program);
-        cmd.args(args)
-            // A child that reads stdin gets EOF immediately instead of
-            // blocking until the timeout.
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // Put the child in its own process group (pgid == its own pid) so a
-        // descendant it backgrounds -- `sh -c "long_thing &"`, or any
-        // double-forking daemonizer -- stays reachable as a unit. Without
-        // this, `kill_group` below (killing just the immediate child's pid)
-        // would leave such a descendant running and holding the piped
-        // stdout/stderr open indefinitely.
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("failed to spawn {program}: {e}"))?;
-
-        // Drain both pipes on their own threads, started *before* the wait
-        // loop below runs at all: a child that fills a pipe buffer would
-        // otherwise block forever while we're stuck waiting for it to exit,
-        // since we'd never be reading the other end to relieve the pressure.
-        // Each thread reports its result over a channel rather than a
-        // `JoinHandle`, so the deadline below can bound *receiving* that
-        // result (`recv_timeout`) instead of having to join — and thus
-        // unboundedly block on — the thread itself.
-        let stdout_pipe = child.stdout.take();
-        let stderr_pipe = child.stderr.take();
-        let (out_tx, out_rx) = mpsc::channel();
-        let (err_tx, err_rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = out_tx.send(read_capped(stdout_pipe));
-        });
-        std::thread::spawn(move || {
-            let _ = err_tx.send(read_capped(stderr_pipe));
-        });
-
-        // One deadline bounds both waiting for the immediate child to exit
-        // AND the first pass at collecting its output, not just the wait
-        // loop. Without covering the second half too, a child that
-        // backgrounds a descendant sharing its piped stdout/stderr could
-        // exit promptly (the wait loop below returns normally, no timeout)
-        // while the descendant keeps the pipes open indefinitely, hanging
-        // the output-collection step unboundedly -- which is exactly the
-        // case `process_runner_does_not_hang_when_a_backgrounded_descendant_
-        // outlives_the_immediate_child` below guards against. That first
-        // pass alone isn't the whole story, though: see the `OUTPUT_GRACE`
-        // comment below for the descendant that also escapes the kill this
-        // deadline triggers.
-        let deadline = Instant::now() + EXEC_TIMEOUT;
-
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Ok(None) => {
-                    kill_and_reap(&mut child);
-                    return Err(format!(
-                        "{program} exceeded the {}s exec timeout",
-                        EXEC_TIMEOUT.as_secs()
-                    ));
-                }
-                Err(e) => {
-                    kill_and_reap(&mut child);
-                    return Err(format!("failed to wait on {program}: {e}"));
-                }
-            }
-        };
-
-        // The immediate child has exited (and, since `try_wait` returned
-        // `Some`, is already reaped -- no zombie). A backgrounded descendant
-        // may still be holding the piped fds open, though, so collect both
-        // streams bounded by the SAME deadline rather than joining
-        // unboundedly. If either hasn't arrived by then, kill the whole
-        // process group -- closing an ordinary (still-in-group) descendant's
-        // inherited fds too.
-        let out_first = out_rx.recv_timeout(remaining(deadline));
-        let err_first = err_rx.recv_timeout(remaining(deadline));
-        if out_first.is_err() || err_first.is_err() {
-            kill_group(&mut child);
-        }
-        // That kill doesn't guarantee either reader thread is about to
-        // report in, though: `kill_group` only reaches the child's own
-        // process group (see its doc), so a descendant that escaped it
-        // (`setsid`/`setpgid`, or a properly-daemonizing program) is left
-        // running with the piped fds still open. A plain `recv()` here would
-        // then block for as long as THAT process lives -- unbounded, and the
-        // one place this module's "the whole run is bounded" guarantee used
-        // to not actually hold. `OUTPUT_GRACE` caps the wait instead: a
-        // reachable reader reports in almost immediately after the kill, and
-        // an unreachable one's stream comes back empty rather than hanging
-        // this thread (and, transitively, e.g. the daemon's shared render
-        // lock) forever.
-        let stdout =
-            out_first.unwrap_or_else(|_| out_rx.recv_timeout(OUTPUT_GRACE).unwrap_or_default());
-        let stderr =
-            err_first.unwrap_or_else(|_| err_rx.recv_timeout(OUTPUT_GRACE).unwrap_or_default());
-
-        // `status.code()` is `None` when the process was killed by a signal;
-        // there's no exit code to report in that case, so map it to `-1`
-        // (this is the only path that ever has a real `ExitStatus` — the
-        // timeout/wait-failure paths above never reach here at all).
-        Ok((status.code().unwrap_or(-1), stdout, stderr))
+        run_bounded(program, args, EXEC_TIMEOUT)
     }
+}
+
+/// Spawn `program` with `args`, bounded by `timeout`, and return
+/// `(exit_code, stdout, stderr)`.
+///
+/// This is `ProcessRunner::run`'s body with the deadline parameterized, made
+/// public so the bin's own render-path readers (`git.rs`, `media.rs`,
+/// `windows.rs`) get the same hardening the exec capability already had:
+/// **no shell anywhere in the path**, stdin closed (`Stdio::null()`, so a
+/// child that reads stdin gets EOF instead of hanging), stdout/stderr piped
+/// and capped at [`MAX_OUTPUT_BYTES`] per stream, the child in its own process
+/// group so a backgrounded descendant can't hold the pipes open past the
+/// deadline, and at most two [`OUTPUT_GRACE`] periods spent collecting output
+/// afterward.
+///
+/// `Ok((code, ..))` whenever the process ran to completion — a non-zero exit
+/// is data, not an error, and killed-by-signal maps to `-1`. `Err(message)`
+/// only when the run could not happen at all: a spawn failure or the timeout.
+pub fn run_bounded(
+    program: &str,
+    args: &[String],
+    timeout: Duration,
+) -> Result<(i32, String, String), String> {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        // A child that reads stdin gets EOF immediately instead of
+        // blocking until the timeout.
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Put the child in its own process group (pgid == its own pid) so a
+    // descendant it backgrounds -- `sh -c "long_thing &"`, or any
+    // double-forking daemonizer -- stays reachable as a unit. Without
+    // this, `kill_group` below (killing just the immediate child's pid)
+    // would leave such a descendant running and holding the piped
+    // stdout/stderr open indefinitely.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn {program}: {e}"))?;
+
+    // Drain both pipes on their own threads, started *before* the wait
+    // loop below runs at all: a child that fills a pipe buffer would
+    // otherwise block forever while we're stuck waiting for it to exit,
+    // since we'd never be reading the other end to relieve the pressure.
+    // Each thread reports its result over a channel rather than a
+    // `JoinHandle`, so the deadline below can bound *receiving* that
+    // result (`recv_timeout`) instead of having to join — and thus
+    // unboundedly block on — the thread itself.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let (out_tx, out_rx) = mpsc::channel();
+    let (err_tx, err_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = out_tx.send(read_capped(stdout_pipe));
+    });
+    std::thread::spawn(move || {
+        let _ = err_tx.send(read_capped(stderr_pipe));
+    });
+
+    // One deadline bounds both waiting for the immediate child to exit
+    // AND the first pass at collecting its output, not just the wait
+    // loop. Without covering the second half too, a child that
+    // backgrounds a descendant sharing its piped stdout/stderr could
+    // exit promptly (the wait loop below returns normally, no timeout)
+    // while the descendant keeps the pipes open indefinitely, hanging
+    // the output-collection step unboundedly -- which is exactly the
+    // case `process_runner_does_not_hang_when_a_backgrounded_descendant_
+    // outlives_the_immediate_child` below guards against. That first
+    // pass alone isn't the whole story, though: see the `OUTPUT_GRACE`
+    // comment below for the descendant that also escapes the kill this
+    // deadline triggers.
+    let deadline = Instant::now() + timeout;
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                kill_and_reap(&mut child);
+                return Err(format!("{program} timed out after {timeout:?}"));
+            }
+            Err(e) => {
+                kill_and_reap(&mut child);
+                return Err(format!("failed to wait on {program}: {e}"));
+            }
+        }
+    };
+
+    // The immediate child has exited (and, since `try_wait` returned
+    // `Some`, is already reaped -- no zombie). A backgrounded descendant
+    // may still be holding the piped fds open, though, so collect both
+    // streams bounded by the SAME deadline rather than joining
+    // unboundedly. If either hasn't arrived by then, kill the whole
+    // process group -- closing an ordinary (still-in-group) descendant's
+    // inherited fds too.
+    let out_first = out_rx.recv_timeout(remaining(deadline));
+    let err_first = err_rx.recv_timeout(remaining(deadline));
+    if out_first.is_err() || err_first.is_err() {
+        kill_group(&mut child);
+    }
+    // That kill doesn't guarantee either reader thread is about to
+    // report in, though: `kill_group` only reaches the child's own
+    // process group (see its doc), so a descendant that escaped it
+    // (`setsid`/`setpgid`, or a properly-daemonizing program) is left
+    // running with the piped fds still open. A plain `recv()` here would
+    // then block for as long as THAT process lives -- unbounded, and the
+    // one place this module's "the whole run is bounded" guarantee used
+    // to not actually hold. `OUTPUT_GRACE` caps the wait instead: a
+    // reachable reader reports in almost immediately after the kill, and
+    // an unreachable one's stream comes back empty rather than hanging
+    // this thread (and, transitively, e.g. the daemon's shared render
+    // lock) forever.
+    let stdout =
+        out_first.unwrap_or_else(|_| out_rx.recv_timeout(OUTPUT_GRACE).unwrap_or_default());
+    let stderr =
+        err_first.unwrap_or_else(|_| err_rx.recv_timeout(OUTPUT_GRACE).unwrap_or_default());
+
+    // `status.code()` is `None` when the process was killed by a signal;
+    // there's no exit code to report in that case, so map it to `-1`
+    // (this is the only path that ever has a real `ExitStatus` — the
+    // timeout/wait-failure paths above never reach here at all).
+    Ok((status.code().unwrap_or(-1), stdout, stderr))
 }
 
 /// Time remaining until `deadline`, floored at zero so a `recv_timeout` call
@@ -391,5 +412,38 @@ mod tests {
             .expect("cat runs");
         assert!(stdout.is_empty());
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn run_bounded_times_out_instead_of_hanging() {
+        let start = std::time::Instant::now();
+        let result = run_bounded("sleep", &["30".to_string()], Duration::from_millis(300));
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "a command past its deadline must be Err");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "must not wait for the child: took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn run_bounded_returns_output_and_status_for_a_fast_command() {
+        let (code, stdout, _stderr) =
+            run_bounded("echo", &["hi".to_string()], Duration::from_secs(5)).expect("echo runs");
+        assert_eq!(code, 0);
+        assert_eq!(stdout.trim(), "hi");
+    }
+
+    #[test]
+    fn run_bounded_reports_a_nonzero_exit_as_data_not_an_error() {
+        // A non-zero exit means the process ran and reported that status; only a
+        // run that could not happen at all is Err. Same convention as Runner::run.
+        let (code, _, _) = run_bounded("false", &[], Duration::from_secs(5)).expect("false runs");
+        assert_ne!(code, 0);
+    }
+
+    #[test]
+    fn run_bounded_errors_when_the_program_is_missing() {
+        assert!(run_bounded("rustline-no-such-binary-xyz", &[], Duration::from_secs(5)).is_err());
     }
 }
