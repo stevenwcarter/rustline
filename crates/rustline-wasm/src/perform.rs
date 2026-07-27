@@ -787,6 +787,104 @@ mod tests {
         );
     }
 
+    /// A [`Fetcher`] fake that can be scripted to fail, unlike
+    /// [`CountingFetcher`] (which always succeeds) — the negative-cache
+    /// backoff tests below need to assert exactly how many times a *failing*
+    /// fetch was attempted.
+    struct ScriptedFetcher {
+        calls: AtomicUsize,
+        reply: Result<(u16, String), String>,
+    }
+
+    impl ScriptedFetcher {
+        fn ok(status: u16, body: &str) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                reply: Ok((status, body.to_string())),
+            }
+        }
+
+        fn err(message: &str) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                reply: Err(message.to_string()),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl crate::fetch::Fetcher for ScriptedFetcher {
+        fn get(&self, _url: &str) -> Result<(u16, String), String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.reply.clone()
+        }
+    }
+
+    #[test]
+    fn a_failing_refresh_is_not_retried_within_the_backoff_window() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&["https://x/*"], root.path().to_path_buf(), 1_000_000);
+        let url = "https://x/y";
+
+        // Seed a good entry at T0.
+        let ok = ScriptedFetcher::ok(200, "body");
+        let r = perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:00:00Z", &ok);
+        assert!(r.ok && !r.stale);
+        assert_eq!(ok.calls(), 1);
+
+        // T0+120s: TTL lapsed, upstream now down -> one attempt, stale served.
+        let down = ScriptedFetcher::err("connection refused");
+        let r = perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:02:00Z", &down);
+        assert!(r.ok && r.stale, "last-good entry is served");
+        assert_eq!(down.calls(), 1);
+
+        // T0+130s: still inside the backoff window -> NO new attempt.
+        let r = perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:02:10Z", &down);
+        assert!(r.ok && r.stale, "still served stale");
+        assert_eq!(down.calls(), 1, "no second fetch inside the backoff window");
+    }
+
+    #[test]
+    fn the_backoff_window_lapses_and_allows_another_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&["https://x/*"], root.path().to_path_buf(), 1_000_000);
+        let url = "https://x/y";
+        let ok = ScriptedFetcher::ok(200, "body");
+        perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:00:00Z", &ok);
+
+        let down = ScriptedFetcher::err("connection refused");
+        perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:02:00Z", &down);
+        assert_eq!(down.calls(), 1);
+        // one full TTL after the failed attempt
+        perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:03:01Z", &down);
+        assert_eq!(down.calls(), 2, "backoff lapsed, retry allowed");
+    }
+
+    #[test]
+    fn a_successful_refresh_clears_the_backoff() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&["https://x/*"], root.path().to_path_buf(), 1_000_000);
+        let url = "https://x/y";
+        let ok = ScriptedFetcher::ok(200, "one");
+        perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:00:00Z", &ok);
+        let ok2 = ScriptedFetcher::ok(200, "two");
+        let r = perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:02:00Z", &ok2);
+        assert_eq!(r.body, "two");
+        assert!(!r.stale);
+    }
+
+    #[test]
+    fn a_failing_refresh_with_no_prior_entry_still_reports_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&["https://x/*"], root.path().to_path_buf(), 1_000_000);
+        let down = ScriptedFetcher::err("connection refused");
+        let r = perform_http_get_cached(&ctx, "https://x/y", 60, "2026-07-26T12:00:00Z", &down);
+        assert!(!r.ok, "nothing to serve stale");
+    }
+
     /// Fixed instants for the exec-cache TTL tests below, mirroring the
     /// literal RFC3339 strings the HTTP-cache tests above use directly:
     /// `LATER` is two hours after `NOW`, comfortably past every TTL those

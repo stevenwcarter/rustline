@@ -142,4 +142,14 @@ mod tests {
         // a missing file reads as None
         assert!(read_entry(Path::new("/no/such/file.json")).is_none());
     }
+
+    #[test]
+    fn an_entry_without_last_attempt_at_still_deserializes() {
+        // Entries written by an older build must keep working (wire-type
+        // discipline: additive, defaulted fields only).
+        let old = r#"{"fetched_at":"2026-07-20T12:00:00-04:00","status":200,"body":"hi"}"#;
+        let e: CacheEntry = serde_json::from_str(old).unwrap();
+        assert_eq!(e.body, "hi");
+        assert!(e.last_attempt_at.is_empty());
+    }
 }
