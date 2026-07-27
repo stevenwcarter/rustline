@@ -170,7 +170,11 @@ fn namespace_dir(path: &Path) -> Option<&Path> {
 /// should feed back into its memo (`CapabilityCtx::set_state_size`). After an
 /// eviction the total is re-measured with one fresh `dir_size` walk rather
 /// than estimated, because eviction frees an amount the caller cannot
-/// predict — a re-walk is always correct (invariant N3).
+/// predict — a re-walk is always correct (invariant N3). The size of the
+/// file being replaced is also re-read after eviction, not reused from
+/// before it: eviction's first pick is the oldest entry, which is exactly
+/// the entry a refresh write is replacing, so eviction routinely deletes it
+/// out from under the pre-eviction reading.
 pub fn write_entry(
     state_dir: &Path,
     path: &Path,
@@ -179,9 +183,13 @@ pub fn write_entry(
     cap: u64,
 ) -> Result<u64, String> {
     let new_len = content.len() as u64;
-    // Read before any eviction: eviction may delete the very entry being
-    // replaced, so this has to be captured up front to keep the final
-    // accounting correct either way.
+    // Read before any eviction, purely to size the eviction target below:
+    // `base` there is still the pre-eviction memo, so it must pair with the
+    // pre-eviction size of the file it's about to replace. It must NOT be
+    // reused for the returned total — eviction's first pick is always the
+    // oldest entry, and the entry being refreshed here is by definition
+    // stale, so eviction routinely deletes this very file. The total is
+    // computed from a fresh read after eviction, below.
     let replaced = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let mut base = current_size;
     if let Err(first) = state::check_cap(base, path, new_len, cap) {
@@ -216,12 +224,18 @@ pub fn write_entry(
         base = state::dir_size(state_dir);
         state::check_cap(base, path, new_len, cap).map_err(|_| first)?;
     }
+    // Re-read now that any eviction has already happened: if it deleted
+    // `path` (the common case — see above), this reads 0 where the
+    // pre-eviction `replaced` above would still hold its stale, now-wrong
+    // size. When no eviction ran, nothing on disk has changed since the
+    // first read, so this matches it exactly.
+    let replaced = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     rustline_core::atomic_write::write_atomic(path, content.as_bytes())
         .map_err(|e| e.to_string())?;
-    Ok(base.saturating_sub(replaced).saturating_add(new_len))
+    Ok(state::projected_size(base, replaced, new_len))
 }
 
 #[cfg(test)]
@@ -324,6 +338,60 @@ mod tests {
             "reported total is truthful"
         );
         assert!(total <= cap);
+    }
+
+    /// Fix pass 1 (Critical 1): eviction's first pick is always the oldest
+    /// entry, and the entry a caller is refreshing is exactly the stale one —
+    /// so eviction routinely deletes the very file `write_entry` is about to
+    /// overwrite. The pre-eviction `replaced` read is correct for *sizing*
+    /// the eviction (it pairs with the pre-eviction `base`), but reusing it
+    /// for the *returned total* double-subtracts that entry's size once
+    /// eviction has already removed it from the post-eviction `base`. This
+    /// pins the case the sibling `write_entry_after_eviction_reports_a_re_measured_total`
+    /// test above cannot: that test writes to a brand-new path, so its
+    /// `replaced` is always 0 and the bug is invisible.
+    #[test]
+    fn write_entry_re_reads_replaced_after_eviction_deletes_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        // Ten entries with distinct, strictly increasing timestamps (same
+        // string length, so every serialized entry is the same size) —
+        // index 0 is unambiguously the oldest and therefore eviction's first
+        // pick.
+        let mut entry_len = 0u64;
+        for i in 0..10 {
+            let ts = format!("2026-07-20T12:{i:02}:00-04:00");
+            let content = entry_json(&ts, &"z".repeat(150));
+            entry_len = content.len() as u64;
+            let p = cache_path(dir.path(), HTTP_NAMESPACE, &format!("https://x/{i}"));
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, &content).unwrap();
+        }
+        // A cap tight enough that refreshing the oldest entry needs eviction.
+        let cap = entry_len * 6;
+        let before = crate::state::dir_size(dir.path());
+        assert!(
+            before > cap,
+            "namespace must start over cap to force eviction"
+        );
+
+        // Refresh https://x/0 — the oldest entry, and therefore the one
+        // eviction deletes first.
+        let target = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/0");
+        assert!(read_entry(&target).is_some(), "target must pre-exist");
+        let refreshed = entry_json("2026-07-27T09:00:00-04:00", "refreshed");
+        let total =
+            write_entry(dir.path(), &target, &refreshed, before, cap).expect("eviction makes room");
+
+        assert_eq!(
+            total,
+            crate::state::dir_size(dir.path()),
+            "the returned total must match the real directory size even when \
+             eviction deleted the entry being replaced"
+        );
+        assert!(
+            read_entry(&target).is_some(),
+            "the refreshed entry must have been written back"
+        );
     }
 
     #[test]

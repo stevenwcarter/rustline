@@ -12,7 +12,11 @@ use serde::{Deserialize, Serialize};
 use crate::allow::AllowSet;
 use crate::state;
 
-/// Sentinel for "not yet measured" in [`CapabilityCtx::state_size`].
+/// Sentinel for "not yet measured" in [`CapabilityCtx::state_size`]. This is
+/// an in-band value, not a separate `Option` tag, so `set_state_size(u64::MAX)`
+/// would silently be read back as "unseeded" rather than as a 16-exabyte
+/// state dir. Unreachable in practice — nothing on a real filesystem gets
+/// anywhere near `u64::MAX` bytes — so this isn't guarded further.
 const SIZE_UNSEEDED: u64 = u64::MAX;
 
 /// The kind of capability a denied request was for, carried to a
@@ -108,6 +112,26 @@ impl CapabilityCtx {
     /// memoized. `check_cap` stays pure and pays no walk of its own (see
     /// `state::check_cap`); this is the one place that pays it, and only on
     /// the first call.
+    ///
+    /// **The memo is this process's belief about the directory, not a fact
+    /// about it.** It only ever tracks writes made *through this ctx*; any
+    /// other mutation of the state dir is invisible to it until something
+    /// invalidates it:
+    /// - **Short-lived renders** (`rustline render left|right`): `render
+    ///   left`/`render right` are separate processes, each handed only its
+    ///   own region's plugin layout (`register_plugins` in `main.rs`), so
+    ///   same-plugin contention is limited to a plugin listed in both
+    ///   regions — and even then the stale window is one render, since the
+    ///   process (and its memo) doesn't outlive it.
+    /// - **Daemon**: every write is serialized through one long-lived ctx
+    ///   (`daemon.rs`'s state lives behind one mutex), so the memo tracks its
+    ///   own writes exactly; its entire exposure is *external* mutation of
+    ///   the state dir, and it never re-walks unless a write fails or is
+    ///   refused. That window can be the daemon's whole lifetime.
+    ///
+    /// Both directions are strictly looser than the pre-memo per-write walk
+    /// this replaced — that laxness is the accepted trade for not walking a
+    /// plugin's entire cache on every write (see `state::dir_size`'s doc).
     pub fn state_size(&self) -> u64 {
         let cached = self.state_size.load(Ordering::Relaxed);
         if cached != SIZE_UNSEEDED {

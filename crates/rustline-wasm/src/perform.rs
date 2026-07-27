@@ -448,9 +448,26 @@ pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -
     let dir = ctx.state_dir();
     let full = dir.join(rel);
     let new_len = contents.len() as u64;
-    if let Err(error) = check_cap(ctx.state_size(), &full, new_len, ctx.max_state_bytes) {
-        return WriteResult { ok: false, error };
+    if check_cap(ctx.state_size(), &full, new_len, ctx.max_state_bytes).is_err() {
+        // The refusal may be the memo's own fault: it can go stale-high
+        // whenever the state dir shrinks behind this ctx's back — a user
+        // clearing the plugin's state dir, a crashed-render staging orphan
+        // being reaped, a concurrent render's cache eviction. `write_entry`'s
+        // quota-failure path already self-heals by re-measuring after its
+        // own eviction; a bare refusal here previously did not, so it never
+        // recovered until something else happened to invalidate the memo.
+        // Invalidating and re-checking once costs a walk only on this rare
+        // refusal path, and can only make the decision more accurate, never
+        // looser (invariant N3).
+        ctx.invalidate_state_size();
+        if let Err(error) = check_cap(ctx.state_size(), &full, new_len, ctx.max_state_bytes) {
+            return WriteResult { ok: false, error };
+        }
     }
+    // Captured once now that the check above has passed: nothing between
+    // here and the write below changes the memo, so re-reading `state_size()`
+    // again in the success arm would only return this same value.
+    let current_size = ctx.state_size();
     if let Some(parent) = full.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
@@ -466,7 +483,7 @@ pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -
     match rustline_core::atomic_write::write_atomic(&full, contents.as_bytes()) {
         Ok(()) => {
             ctx.set_state_size(
-                ctx.state_size()
+                current_size
                     .saturating_sub(replaced)
                     .saturating_add(new_len),
             );
@@ -732,6 +749,49 @@ mod tests {
             "a write that only exceeds the cap once combined with the first must still be refused"
         );
         assert!(second.error.contains("quota"));
+    }
+
+    /// Fix pass 1 (Important 2): before this task every `check_cap` re-walked,
+    /// so a refusal caused by a stale-high memo self-corrected on the very
+    /// next write. After the memo, a bare refusal on this path never
+    /// invalidated, so nothing forced a re-walk — reachable whenever the
+    /// state dir shrinks behind this ctx's back (a user clearing the
+    /// plugin's state dir, a crashed-render staging orphan being reaped, a
+    /// concurrent render's cache eviction). This pins the self-heal: a
+    /// refusal caused purely by a stale-high memo must recover on its own
+    /// retry, without needing a later write to invalidate it first.
+    #[test]
+    fn state_write_self_heals_a_stale_high_memo_on_refusal() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&[], root.path().to_path_buf(), 100);
+        // Simulate the state dir having shrunk behind this ctx's back: the
+        // memo believes it's already full, even though the real dir is
+        // empty.
+        ctx.set_state_size(1_000);
+        let w = perform_state_write(&ctx, "a.json", "hello");
+        assert!(
+            w.ok,
+            "a refusal driven only by a stale-high memo must self-heal via one re-walk: {:?}",
+            w.error
+        );
+    }
+
+    /// The self-heal above must not turn every refusal into a pass: when the
+    /// state dir really is over cap, the re-walk confirms that and the write
+    /// stays refused.
+    #[test]
+    fn state_write_stays_refused_when_the_re_walk_confirms_it() {
+        let root = tempfile::tempdir().unwrap();
+        let cap = 10;
+        let ctx = ctx_with_cap(&[], root.path().to_path_buf(), cap);
+        std::fs::create_dir_all(ctx.state_dir()).unwrap();
+        std::fs::write(ctx.state_dir().join("existing.json"), "z".repeat(9)).unwrap();
+        let w = perform_state_write(&ctx, "a.json", "0123456789"); // 9 + 10 > cap 10
+        assert!(
+            !w.ok,
+            "a write that truly exceeds cap must stay refused after the self-heal retry"
+        );
+        assert!(w.error.contains("quota"));
     }
 
     /// The load-bearing performance claim this whole task exists for: a

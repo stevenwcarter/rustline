@@ -168,9 +168,14 @@ mod tests {
 
     #[test]
     fn check_cap_is_pure_and_does_not_walk() {
-        // A directory that does not exist has no size to walk; the caller
-        // supplies the current size, so the check still decides correctly.
+        // A directory that does not exist has no size to walk, so `dir_size`
+        // on it would return 0 regardless — that alone doesn't prove
+        // purity, since the old (pre-fix) implementation would have passed
+        // this too. The walk counter makes the claim in the test's name
+        // actually true.
+        reset_walk_count();
         assert!(check_cap(0, Path::new("/no/such/f"), 5, 10).is_ok());
         assert!(check_cap(9, Path::new("/no/such/f"), 5, 10).is_err());
+        assert_eq!(walk_count(), 0, "check_cap must never call dir_size itself");
     }
 }
