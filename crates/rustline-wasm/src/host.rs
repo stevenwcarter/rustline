@@ -100,7 +100,7 @@ host_fn!(rl_exec_cached(user_data: CapabilityCtx; program: String, args_json: St
 host_fn!(rl_log(user_data: CapabilityCtx; level: String, msg: String) -> String {
     let ctx = user_data.get()?;
     let ctx = ctx.lock().unwrap();
-    perform_log(&ctx.name, &level, &msg);
+    perform_log(&ctx, &level, &msg);
     Ok(String::new())
 });
 

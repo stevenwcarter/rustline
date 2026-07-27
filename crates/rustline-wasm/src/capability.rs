@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use rustline_core::PluginConfig;
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,11 @@ pub struct CapabilityCtx {
     /// `UserData`, which requires `Send`, and an atomic keeps that
     /// unconditional.
     state_size: AtomicU64,
+    /// How many `rl_log` calls this instance has made this process. `rl_log`
+    /// is capability-free by design, so a rate cap — not a gate — is what
+    /// keeps a buggy loop or a hostile plugin from filling the user's disk
+    /// with the very log they would consult to find out why.
+    log_calls: AtomicU32,
 }
 
 impl CapabilityCtx {
@@ -84,6 +89,7 @@ impl CapabilityCtx {
             max_state_bytes: pc.max_state_bytes,
             observer: Arc::new(NoopObserver),
             state_size: AtomicU64::new(SIZE_UNSEEDED),
+            log_calls: AtomicU32::new(0),
         }
     }
 
@@ -155,6 +161,14 @@ impl CapabilityCtx {
     /// (invariant N3).
     pub fn invalidate_state_size(&self) {
         self.state_size.store(SIZE_UNSEEDED, Ordering::Relaxed);
+    }
+
+    /// Claim one guest-log slot. Returns how many calls have now been made
+    /// (1-based), so the caller can emit exactly one limit notice.
+    pub fn claim_log_call(&self) -> u32 {
+        self.log_calls
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
     }
 
     // re-exported here so tests can build a ctx without touching the module path

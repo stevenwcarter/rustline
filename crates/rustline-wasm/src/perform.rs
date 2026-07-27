@@ -575,18 +575,62 @@ pub fn perform_file_write(ctx: &CapabilityCtx, path: &str, contents: &str) -> Wr
     }
 }
 
+/// Longest guest log message forwarded to `tracing`, in bytes.
+pub(crate) const MAX_GUEST_LOG_BYTES: usize = 2 * 1024;
+/// Most `rl_log` calls forwarded per plugin instance per process.
+pub(crate) const MAX_GUEST_LOG_CALLS: u32 = 256;
+
+/// Truncate `msg` to at most `MAX_GUEST_LOG_BYTES`, never splitting a
+/// character. The message is guest-supplied UTF-8, so a byte-index slice would
+/// panic on a multi-byte char straddling the cap.
+fn truncate_guest_msg(msg: &str) -> std::borrow::Cow<'_, str> {
+    if msg.len() <= MAX_GUEST_LOG_BYTES {
+        return std::borrow::Cow::Borrowed(msg);
+    }
+    let mut end = MAX_GUEST_LOG_BYTES;
+    while end > 0 && !msg.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::borrow::Cow::Owned(format!("{}…(truncated)", &msg[..end]))
+}
+
 /// Emit a guest log message through the host's `tracing` subscriber.
 ///
 /// Unlike every other function in this module, `rl_log` is the **one
 /// intentional capability-free host function** (invariant N1): it never
 /// touches the network or filesystem, so there is no `CapabilityCtx`
 /// allowlist to check and — unlike `perform_http_get`/`perform_state_read`/
-/// etc. — no "denied" case to test. `plugin` tags the log line so
-/// multi-plugin output stays attributable; an unrecognized `level` string
-/// degrades to `info` (keeping the original string as a field) rather than
-/// dropping the message or panicking, matching invariant N2 (a plugin must
-/// never break the bar).
-pub fn perform_log(plugin: &str, level: &str, msg: &str) {
+/// etc. — no "denied" case to test. `plugin` (from `ctx.name`) tags the log
+/// line so multi-plugin output stays attributable; an unrecognized `level`
+/// string degrades to `info` (keeping the original string as a field) rather
+/// than dropping the message or panicking, matching invariant N2 (a plugin
+/// must never break the bar).
+///
+/// Capability-free does not mean unbounded, though: a guest with 16 MB of
+/// memory and a 500 M-fuel render budget can still issue thousands of calls
+/// or one huge message in a single render, and the log this function writes
+/// to is the user's only diagnostic when something goes wrong — so it must
+/// never be the thing that fills their disk. `msg` is truncated to
+/// `MAX_GUEST_LOG_BYTES` and calls are capped at `MAX_GUEST_LOG_CALLS` per
+/// instance per process. Neither check is a capability gate: nothing is
+/// denied, no `observe_denial` fires, and there is still no allowlist —
+/// every call still reaches `tracing`, just bounded in size and rate rather
+/// than admitted or refused.
+pub fn perform_log(ctx: &CapabilityCtx, level: &str, msg: &str) {
+    let calls = ctx.claim_log_call();
+    if calls > MAX_GUEST_LOG_CALLS {
+        if calls == MAX_GUEST_LOG_CALLS + 1 {
+            tracing::warn!(
+                target: "rustline_wasm::guest",
+                plugin = %ctx.name,
+                limit = MAX_GUEST_LOG_CALLS,
+                "guest log rate limit reached; further messages dropped this process"
+            );
+        }
+        return;
+    }
+    let plugin = &ctx.name;
+    let msg = truncate_guest_msg(msg);
     match level {
         "error" => tracing::error!(target: "rustline_wasm::guest", %plugin, "{msg}"),
         "warn" => tracing::warn!(target: "rustline_wasm::guest", %plugin, "{msg}"),
@@ -1500,7 +1544,9 @@ mod log_tests {
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Level, Metadata, Subscriber};
 
-    use super::perform_log;
+    use super::{MAX_GUEST_LOG_BYTES, MAX_GUEST_LOG_CALLS, perform_log};
+    use crate::capability::CapabilityCtx;
+    use rustline_core::PluginConfig;
 
     /// One captured event: its severity plus every field (incl. the implicit
     /// `message` field carrying the formatted log text) as `(name, debug)`.
@@ -1566,8 +1612,26 @@ mod log_tests {
             .map(|(_, v)| v.as_str())
     }
 
+    /// Run `f` under the recording subscriber and return every emitted
+    /// event's `message` field, newline-joined, so the size/rate tests below
+    /// can assert on truncation markers and rate-limit text with plain
+    /// string ops instead of walking `CapturedEvent`s by hand.
+    fn with_recording_subscriber(f: impl FnOnce()) -> String {
+        capture(f)
+            .iter()
+            .filter_map(|(_, fields)| field(fields, "message"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn test_ctx(name: &str, dir: &std::path::Path) -> CapabilityCtx {
+        CapabilityCtx::from_config(name, &PluginConfig::default(), dir.to_path_buf())
+    }
+
     #[test]
     fn maps_each_known_level_string_to_the_matching_tracing_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx("weather", dir.path());
         for (level_str, expected) in [
             ("error", Level::ERROR),
             ("warn", Level::WARN),
@@ -1575,7 +1639,7 @@ mod log_tests {
             ("debug", Level::DEBUG),
             ("trace", Level::TRACE),
         ] {
-            let events = capture(|| perform_log("weather", level_str, "hello"));
+            let events = capture(|| perform_log(&ctx, level_str, "hello"));
             assert_eq!(events.len(), 1, "level {level_str}");
             let (level, fields) = &events[0];
             assert_eq!(*level, expected, "level {level_str}");
@@ -1586,7 +1650,9 @@ mod log_tests {
 
     #[test]
     fn unrecognized_level_degrades_to_info_without_panicking() {
-        let events = capture(|| perform_log("weather", "bogus", "still logged"));
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx("weather", dir.path());
+        let events = capture(|| perform_log(&ctx, "bogus", "still logged"));
         assert_eq!(events.len(), 1);
         let (level, fields) = &events[0];
         assert_eq!(*level, Level::INFO);
@@ -1601,9 +1667,65 @@ mod log_tests {
         // other six `perform_*` functions — there is no "denied" case to
         // test; this just pins that every level (incl. an unknown one)
         // completes with no side effect beyond the emitted tracing event.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx("no-capability-needed", dir.path());
         for level in ["error", "warn", "info", "debug", "trace", "unknown"] {
-            let events = capture(|| perform_log("no-capability-needed", level, "logged"));
+            let events = capture(|| perform_log(&ctx, level, "logged"));
             assert_eq!(events.len(), 1, "level {level}");
         }
+    }
+
+    #[test]
+    fn an_oversized_message_is_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), dir.path().into());
+        let captured = with_recording_subscriber(|| {
+            perform_log(&ctx, "info", &"x".repeat(10_000));
+        });
+        assert!(captured.len() < 10_000, "message was truncated");
+        assert!(captured.contains("…(truncated)"), "truncation is marked");
+    }
+
+    #[test]
+    fn truncation_never_splits_a_multibyte_char() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), dir.path().into());
+        // 3-byte chars straddling the byte cap: a naive &msg[..CAP] panics.
+        let msg = "€".repeat(MAX_GUEST_LOG_BYTES);
+        let captured = with_recording_subscriber(|| {
+            perform_log(&ctx, "info", &msg); // must not panic
+        });
+        assert!(captured.contains("…(truncated)"));
+    }
+
+    #[test]
+    fn the_call_rate_is_capped_and_reported_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), dir.path().into());
+        let captured = with_recording_subscriber(|| {
+            for i in 0..(MAX_GUEST_LOG_CALLS + 50) {
+                perform_log(&ctx, "info", &format!("line {i}"));
+            }
+        });
+        assert!(!captured.contains(&format!("line {}", MAX_GUEST_LOG_CALLS + 10)));
+        assert_eq!(
+            captured.matches("guest log rate limit reached").count(),
+            1,
+            "the limit is reported exactly once"
+        );
+    }
+
+    #[test]
+    fn the_budget_is_per_plugin_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = CapabilityCtx::from_config("a", &PluginConfig::default(), dir.path().into());
+        let b = CapabilityCtx::from_config("b", &PluginConfig::default(), dir.path().into());
+        let captured = with_recording_subscriber(|| {
+            for _ in 0..MAX_GUEST_LOG_CALLS {
+                perform_log(&a, "info", "from a");
+            }
+            perform_log(&b, "info", "from b"); // b has its own budget (N4)
+        });
+        assert!(captured.contains("from b"));
     }
 }
