@@ -1508,6 +1508,36 @@ fn refs_spark(format: &str, alt_format: &str) -> bool {
     format.contains("{spark}") || alt_format.contains("{spark}")
 }
 
+/// Deserialize an `[instances.<name>]` options table, falling back to
+/// `T::default()` on a type error — but *reporting* it first.
+///
+/// The silent `unwrap_or_default()` this replaces threw away the user's whole
+/// instance config (format, thresholds, colour override) on one bad value and
+/// still registered the name, so `resolve` found it and no "unknown widget"
+/// warn fired either: the edit looked accepted and was ignored. Routed through
+/// `warn_once` because a misconfiguration persists across every render tick.
+pub(crate) fn instance_opts<T: Default + serde::de::DeserializeOwned>(
+    name: &str,
+    kind: &str,
+    v: Value,
+) -> T {
+    match v.try_into() {
+        Ok(o) => o,
+        Err(error) => {
+            let error = error.to_string();
+            crate::diag::warn_once(&format!("instance-opts:{name}:{error}"), || {
+                tracing::warn!(
+                    instance = %name,
+                    kind = %kind,
+                    %error,
+                    "invalid instance options, using defaults"
+                );
+            });
+            T::default()
+        }
+    }
+}
+
 impl Config {
     /// Load config from `path`, never failing: a missing file or a parse
     /// error both yield [`Config::default`] (the latter after logging a
@@ -1605,7 +1635,7 @@ impl Config {
             let Some(kind) = Config::instance_kind(table) else {
                 continue;
             };
-            let Some((color, _, _)) = Config::instance_meta(kind, table) else {
+            let Some((color, _, _)) = Config::instance_meta(name, kind, table) else {
                 continue;
             };
             if color.fg.is_some() || color.bg.is_some() {
@@ -1706,7 +1736,7 @@ impl Config {
             let Some(kind) = Config::instance_kind(table) else {
                 continue;
             };
-            let Some((_, alt_format, click)) = Config::instance_meta(kind, table) else {
+            let Some((_, alt_format, click)) = Config::instance_meta(name, kind, table) else {
                 continue;
             };
             map.insert(
@@ -1733,56 +1763,62 @@ impl Config {
     /// widget. `kind` outside the twelve clickable/format-bearing kinds
     /// Task 5 registers instances for yields `None` (nothing to project); a
     /// malformed `v` for its kind's Opts falls back to that kind's defaults,
-    /// matching the total, never-panicking parse the registration pass uses.
-    pub fn instance_meta(kind: &str, v: &Value) -> Option<(ColorOverride, String, ClickBindings)> {
+    /// matching the total, never-panicking parse the registration pass uses —
+    /// and, like that pass, reports the mismatch once via
+    /// [`instance_opts`]/`warn_once` rather than dropping it silently.
+    pub fn instance_meta(
+        name: &str,
+        kind: &str,
+        v: &Value,
+    ) -> Option<(ColorOverride, String, ClickBindings)> {
         let t = v.clone();
         let (color, alt_format, click) = match kind {
             "datetime" => {
-                let o: DateTimeOpts = t.try_into().unwrap_or_default();
+                let o: DateTimeOpts = instance_opts(name, kind, t);
                 (o.color, o.alt_format, o.click)
             }
             "lan_ip" => {
-                let o: LanIpOpts = t.try_into().unwrap_or_default();
+                let o: LanIpOpts = instance_opts(name, kind, t);
                 (o.color, o.alt_format, o.click)
             }
             "tailscale_ip" => {
-                let o: TailscaleIpOpts = t.try_into().unwrap_or_default();
+                let o: TailscaleIpOpts = instance_opts(name, kind, t);
                 (o.color, o.alt_format, o.click)
             }
             "battery" => {
-                let o: BatteryOpts = t.try_into().unwrap_or_default();
+                let o: BatteryOpts = instance_opts(name, kind, t);
                 (o.color, o.alt_format, o.click)
             }
             "cpu" => {
-                let o: CpuOpts = t.try_into().unwrap_or_default();
+                let o: CpuOpts = instance_opts(name, kind, t);
                 (o.color, o.alt_format, o.click)
             }
             "memory" => {
-                let o: MemoryOpts = t.try_into().unwrap_or_default();
+                let o: MemoryOpts = instance_opts(name, kind, t);
                 (o.color, o.alt_format, o.click)
             }
             "loadavg" => {
-                let o: LoadAvgOpts = t.try_into().unwrap_or_default();
+                let o: LoadAvgOpts = instance_opts(name, kind, t);
                 (o.color, o.alt_format, o.click)
             }
             "git" => {
-                let o: GitOpts = t.try_into().unwrap_or_default();
+                let o: GitOpts = instance_opts(name, kind, t);
                 (o.color, o.alt_format, o.click)
             }
             "disk" => {
-                let o: DiskOpts = t.try_into().unwrap_or_default();
+                let o: DiskOpts = instance_opts(name, kind, t);
                 (o.color, o.alt_format, o.click)
             }
             "uptime" => {
-                let o: UptimeOpts = t.try_into().unwrap_or_default();
+                let o: UptimeOpts = instance_opts(name, kind, t);
                 (o.color, o.alt_format, o.click)
             }
             "media" => {
-                let o: MediaOpts = t.try_into().unwrap_or_default();
+                let o: MediaOpts = instance_opts(name, kind, t);
                 (o.color, o.alt_format, o.click)
             }
             "throughput" => {
-                let o: ThroughputOpts = t.try_into().unwrap_or_default();
+                let o: ThroughputOpts = instance_opts(name, kind, t);
                 (o.color, o.alt_format, o.click)
             }
             _ => return None,
@@ -1825,8 +1861,8 @@ impl Config {
     pub fn disk_mounts(&self, layout: &[String]) -> BTreeSet<String> {
         let mut mounts: BTreeSet<String> = self
             .instances_of_kind(layout, "disk")
-            .map(|table| {
-                let opts: DiskOpts = table.clone().try_into().unwrap_or_default();
+            .map(|(name, table)| {
+                let opts: DiskOpts = instance_opts(name, "disk", table.clone());
                 opts.mount
             })
             .collect();
@@ -1845,8 +1881,8 @@ impl Config {
     pub fn throughput_interfaces(&self, layout: &[String]) -> BTreeSet<Option<String>> {
         let mut ifaces: BTreeSet<Option<String>> = self
             .instances_of_kind(layout, "throughput")
-            .map(|table| {
-                let opts: ThroughputOpts = table.clone().try_into().unwrap_or_default();
+            .map(|(name, table)| {
+                let opts: ThroughputOpts = instance_opts(name, "throughput", table.clone());
                 opts.interface
             })
             .collect();
@@ -1872,13 +1908,13 @@ impl Config {
         base_hit
             || self
                 .instances_of_kind(layout, kind)
-                .any(|table| match kind {
+                .any(|(name, table)| match kind {
                     "cpu" => {
-                        let o: CpuOpts = table.clone().try_into().unwrap_or_default();
+                        let o: CpuOpts = instance_opts(name, kind, table.clone());
                         refs_spark(&o.format, &o.alt_format)
                     }
                     "memory" => {
-                        let o: MemoryOpts = table.clone().try_into().unwrap_or_default();
+                        let o: MemoryOpts = instance_opts(name, kind, table.clone());
                         refs_spark(&o.format, &o.alt_format)
                     }
                     _ => false,
@@ -1886,13 +1922,15 @@ impl Config {
     }
 
     /// Iterate the `[instances.<name>]` tables a `layout` references that are of
-    /// a given `kind`, in layout order — the shared spine of [`Config::disk_mounts`]
-    /// and [`Config::throughput_interfaces`].
+    /// a given `kind`, in layout order, paired with each instance's own name (so
+    /// callers can report a per-instance parse error via [`instance_opts`]) —
+    /// the shared spine of [`Config::disk_mounts`], [`Config::throughput_interfaces`],
+    /// and [`Config::spark_referenced_in_layout`].
     fn instances_of_kind<'a>(
         &'a self,
         layout: &'a [String],
         kind: &'a str,
-    ) -> impl Iterator<Item = &'a Value> {
+    ) -> impl Iterator<Item = (&'a str, &'a Value)> {
         layout.iter().filter_map(move |name| {
             // Built-in-wins precedence: a built-in name never resolves to a
             // same-named `[instances.<name>]` entry (invariant #7), matching the
@@ -1901,7 +1939,7 @@ impl Config {
                 return None;
             }
             let table = self.instances.get(name)?;
-            (Config::instance_kind(table) == Some(kind)).then_some(table)
+            (Config::instance_kind(table) == Some(kind)).then_some((name.as_str(), table))
         })
     }
 }

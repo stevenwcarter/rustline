@@ -46,7 +46,7 @@ pub(crate) use alert::{AlertKind, alert_over, alert_style, alert_under};
 
 use crate::config::{
     BatteryOpts, CpuOpts, DateTimeOpts, DiskOpts, GitOpts, LanIpOpts, LoadAvgOpts, MediaOpts,
-    MemoryOpts, TailscaleIpOpts, ThroughputOpts, UptimeOpts,
+    MemoryOpts, TailscaleIpOpts, ThroughputOpts, UptimeOpts, instance_opts,
 };
 use crate::widget::{Registry, WidgetDescriptor, WidgetSource};
 use crate::{Config, RANGE_NAME_MAX_BYTES, Widget};
@@ -402,7 +402,7 @@ impl Registry {
             let summary = format!("{kind} instance");
             match kind {
                 "datetime" => {
-                    let o: DateTimeOpts = t.try_into().unwrap_or_default();
+                    let o: DateTimeOpts = instance_opts(name, kind, t);
                     let n = name.clone();
                     registry.register_described(
                         instance_descriptor(name, &summary, kind),
@@ -410,7 +410,7 @@ impl Registry {
                     );
                 }
                 "lan_ip" => {
-                    let o: LanIpOpts = t.try_into().unwrap_or_default();
+                    let o: LanIpOpts = instance_opts(name, kind, t);
                     let n = name.clone();
                     registry.register_described(
                         instance_descriptor(name, &summary, kind),
@@ -418,7 +418,7 @@ impl Registry {
                     );
                 }
                 "tailscale_ip" => {
-                    let o: TailscaleIpOpts = t.try_into().unwrap_or_default();
+                    let o: TailscaleIpOpts = instance_opts(name, kind, t);
                     let n = name.clone();
                     registry.register_described(
                         instance_descriptor(name, &summary, kind),
@@ -426,7 +426,7 @@ impl Registry {
                     );
                 }
                 "battery" => {
-                    let o: BatteryOpts = t.try_into().unwrap_or_default();
+                    let o: BatteryOpts = instance_opts(name, kind, t);
                     let n = name.clone();
                     registry.register_described(
                         instance_descriptor(name, &summary, kind),
@@ -434,7 +434,7 @@ impl Registry {
                     );
                 }
                 "cpu" => {
-                    let o: CpuOpts = t.try_into().unwrap_or_default();
+                    let o: CpuOpts = instance_opts(name, kind, t);
                     let n = name.clone();
                     registry.register_described(
                         instance_descriptor(name, &summary, kind),
@@ -442,7 +442,7 @@ impl Registry {
                     );
                 }
                 "memory" => {
-                    let o: MemoryOpts = t.try_into().unwrap_or_default();
+                    let o: MemoryOpts = instance_opts(name, kind, t);
                     let n = name.clone();
                     registry.register_described(
                         instance_descriptor(name, &summary, kind),
@@ -450,7 +450,7 @@ impl Registry {
                     );
                 }
                 "loadavg" => {
-                    let o: LoadAvgOpts = t.try_into().unwrap_or_default();
+                    let o: LoadAvgOpts = instance_opts(name, kind, t);
                     let n = name.clone();
                     registry.register_described(
                         instance_descriptor(name, &summary, kind),
@@ -458,7 +458,7 @@ impl Registry {
                     );
                 }
                 "git" => {
-                    let o: GitOpts = t.try_into().unwrap_or_default();
+                    let o: GitOpts = instance_opts(name, kind, t);
                     let n = name.clone();
                     registry.register_described(
                         instance_descriptor(name, &summary, kind),
@@ -466,7 +466,7 @@ impl Registry {
                     );
                 }
                 "disk" => {
-                    let o: DiskOpts = t.try_into().unwrap_or_default();
+                    let o: DiskOpts = instance_opts(name, kind, t);
                     let n = name.clone();
                     registry.register_described(
                         instance_descriptor(name, &summary, kind),
@@ -474,7 +474,7 @@ impl Registry {
                     );
                 }
                 "uptime" => {
-                    let o: UptimeOpts = t.try_into().unwrap_or_default();
+                    let o: UptimeOpts = instance_opts(name, kind, t);
                     let n = name.clone();
                     registry.register_described(
                         instance_descriptor(name, &summary, kind),
@@ -482,7 +482,7 @@ impl Registry {
                     );
                 }
                 "media" => {
-                    let o: MediaOpts = t.try_into().unwrap_or_default();
+                    let o: MediaOpts = instance_opts(name, kind, t);
                     let n = name.clone();
                     registry.register_described(
                         instance_descriptor(name, &summary, kind),
@@ -490,7 +490,7 @@ impl Registry {
                     );
                 }
                 "throughput" => {
-                    let o: ThroughputOpts = t.try_into().unwrap_or_default();
+                    let o: ThroughputOpts = instance_opts(name, kind, t);
                     let n = name.clone();
                     registry.register_described(
                         instance_descriptor(name, &summary, kind),
@@ -511,6 +511,7 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    use super::{CpuOpts, instance_opts};
     use crate::widget::Registry;
     use crate::{Config, Context, NetIface};
     use chrono::{Local, TimeZone};
@@ -990,5 +991,28 @@ mod tests {
         let reg = Registry::with_builtins(&cfg);
         let w = reg.build("clk").unwrap();
         assert_eq!(w.range_name(), Some("clk"));
+    }
+
+    #[test]
+    fn instance_opts_falls_back_and_reports_a_type_error() {
+        let v: toml::Value = toml::from_str("spark_width = \"8\"").unwrap();
+        let got: CpuOpts = instance_opts("cpu_alt", "cpu", v);
+        assert_eq!(got.spark_width, CpuOpts::default().spark_width);
+    }
+
+    #[test]
+    fn instance_opts_accepts_a_valid_table() {
+        let v: toml::Value = toml::from_str("spark_width = 20").unwrap();
+        let got: CpuOpts = instance_opts("cpu_alt", "cpu", v);
+        assert_eq!(got.spark_width, 20);
+    }
+
+    #[test]
+    fn an_instance_table_with_only_the_extra_kind_key_parses_cleanly() {
+        // CLAUDE.md documents the extra `kind` key as harmless; it must not be
+        // reported as a type error.
+        let v: toml::Value = toml::from_str("kind = \"cpu\"").unwrap();
+        let got: CpuOpts = instance_opts("cpu_alt", "cpu", v);
+        assert_eq!(got.spark_width, CpuOpts::default().spark_width);
     }
 }
