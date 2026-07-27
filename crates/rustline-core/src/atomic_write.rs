@@ -15,6 +15,32 @@
 //! the corruption is silent — a lost CPU sample costs a 120 ms sleep on the
 //! next render, a lost throughput delta renders nothing, a `{spark}` ring
 //! visibly drops samples.
+//!
+//! Uniquely-named staging carries three trade-offs, all accepted:
+//!
+//! - **Crash leftovers accumulate.** The old shared `.tmp` left at most one
+//!   stale file per target and reused it next tick — self-limiting. A unique
+//!   name per call leaves one orphan per process killed between its write and
+//!   its rename, and nothing reaps them. `rustline-wasm`'s cache namespaces
+//!   sweep them in `evict_namespace` (an unparseable file sorts oldest, so it
+//!   evicts first), but a plugin's state-dir root and
+//!   `~/.local/state/rustline/` have no such sweep, and `state::dir_size`
+//!   counts an orphan against `max_state_bytes` forever.
+//! - **`NAME_MAX`.** The ~33-char staging suffix can push an already-long
+//!   target name over the filesystem's name-length limit where a plain
+//!   `fs::write` would have succeeded (measured: a 220-char filename writes
+//!   fine, 240 fails with `File name too long`, os error 36). Only reachable
+//!   through `perform_state_write`, since `sanitize_relpath` imposes no
+//!   length bound on a plugin-supplied relpath; the other five call sites all
+//!   write bounded names. Degrades to an error string, never a panic.
+//! - **Transient double-count against the quota.** `check_cap` projects a
+//!   write as an in-place replacement, but `write_atomic` briefly holds both
+//!   the old file and the staging file, so peak on-disk usage can exceed the
+//!   accounted projection by the replaced file's size. It can't cause the
+//!   write that triggers it to be rejected, but a *concurrent* process's
+//!   `check_cap` can observe the inflated total and refuse a legitimate
+//!   write of its own. New with this change — the sites this replaced used
+//!   to truncate in place.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -128,6 +154,13 @@ mod tests {
     /// the race is still running* is what actually catches it, matching the
     /// real failure mode: a concurrent render process reading the file
     /// between two others' writes.
+    ///
+    /// Needs at least 2 CPU cores to actually exercise the race: measured
+    /// against the shared-staging-name bug, a single-core runner never
+    /// preempts a writer mid-truncate, so this passes 10/10 there without
+    /// detecting anything (2 cores: 9/10 catch it; 4 cores: 10/10). It never
+    /// flakes against the fixed implementation at any core count, so a green
+    /// result here is only meaningful coverage on a multi-core runner.
     #[test]
     fn concurrent_writers_always_leave_a_complete_file() {
         use std::sync::atomic::AtomicBool;

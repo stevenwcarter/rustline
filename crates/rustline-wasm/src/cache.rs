@@ -618,4 +618,27 @@ mod tests {
             "headroom should leave slack under the cap, not land exactly on the boundary"
         );
     }
+
+    // Pins that `write_entry` actually goes through `write_atomic` rather
+    // than truncating the target in place: `fs::write` reuses the target
+    // file's inode, `write_atomic` replaces it via `rename`. Nothing else
+    // here would notice a regression to a bare `fs::write` —
+    // `write_entry_roundtrips_and_enforces_cap` reads back the same bytes
+    // either way.
+    #[test]
+    #[cfg(unix)]
+    fn write_entry_replaces_the_file_rather_than_truncating_it_in_place() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/y");
+        write_entry(dir.path(), &path, "first", 1_000).unwrap();
+        let first_ino = std::fs::metadata(&path).unwrap().ino();
+        write_entry(dir.path(), &path, "second, and longer", 1_000).unwrap();
+        let second_ino = std::fs::metadata(&path).unwrap().ino();
+        assert_ne!(
+            first_ino, second_ino,
+            "write_entry must replace the file, not truncate it in place"
+        );
+    }
 }

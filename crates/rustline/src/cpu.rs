@@ -597,4 +597,25 @@ mod tests {
         // Only the most recent 2 readings survive the ring.
         assert_eq!(read_cpu_history(dir.path(), 5.0, 2), vec![4.0, 5.0]);
     }
+
+    // Pins that `store_snapshot` actually goes through `write_atomic` rather
+    // than truncating the target in place: `fs::write` reuses the target
+    // file's inode, `write_atomic` replaces it via `rename`. Nothing else
+    // here would notice a regression to a bare `fs::write` — the round-trip
+    // tests above read back the same values either way.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn store_snapshot_replaces_the_file_rather_than_truncating_it_in_place() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        store_snapshot(dir.path(), &snap(1000, 800, 1));
+        let first_ino = std::fs::metadata(snapshot_path(dir.path())).unwrap().ino();
+        store_snapshot(dir.path(), &snap(2000, 1600, 2));
+        let second_ino = std::fs::metadata(snapshot_path(dir.path())).unwrap().ino();
+        assert_ne!(
+            first_ino, second_ino,
+            "store_snapshot must replace the file, not truncate it in place"
+        );
+    }
 }

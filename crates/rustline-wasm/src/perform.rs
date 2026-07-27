@@ -498,6 +498,11 @@ pub fn perform_file_write(ctx: &CapabilityCtx, path: &str, contents: &str) -> Wr
             error: format!("path not allowed: {norm}"),
         };
     }
+    // Deliberately not `write_atomic`: `path` is an arbitrary allowlisted
+    // absolute path a plugin asked to write, not a temp/cache/state file this
+    // module owns. Rename-replace would change the target's inode and
+    // permissions and break existing hard links — not what a plugin writing
+    // to a user-designated path should do.
     match std::fs::write(&norm, contents.as_bytes()) {
         Ok(()) => WriteResult {
             ok: true,
@@ -669,6 +674,32 @@ mod tests {
         let w = perform_state_write(&ctx, "../escape", "x");
         assert!(!w.ok);
         assert!(w.error.contains("traversal"));
+    }
+
+    // Pins that `perform_state_write` actually goes through `write_atomic`
+    // rather than truncating the target in place: `fs::write` reuses the
+    // target file's inode, `write_atomic` replaces it via `rename`. Nothing
+    // else here would notice a regression to a bare `fs::write` —
+    // `state_write_then_read_roundtrips_and_enforces_cap` reads back the same
+    // bytes either way.
+    #[test]
+    #[cfg(unix)]
+    fn state_write_replaces_the_file_rather_than_truncating_it_in_place() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&[], root.path().to_path_buf(), 1_000);
+        let w = perform_state_write(&ctx, "weather.json", "first");
+        assert!(w.ok, "{:?}", w.error);
+        let path = ctx.state_dir().join("weather.json");
+        let first_ino = std::fs::metadata(&path).unwrap().ino();
+        let w = perform_state_write(&ctx, "weather.json", "second, and longer");
+        assert!(w.ok, "{:?}", w.error);
+        let second_ino = std::fs::metadata(&path).unwrap().ino();
+        assert_ne!(
+            first_ino, second_ino,
+            "perform_state_write must replace the file, not truncate it in place"
+        );
     }
 
     #[test]

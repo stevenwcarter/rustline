@@ -98,4 +98,29 @@ mod tests {
         // Sanity: well after this feature's own epoch, never a panic.
         assert!(now_unix_secs() > 1_700_000_000); // 2023-11-14
     }
+
+    // Pins that `write_sample` actually goes through `write_atomic` rather
+    // than truncating the target in place: `fs::write` reuses the target
+    // file's inode, `write_atomic` replaces it via `rename`. Nothing else
+    // here would notice a regression to a bare `fs::write` — the round-trip
+    // tests above read back the same bytes either way.
+    #[test]
+    #[cfg(unix)]
+    fn write_sample_replaces_the_file_rather_than_truncating_it_in_place() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_sample(dir.path(), "s", "old");
+        let first_ino = std::fs::metadata(sample_path(dir.path(), "s"))
+            .unwrap()
+            .ino();
+        write_sample(dir.path(), "s", "new, and longer");
+        let second_ino = std::fs::metadata(sample_path(dir.path(), "s"))
+            .unwrap()
+            .ino();
+        assert_ne!(
+            first_ino, second_ino,
+            "write_sample must replace the file, not truncate it in place"
+        );
+    }
 }
