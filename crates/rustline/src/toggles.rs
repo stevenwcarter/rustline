@@ -48,8 +48,9 @@ pub fn read_toggles() -> BTreeSet<String> {
     }
 }
 
-/// Best-effort atomic write (temp file + rename); logs a warning on failure and
-/// never panics — a broken toggle must never break the bar.
+/// Best-effort atomic write (via `rustline_core::atomic_write::write_atomic`);
+/// logs a warning on failure and never panics — a broken toggle must never
+/// break the bar.
 pub fn write_toggles(set: &BTreeSet<String>) {
     let path = toggles_path();
     if let Some(parent) = path.parent() {

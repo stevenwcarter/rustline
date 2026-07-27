@@ -1,12 +1,14 @@
 //! Shared best-effort atomic per-widget state-file persistence: read/write a
-//! small text file under a state dir via a temp-file + rename, `warn!`ing
-//! (never panicking) on any I/O failure — a broken cache must never break the
-//! bar. Mirrors `cpu.rs`'s pre-existing `cpu-sample` snapshot store,
-//! generalized so any read surface that wants a cross-invocation sample cache
-//! (`throughput.rs` today; a future sparkline history widget tomorrow) can
-//! reuse the same file-handling code instead of re-implementing the
-//! atomic-write dance. Serialization/parsing of the sample's own shape stays
-//! with each caller, same as `cpu.rs`'s `serialize_snapshot`/`parse_snapshot`.
+//! small text file under a state dir via
+//! `rustline_core::atomic_write::write_atomic` (the workspace's one atomic-
+//! write primitive), `warn!`ing (never panicking) on any I/O failure — a
+//! broken cache must never break the bar. Mirrors `cpu.rs`'s pre-existing
+//! `cpu-sample` snapshot store, generalized so any read surface that wants a
+//! cross-invocation sample cache (`throughput.rs` today; a future sparkline
+//! history widget tomorrow) can reuse the same file-handling code instead of
+//! re-implementing the atomic-write dance. Serialization/parsing of the
+//! sample's own shape stays with each caller, same as `cpu.rs`'s
+//! `serialize_snapshot`/`parse_snapshot`.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,7 +26,8 @@ pub fn read_sample(state_dir: &Path, name: &str) -> Option<String> {
     std::fs::read_to_string(sample_path(state_dir, name)).ok()
 }
 
-/// Best-effort atomic persist (temp file + rename) of `contents` at
+/// Best-effort atomic persist (via
+/// `rustline_core::atomic_write::write_atomic`) of `contents` at
 /// `<state_dir>/<name>`; logs a warning and returns without panicking on any
 /// I/O failure.
 pub fn write_sample(state_dir: &Path, name: &str, contents: &str) {

@@ -47,10 +47,10 @@ pub fn wasmtime_cache_config_path() -> Option<PathBuf> {
 /// Lazily ensure `<root>/wasmtime-cache.toml` exists, pointing wasmtime's
 /// compile cache at `<root>/wasmtime-cache/`, and return its path. Returns
 /// `None` (never panics) on any I/O failure, or if the cache dir isn't
-/// absolute (wasmtime requires an absolute cache directory). Uses the same
-/// atomic temp-file + rename convention as `cpu.rs`'s snapshot store. The cache
-/// dir is deliberately kept distinct from plugins' own state subdirs
-/// (`<root>/<name>/`).
+/// absolute (wasmtime requires an absolute cache directory). Persists via
+/// `rustline_core::atomic_write::write_atomic`, the same primitive `cpu.rs`'s
+/// snapshot store uses. The cache dir is deliberately kept distinct from
+/// plugins' own state subdirs (`<root>/<name>/`).
 ///
 /// The cache directory is created up-front so that a `Some(path)` result
 /// implies a writable, wasmtime-usable config: an unwritable root fails

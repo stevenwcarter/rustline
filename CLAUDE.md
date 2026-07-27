@@ -473,6 +473,40 @@ these shared types, not a design shortcut. Keep them serializable.
   `fg=default`/`bg=default` reset that channel to `None` ("the terminal's own
   default", not black). Both share a private `scan` so where a directive
   starts/ends — and what an unterminated `#[` means — has one definition.
+- `atomic_write.rs` — `write_atomic(path, contents: &[u8]) -> io::Result<()>`,
+  the workspace's **one** atomic-write primitive (B15+B17): stage into a
+  per-writer, per-call temp file in the same directory
+  (`<path>.<pid>.<nanos>.<counter>.tmp`) and `rename` onto the target, so a
+  concurrent reader always sees either the old contents or the new ones,
+  never a torn write — and, being uniquely named per call rather than a
+  shared `<name>.tmp`, two rustline processes (tmux spawns `render left`/
+  `render right` as separate processes every tick) staging the same target
+  can no longer truncate each other's temp file. Every persistence site in
+  the workspace goes through this: `sample_store.rs`, `toggles.rs`, `cpu.rs`
+  (below), and `rustline-wasm`'s `perform::perform_state_write`, `paths.rs`,
+  and `cache.rs`. Trade-offs accepted and documented on the module: a
+  crash-orphaned staging file is swept inside the WASM cache namespaces
+  (`evict_namespace`) but not under a plugin's state-dir root or
+  `~/.local/state/rustline/` (open finding); the ~33-char staging suffix can
+  push an already-long target name over the filesystem's name limit (only
+  reachable via a plugin's state relpath, which has no length bound); and the
+  brief on-disk overlap of the old file and the staging file can transiently
+  over-count against a plugin's state-dir quota.
+- `diag.rs` — the `warn_once` seam: `warn_once(key: &str, emit: impl Fn())`
+  calls `emit()` unless a process-wide hook, installed once via
+  `set_warn_once_hook`, has already seen `key`. **Fails open**: with no hook
+  installed (every unit test, `rustline-core` used standalone) it always
+  emits, so a dedup layer can never be the reason a diagnostic goes missing.
+  The hook itself lives in the `rustline` bin crate's `warn_once.rs` (below) —
+  the only thing that ever calls `set_warn_once_hook`. Every `warn!`/`info!`
+  site here and in `rustline-wasm` that describes a *static misconfiguration*
+  (one that would otherwise re-fire once per render, forever, at up to
+  ~86,400 lines/day) routes through this function instead of calling
+  `tracing::warn!`/`info!` directly; a genuine per-occurrence runtime failure
+  (a plugin render failing, a cache write failing, a denial) never does. `key`
+  must identify both the site and its varying payload (e.g.
+  `"unknown-widget:memroy"`) so two distinct misconfigurations each warn once
+  rather than one suppressing the other.
 
 `rustline-abi`:
 - `lib.rs` — `Segment { text, style }`, `Style { fg, bg, bold }`,
@@ -881,7 +915,8 @@ failure path via `rl_log` (W7) rather than staying silent:
   backward clock) does it fall back to the classic two-sample read
   (`parse_proc_stat` + `busy_percent`, sampling `CPU_SAMPLE_WINDOW` ~120 ms
   apart). Either way the current reading is persisted afterward
-  (`store_snapshot`, a best-effort atomic temp-file + rename) so the *next*
+  (`store_snapshot`, via the shared `write_atomic` primitive — see
+  `rustline-core`'s `atomic_write.rs` above) so the *next*
   call can take the fast path — this is no longer a stateless delta. **macOS now
   shares this exact snapshot-delta path**: `read_cpu_macos_in` reads cumulative
   CPU ticks from the mach kernel via `read_mach_cpu_ticks`
@@ -998,8 +1033,9 @@ failure path via `rl_log` (W7) rather than staying silent:
   not routed through `build_context.rs`).
 - `sample_store.rs` — shared best-effort atomic per-widget state persistence
   (W52): `read_sample`/`write_sample` read/write a small text file under a state
-  dir via temp-file + rename, `warn!`ing (never panicking) on I/O failure. A
-  generalization of `cpu.rs`'s pre-existing `cpu-sample` dance, reused by
+  dir via `write_atomic` (`rustline-core`'s `atomic_write.rs`), `warn!`ing
+  (never panicking) on I/O failure. A generalization of `cpu.rs`'s
+  pre-existing `cpu-sample` dance, reused by
   `throughput.rs` and the `{spark}` history reads; each caller keeps its own
   sample serialization/parsing.
 - `history.rs` — pure sparkline-history ring helpers (W45): `parse_history`/
@@ -1219,8 +1255,9 @@ failure path via `rl_log` (W7) rather than staying silent:
   `rustline_wasm::data_root()`), `parse_toggles`/`serialize_toggles`
   (newline-delimited, total over blanks/whitespace), `apply_toggle` (flips
   membership), `read_toggles` (missing/unreadable file → empty set), and
-  `write_toggles` (best-effort atomic temp-file + rename; a write failure
-  `warn!`s and never panics — a broken toggle must never break the bar).
+  `write_toggles` (best-effort atomic write via `write_atomic`; a write
+  failure `warn!`s and never panics — a broken toggle must never break the
+  bar).
 - `plugin_cmd.rs` — `rustline plugin …`: `list` reads the effective `Config`;
   `list`/`url|path|write-path|cmd list`/`denials` each take a `--json` flag
   (W40, `plugin_list_json`/`pattern_list_json`/`denials_json`) emitting a
@@ -1470,6 +1507,22 @@ failure path via `rl_log` (W7) rather than staying silent:
   size-capped, single-generation rotator no longer exist. Best-effort: a log
   dir that can't be created or opened degrades to stderr-only; never writes
   stdout.
+- `warn_once.rs` — the real cross-process dedup layer behind
+  `rustline-core`'s `diag::warn_once` seam (above). `install(config_path)`,
+  called once from `main` immediately after `logging::init`, installs a hook
+  that claims a marker file per distinct `warn_once` key under
+  `<data_root>/.warn-markers/` (a sibling of `state/`, deliberately not a
+  descendant of it — see the module doc for the collision an unvalidated
+  plugin stem like `.warn-markers` could otherwise cause) via
+  `OpenOptions::create_new(true)`, atomic on every filesystem this project
+  supports, so concurrent renderers racing the same key still produce exactly
+  one winner with no lock. The whole marker directory is cleared whenever the
+  config file's mtime changes (`reset_if_generation_changed`), so each
+  misconfiguration is logged once per config edit rather than once per render
+  tick. **Fails open, all the way down**: a marker I/O failure is treated as
+  "emit", and a marker dir that exists but is wedged (present, non-empty,
+  unwritable) makes `install` skip installing the hook at all for that run —
+  degrading to no dedup rather than to permanent silence.
 - `main.rs` — dispatch + the `emit(markup, preview)` helper (raw markup vs
   ANSI) + `resolve_plugin_dir` (`--plugin-dir` flag › config `plugin_dir` ›
   `rustline_wasm::default_plugin_dir()`). Only `render left`/`render right`
@@ -2580,6 +2633,20 @@ back to the default).
     file_level   = "info"
     stderr_level = "error"
     file         = "~/.local/share/rustline/rustline.log"   # optional override; decomposed into dir/prefix/suffix — see above
+
+**Warn dedup:** a `warn!`/`info!` that describes a *static misconfiguration*
+(an unparseable theme file, an unknown widget name, a plugin with no
+`abi_version` export, …) — one that would otherwise re-fire on every render
+tick, forever — is logged at most once per config generation via
+`rustline_core::diag::warn_once` (see `diag.rs`/`warn_once.rs` in the module
+map above). The dedup state lives at `<data_root>/.warn-markers/`
+(`~/.local/share/rustline/.warn-markers`), a sibling of `denials.jsonl`,
+`toggles`, `plugin-index.json`, and the log directory under the same
+`data_root()`; it is cleared whenever `config.toml`'s mtime changes, so
+editing the config re-arms every warning for one more render. A genuine
+per-occurrence runtime failure (a plugin render failing, a cache write
+failing, a denial) is deliberately NOT routed through this — only a
+misconfiguration that stays constant between renders is.
 
 ## Invariants (load-bearing — re-check when touching these)
 

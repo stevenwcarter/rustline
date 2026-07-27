@@ -206,8 +206,9 @@ fn load_snapshot(state_dir: &Path) -> Option<CpuSnapshot> {
     parse_snapshot(&std::fs::read_to_string(snapshot_path(state_dir)).ok()?)
 }
 
-/// Best-effort atomic persist (temp file + rename); logs a warning on failure
-/// and never panics — a broken cache must never break the bar.
+/// Best-effort atomic persist (via `rustline_core::atomic_write::write_atomic`);
+/// logs a warning on failure and never panics — a broken cache must never
+/// break the bar.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn store_snapshot(state_dir: &Path, snap: &CpuSnapshot) {
     let path = snapshot_path(state_dir);

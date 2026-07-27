@@ -742,6 +742,15 @@ Override either sink in `config.toml` (`RUST_LOG` is not used):
     stderr_level = "error"
     file         = "~/.local/share/rustline/rustline.log"   # optional; split into dir + filename prefix/suffix, then re-joined per day as "<prefix>.<date>.<suffix>"
 
+A static misconfiguration (an unparseable theme file, an unknown widget name,
+a plugin missing its ABI handshake, and the like) logs once instead of on
+every render tick — tmux re-invokes `rustline render` every `status-interval`
+seconds, so without dedup one typo would write a line per second, forever.
+rustline tracks which warnings it has already logged in
+`<data_root>/.warn-markers/` (`~/.local/share/rustline/.warn-markers`); editing
+`config.toml` clears that cache, so a fixed — or newly broken — config re-arms
+every warning for one more render.
+
 ## Previewing on the command line
 
 Every render command accepts `--preview`, which prints the region in ANSI colour
