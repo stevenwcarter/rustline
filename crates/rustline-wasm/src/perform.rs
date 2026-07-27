@@ -111,8 +111,16 @@ pub fn perform_http_get_cached(
                 last_attempt_at: now.to_string(),
             })
             .unwrap_or_default();
-            if let Err(error) = write_entry(&dir, &path, &content, ctx.max_state_bytes) {
-                tracing::warn!(%error, %url, "http cache write failed; returning body unpersisted");
+            match write_entry(&dir, &path, &content, ctx.state_size(), ctx.max_state_bytes) {
+                Ok(total) => ctx.set_state_size(total),
+                Err(error) => {
+                    ctx.invalidate_state_size();
+                    tracing::warn!(
+                        %error,
+                        %url,
+                        "http cache write failed; returning body unpersisted"
+                    );
+                }
             }
             CachedHttpResult {
                 ok: true,
@@ -144,10 +152,13 @@ pub fn perform_http_get_cached(
                         last_attempt_at: now.to_string(),
                     })
                     .unwrap_or_default();
-                    if let Err(write_error) =
-                        write_entry(&dir, &path, &content, ctx.max_state_bytes)
+                    match write_entry(&dir, &path, &content, ctx.state_size(), ctx.max_state_bytes)
                     {
-                        tracing::warn!(error = %write_error, "negative-cache write failed");
+                        Ok(total) => ctx.set_state_size(total),
+                        Err(write_error) => {
+                            ctx.invalidate_state_size();
+                            tracing::warn!(error = %write_error, "negative-cache write failed");
+                        }
                     }
                     CachedHttpResult {
                         ok: true,
@@ -306,8 +317,16 @@ pub fn perform_exec_cached(
                 last_attempt_at: now.to_string(),
             })
             .unwrap_or_default();
-            if let Err(error) = write_entry(&dir, &path, &content, ctx.max_state_bytes) {
-                tracing::warn!(%error, %candidate, "exec cache write failed; returning body unpersisted");
+            match write_entry(&dir, &path, &content, ctx.state_size(), ctx.max_state_bytes) {
+                Ok(total) => ctx.set_state_size(total),
+                Err(error) => {
+                    ctx.invalidate_state_size();
+                    tracing::warn!(
+                        %error,
+                        %candidate,
+                        "exec cache write failed; returning body unpersisted"
+                    );
+                }
             }
             CachedExecResult {
                 ok: true,
@@ -350,8 +369,12 @@ pub fn perform_exec_cached(
                     last_attempt_at: now.to_string(),
                 })
                 .unwrap_or_default();
-                if let Err(write_error) = write_entry(&dir, &path, &content, ctx.max_state_bytes) {
-                    tracing::warn!(error = %write_error, "negative-cache write failed");
+                match write_entry(&dir, &path, &content, ctx.state_size(), ctx.max_state_bytes) {
+                    Ok(total) => ctx.set_state_size(total),
+                    Err(write_error) => {
+                        ctx.invalidate_state_size();
+                        tracing::warn!(error = %write_error, "negative-cache write failed");
+                    }
                 }
                 CachedExecResult {
                     ok: true,
@@ -424,7 +447,8 @@ pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -
     };
     let dir = ctx.state_dir();
     let full = dir.join(rel);
-    if let Err(error) = check_cap(&dir, &full, contents.len() as u64, ctx.max_state_bytes) {
+    let new_len = contents.len() as u64;
+    if let Err(error) = check_cap(ctx.state_size(), &full, new_len, ctx.max_state_bytes) {
         return WriteResult { ok: false, error };
     }
     if let Some(parent) = full.parent()
@@ -435,15 +459,34 @@ pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -
             error: e.to_string(),
         };
     }
+    // Read before the write: the file being replaced (if any) still has its
+    // old size right up until `write_atomic` lands, and the memo update
+    // below needs that old size to net out correctly against the new one.
+    let replaced = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
     match rustline_core::atomic_write::write_atomic(&full, contents.as_bytes()) {
-        Ok(()) => WriteResult {
-            ok: true,
-            error: String::new(),
-        },
-        Err(e) => WriteResult {
-            ok: false,
-            error: e.to_string(),
-        },
+        Ok(()) => {
+            ctx.set_state_size(
+                ctx.state_size()
+                    .saturating_sub(replaced)
+                    .saturating_add(new_len),
+            );
+            WriteResult {
+                ok: true,
+                error: String::new(),
+            }
+        }
+        Err(e) => {
+            // A failed write should leave the memo untouched in the common
+            // case (`write_atomic` cleans up its own staging file), but
+            // trusting that here couples this call site to that internal
+            // detail. Invalidating costs one extra walk on the next write and
+            // is always correct — when in doubt, invalidate (invariant N3).
+            ctx.invalidate_state_size();
+            WriteResult {
+                ok: false,
+                error: e.to_string(),
+            }
+        }
     }
 }
 
@@ -665,6 +708,49 @@ mod tests {
         let over = perform_state_write(&ctx, "big.json", "0123456789ABCDEF01"); // 18 > 16
         assert!(!over.ok);
         assert!(over.error.contains("quota"));
+    }
+
+    /// A single oversized write already fails the cap check regardless of
+    /// what `current_size` it's handed, so
+    /// `state_write_then_read_roundtrips_and_enforces_cap` above can't tell a
+    /// correctly-updated memo from one that's stuck at its seed value. This
+    /// pins the case that actually distinguishes them: two writes, each
+    /// individually within the cap, whose *combined* total is not — a memo
+    /// that never advances past its initial (empty-dir) reading would let
+    /// the second one through.
+    #[test]
+    fn state_write_refuses_a_second_write_that_only_exceeds_cap_cumulatively() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&[], root.path().to_path_buf(), 20);
+        let first = perform_state_write(&ctx, "a.json", &"a".repeat(15));
+        assert!(first.ok, "{:?}", first.error);
+        // True total is now 15 bytes. A second, independent 10-byte file
+        // would put the true total at 25 > cap 20, and must be refused.
+        let second = perform_state_write(&ctx, "b.json", &"b".repeat(10));
+        assert!(
+            !second.ok,
+            "a write that only exceeds the cap once combined with the first must still be refused"
+        );
+        assert!(second.error.contains("quota"));
+    }
+
+    /// The load-bearing performance claim this whole task exists for: a
+    /// sequence of writes through the real per-render entry point pays one
+    /// `dir_size` walk total (the memo's seed), not one per write.
+    #[test]
+    fn many_state_writes_pay_exactly_one_dir_size_walk() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&[], root.path().to_path_buf(), 1_000_000);
+        crate::state::reset_walk_count();
+        for i in 0..50 {
+            let w = perform_state_write(&ctx, &format!("f{i}.json"), "x");
+            assert!(w.ok, "{:?}", w.error);
+        }
+        assert_eq!(
+            crate::state::walk_count(),
+            1,
+            "50 writes should cost exactly one dir_size walk, not one per write"
+        );
     }
 
     #[test]
@@ -891,6 +977,50 @@ mod tests {
                 "https://wttr.in/48183"
             ))
             .is_none()
+        );
+    }
+
+    /// A quota failure can still evict — `write_entry` empties a cache
+    /// namespace looking for room before giving up (see `cache::write_entry`)
+    /// — so the directory can shrink even though the write it was trying to
+    /// make room for ultimately fails. If the memo isn't invalidated on that
+    /// failure it keeps reporting the old, now too-high size, which would
+    /// wedge every later write that the (now smaller) directory could
+    /// actually satisfy — the "stale-high memo" failure mode invariant N3
+    /// warns against.
+    #[test]
+    fn failed_cache_write_invalidates_the_memo_rather_than_trusting_a_stale_value() {
+        let root = tempfile::tempdir().unwrap();
+        let cap = 50;
+        let ctx = ctx_with_cap(&["https://x/*"], root.path().to_path_buf(), cap);
+        let ns = ctx.state_dir().join(crate::cache::HTTP_NAMESPACE);
+        std::fs::create_dir_all(&ns).unwrap();
+        for i in 0..5 {
+            std::fs::write(ns.join(format!("{i}.json")), "z".repeat(100)).unwrap();
+        }
+        // Seed the memo to the true, already-over-cap size.
+        let seeded = ctx.state_size();
+        assert!(
+            seeded > cap,
+            "the pre-populated namespace must already exceed the tiny cap"
+        );
+
+        // A response so large that even evicting the *entire* namespace
+        // can't make it fit: the write fails, but eviction empties the
+        // namespace on the way there, so the true total drops to ~0.
+        let body = "x".repeat(500);
+        let fetcher = ScriptedFetcher::ok(200, &body);
+        let r = perform_http_get_cached(&ctx, "https://x/y", 60, NOW, &fetcher);
+        assert!(
+            r.ok,
+            "the live-fetched body is still returned even though caching failed"
+        );
+
+        assert_eq!(
+            ctx.state_size(),
+            crate::state::dir_size(&ctx.state_dir()),
+            "a failed write must invalidate the memo so the next read re-walks \
+             to the truth, rather than trusting the stale pre-write size"
         );
     }
 

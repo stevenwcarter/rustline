@@ -4,13 +4,16 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustline_core::PluginConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::allow::AllowSet;
-#[cfg(test)]
 use crate::state;
+
+/// Sentinel for "not yet measured" in [`CapabilityCtx::state_size`].
+const SIZE_UNSEEDED: u64 = u64::MAX;
 
 /// The kind of capability a denied request was for, carried to a
 /// [`DenialObserver`] alongside the plugin name and the denied target.
@@ -57,6 +60,13 @@ pub struct CapabilityCtx {
     pub state_root: PathBuf,
     pub max_state_bytes: u64,
     observer: Arc<dyn DenialObserver + Send + Sync>,
+    /// Memoized total byte size of this plugin's state dir. Seeded by one
+    /// `dir_size` walk per process/daemon lifetime and then adjusted after
+    /// each successful write, instead of re-walking on every write.
+    /// `AtomicU64` rather than `Cell`: `CapabilityCtx` lives in Extism
+    /// `UserData`, which requires `Send`, and an atomic keeps that
+    /// unconditional.
+    state_size: AtomicU64,
 }
 
 impl CapabilityCtx {
@@ -69,6 +79,7 @@ impl CapabilityCtx {
             state_root,
             max_state_bytes: pc.max_state_bytes,
             observer: Arc::new(NoopObserver),
+            state_size: AtomicU64::new(SIZE_UNSEEDED),
         }
     }
 
@@ -91,6 +102,35 @@ impl CapabilityCtx {
     /// `ok:false` return — it never changes the gate-first decision (N1).
     pub fn observe_denial(&self, kind: DenialKind, target: &str) {
         self.observer.observe(&self.name, kind, target);
+    }
+
+    /// This plugin's state-dir size in bytes, measured once and then
+    /// memoized. `check_cap` stays pure and pays no walk of its own (see
+    /// `state::check_cap`); this is the one place that pays it, and only on
+    /// the first call.
+    pub fn state_size(&self) -> u64 {
+        let cached = self.state_size.load(Ordering::Relaxed);
+        if cached != SIZE_UNSEEDED {
+            return cached;
+        }
+        let measured = state::dir_size(&self.state_dir());
+        self.state_size.store(measured, Ordering::Relaxed);
+        measured
+    }
+
+    /// Record a known-good size (after a successful write reports its new
+    /// total).
+    pub fn set_state_size(&self, bytes: u64) {
+        self.state_size.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Drop the memo so the next `state_size` re-walks. Call whenever the
+    /// directory may have changed in a way this ctx did not account for — a
+    /// failed write, an eviction it did not perform. A stale-high memo would
+    /// wedge writes that should succeed, so when in doubt, invalidate
+    /// (invariant N3).
+    pub fn invalidate_state_size(&self) {
+        self.state_size.store(SIZE_UNSEEDED, Ordering::Relaxed);
     }
 
     // re-exported here so tests can build a ctx without touching the module path
@@ -152,5 +192,27 @@ mod tests {
         let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), d.path().to_path_buf());
         ctx.set_state_size(42);
         assert_eq!(ctx.state_size(), 42);
+    }
+
+    /// The load-bearing performance claim this memo exists for: however many
+    /// times `state_size` is read, only the *first* one may pay a `dir_size`
+    /// walk. `state_size_is_seeded_once_then_memoized` already proves this
+    /// behaviourally (a file added behind the memo's back goes unobserved);
+    /// this makes the walk count itself observable rather than inferred.
+    #[test]
+    fn state_size_pays_exactly_one_walk_no_matter_how_many_times_its_read() {
+        let d = tempfile::tempdir().unwrap();
+        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), d.path().to_path_buf());
+        std::fs::create_dir_all(ctx.state_dir()).unwrap();
+        std::fs::write(ctx.state_dir().join("a"), b"12345").unwrap();
+        state::reset_walk_count();
+        for _ in 0..20 {
+            assert_eq!(ctx.state_size(), 5);
+        }
+        assert_eq!(
+            state::walk_count(),
+            1,
+            "20 reads of the memo must cost exactly one dir_size walk"
+        );
     }
 }

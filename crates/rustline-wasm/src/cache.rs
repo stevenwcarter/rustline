@@ -158,14 +158,33 @@ fn namespace_dir(path: &Path) -> Option<&Path> {
     (name == HTTP_NAMESPACE || name == EXEC_NAMESPACE).then_some(parent)
 }
 
-/// Quota-checked write of `content` to `path` (creating the namespace
-/// directory `path` sits in). `check_cap` accounts against the whole
-/// `state_dir` (invariant N3); when it fails, evicts entries from `path`'s
-/// own namespace before giving up — see `namespace_dir` for why that's the
-/// only directory this ever touches.
-pub fn write_entry(state_dir: &Path, path: &Path, content: &str, cap: u64) -> Result<(), String> {
+/// Quota-checked, atomic write of `content` to `path` (creating the
+/// namespace directory `path` sits in). `current_size` is the caller's
+/// memoized state-dir size (see `CapabilityCtx::state_size`) — `check_cap`
+/// accounts it against the whole `state_dir` (invariant N3) without ever
+/// walking the directory itself. When the check fails, entries are evicted
+/// from `path`'s own namespace before giving up — see `namespace_dir` for
+/// why that's the only directory this ever touches.
+///
+/// On success, returns the new total size of `state_dir`, which the caller
+/// should feed back into its memo (`CapabilityCtx::set_state_size`). After an
+/// eviction the total is re-measured with one fresh `dir_size` walk rather
+/// than estimated, because eviction frees an amount the caller cannot
+/// predict — a re-walk is always correct (invariant N3).
+pub fn write_entry(
+    state_dir: &Path,
+    path: &Path,
+    content: &str,
+    current_size: u64,
+    cap: u64,
+) -> Result<u64, String> {
     let new_len = content.len() as u64;
-    if let Err(first) = state::check_cap(state_dir, path, new_len, cap) {
+    // Read before any eviction: eviction may delete the very entry being
+    // replaced, so this has to be captured up front to keep the final
+    // accounting correct either way.
+    let replaced = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let mut base = current_size;
+    if let Err(first) = state::check_cap(base, path, new_len, cap) {
         // The cache is at quota. Without eviction this returns Err forever:
         // every subsequent render then pays a live fetch or a real subprocess
         // spawn while a full state dir of dead entries sits on disk.
@@ -175,19 +194,16 @@ pub fn write_entry(state_dir: &Path, path: &Path, content: &str, cap: u64) -> Re
             // quota error untouched.
             return Err(first);
         };
-        // `check_cap` doesn't hand back the projected total it computed, so
-        // recompute it here purely to size how much to evict — the
-        // pass/fail decision stays check_cap's alone (invariant N3); this
-        // only feeds `evict_namespace`'s target. Accounting against a
-        // fraction of the *whole* cap (rather than this deficit) is wrong:
-        // whatever else lives in `state_dir` — another cache namespace, real
-        // persisted state — can already exceed that fraction on its own,
-        // leaving nothing to evict even though the actual shortfall is small
-        // and lives entirely in this namespace.
-        let replaced = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        let projected = state::dir_size(state_dir)
-            .saturating_sub(replaced)
-            .saturating_add(new_len);
+        // `state::projected_size` is the same formula `check_cap` just used,
+        // shared rather than re-derived here, purely to size how much to
+        // evict — the pass/fail decision stays check_cap's alone (invariant
+        // N3); this only feeds `evict_namespace`'s target. Accounting
+        // against a fraction of the *whole* cap (rather than this deficit)
+        // is wrong: whatever else lives in `state_dir` — another cache
+        // namespace, real persisted state — can already exceed that fraction
+        // on its own, leaving nothing to evict even though the actual
+        // shortfall is small and lives entirely in this namespace.
+        let projected = state::projected_size(base, replaced, new_len);
         let needed = projected.saturating_sub(cap);
         let namespace_total = state::dir_size(namespace);
         // An eighth of the namespace's own size as headroom, so a plugin
@@ -195,12 +211,17 @@ pub fn write_entry(state_dir: &Path, path: &Path, content: &str, cap: u64) -> Re
         let headroom = namespace_total / 8;
         let keep_bytes = namespace_total.saturating_sub(needed.saturating_add(headroom));
         evict_namespace(namespace, keep_bytes);
-        state::check_cap(state_dir, path, new_len, cap).map_err(|_| first)?;
+        // Eviction frees an amount this function cannot predict, so the
+        // total is re-measured rather than estimated.
+        base = state::dir_size(state_dir);
+        state::check_cap(base, path, new_len, cap).map_err(|_| first)?;
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    rustline_core::atomic_write::write_atomic(path, content.as_bytes()).map_err(|e| e.to_string())
+    rustline_core::atomic_write::write_atomic(path, content.as_bytes())
+        .map_err(|e| e.to_string())?;
+    Ok(base.saturating_sub(replaced).saturating_add(new_len))
 }
 
 #[cfg(test)]
@@ -251,14 +272,15 @@ mod tests {
         };
         let content = serde_json::to_string(&entry).unwrap();
         let path = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/y");
-        write_entry(dir.path(), &path, &content, 1_000).unwrap();
+        let total = write_entry(dir.path(), &path, &content, 0, 1_000).unwrap();
+        assert_eq!(total, content.len() as u64);
         let got = read_entry(&path).unwrap();
         assert_eq!(got.status, 200);
         assert_eq!(got.body, "hello");
         // a write that would blow the quota is refused
         let big = "z".repeat(2_000);
         let big_path = cache_path(dir.path(), HTTP_NAMESPACE, "big");
-        assert!(write_entry(dir.path(), &big_path, &big, 1_000).is_err());
+        assert!(write_entry(dir.path(), &big_path, &big, total, 1_000).is_err());
         // a missing file reads as None
         assert!(read_entry(Path::new("/no/such/file.json")).is_none());
     }
@@ -280,7 +302,11 @@ mod tests {
         for i in 0..10 {
             let p = cache_path(dir.path(), HTTP_NAMESPACE, &format!("https://x/{i}"));
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(&p, entry_json("2026-07-20T12:00:00-04:00", &"z".repeat(150))).unwrap();
+            std::fs::write(
+                &p,
+                entry_json("2026-07-20T12:00:00-04:00", &"z".repeat(150)),
+            )
+            .unwrap();
         }
         let fresh = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/new");
         let before = crate::state::dir_size(dir.path());
@@ -343,11 +369,13 @@ mod tests {
         }
         let fresh = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/new");
         // Before: over cap, so this write would be refused forever.
-        assert!(crate::state::dir_size(dir.path()) > cap);
+        let before = crate::state::dir_size(dir.path());
+        assert!(before > cap);
         let result = write_entry(
             dir.path(),
             &fresh,
             &entry_json("2026-07-26T12:00:00-04:00", "new"),
+            before,
             cap,
         );
         // Checked ahead of `result`'s own assertion so a wiring bug that
@@ -397,7 +425,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/y");
         let big = "z".repeat(5_000);
-        assert!(write_entry(dir.path(), &p, &big, 10).is_err());
+        assert!(write_entry(dir.path(), &p, &big, 0, 10).is_err());
     }
 
     #[test]
@@ -429,9 +457,10 @@ mod tests {
         let sibling = dir.path().join("counter-state.json");
         std::fs::write(&sibling, "x".repeat(50)).unwrap();
         let fresh = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/new");
+        let current = state::dir_size(dir.path());
 
         assert!(
-            write_entry(dir.path(), &fresh, "new", cap).is_err(),
+            write_entry(dir.path(), &fresh, "new", current, cap).is_err(),
             "a cap this small can never be satisfied without deleting real state"
         );
         assert_eq!(
@@ -489,7 +518,7 @@ mod tests {
         let fresh = cache_path(state_dir, HTTP_NAMESPACE, "https://x/new");
         let content = entry_json("2026-07-26T12:00:00-04:00", "new");
 
-        write_entry(state_dir, &fresh, &content, cap).expect(
+        write_entry(state_dir, &fresh, &content, exec_total + http_total, cap).expect(
             "the deficit is small and lives entirely in the namespace being \
              written, so eviction must free enough room regardless of how \
              much of the cap the exec cache alone already occupies",
@@ -526,12 +555,13 @@ mod tests {
         .unwrap();
 
         let http_total = state::dir_size(&http_ns);
-        let cap = state::dir_size(state_dir); // already exactly at the boundary
+        let current = state::dir_size(state_dir);
+        let cap = current; // already exactly at the boundary
 
         let fresh = cache_path(state_dir, HTTP_NAMESPACE, "https://x/new");
         let content = entry_json("2026-07-26T12:00:00-04:00", "new");
 
-        write_entry(state_dir, &fresh, &content, cap).expect(
+        write_entry(state_dir, &fresh, &content, current, cap).expect(
             "the deficit lives entirely in the namespace being written; a \
              real state file elsewhere in the state dir must not prevent \
              eviction from making room",
@@ -558,8 +588,15 @@ mod tests {
         let state_dir = dir.path();
         std::fs::write(state_dir.join("counter-state.json"), "x".repeat(900)).unwrap();
         std::fs::write(state_dir.join("weather-state.json"), "y".repeat(900)).unwrap();
+        let current = state::dir_size(state_dir);
 
-        let result = write_entry(state_dir, &state_dir.join("newthing.json"), "hello", 1_000);
+        let result = write_entry(
+            state_dir,
+            &state_dir.join("newthing.json"),
+            "hello",
+            current,
+            1_000,
+        );
 
         assert!(
             result.is_err(),
@@ -582,8 +619,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path();
         std::fs::write(state_dir.join("counter-state.json"), "c".repeat(900)).unwrap();
+        let current = state::dir_size(state_dir);
 
-        let result = write_entry(state_dir, Path::new(""), &"x".repeat(200), 500);
+        let result = write_entry(state_dir, Path::new(""), &"x".repeat(200), current, 500);
 
         assert!(
             result.is_err(),
@@ -648,7 +686,9 @@ mod tests {
         let cap = namespace_total + new_len - entry_len;
 
         let fresh = cache_path(state_dir, HTTP_NAMESPACE, "https://x/new");
-        write_entry(state_dir, &fresh, &content, cap).expect("the namespace can cover this");
+        let current = state::dir_size(state_dir);
+        write_entry(state_dir, &fresh, &content, current, cap)
+            .expect("the namespace can cover this");
 
         assert!(
             state::dir_size(&ns) < cap,
@@ -669,9 +709,9 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/y");
-        write_entry(dir.path(), &path, "first", 1_000).unwrap();
+        let total = write_entry(dir.path(), &path, "first", 0, 1_000).unwrap();
         let first_ino = std::fs::metadata(&path).unwrap().ino();
-        write_entry(dir.path(), &path, "second, and longer", 1_000).unwrap();
+        write_entry(dir.path(), &path, "second, and longer", total, 1_000).unwrap();
         let second_ino = std::fs::metadata(&path).unwrap().ino();
         assert_ne!(
             first_ino, second_ino,
