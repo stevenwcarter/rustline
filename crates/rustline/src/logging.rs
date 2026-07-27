@@ -2,7 +2,7 @@
 //!
 //! Two independently-filtered `tracing` sinks:
 //! - a daily-rotated append-mode file at
-//!   `$XDG_DATA_HOME/rustline/rustline.log.<date>`, keeping 7 generations
+//!   `$XDG_DATA_HOME/rustline/rustline.<date>.log`, keeping 7 generations
 //!   (default level INFO; raised only by `-v`), and
 //! - stderr (default level ERROR; config-overridable).
 //!
@@ -16,9 +16,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use rustline_core::LogConfig;
-#[cfg(test)]
-use tracing_appender::rolling::RollingFileAppender;
-use tracing_appender::rolling::{Builder, Rotation};
+use tracing_appender::rolling::{Builder, InitError, RollingFileAppender, Rotation};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
 
@@ -118,8 +116,14 @@ pub(crate) fn log_file_suffix(cfg: &LogConfig) -> String {
 
 /// Today's log file: `<log_dir>/<prefix>.<YYYY-MM-DD>.<suffix>`. Reported by
 /// `doctor`; the appender derives the same name internally.
+///
+/// The date is computed in UTC, not local time: `RollingFileAppender`
+/// unconditionally rotates on a UTC day boundary, so using local time here
+/// would let this reported path disagree with the file the appender is
+/// actually writing to for any user not at UTC+0. Do not "fix" this to
+/// `chrono::Local::now()` again.
 pub(crate) fn current_log_path(cfg: &LogConfig) -> PathBuf {
-    let date = chrono::Local::now().format("%Y-%m-%d");
+    let date = chrono::Utc::now().format("%Y-%m-%d");
     log_dir(cfg).join(format!(
         "{}.{date}.{}",
         log_file_prefix(cfg),
@@ -130,15 +134,21 @@ pub(crate) fn current_log_path(cfg: &LogConfig) -> PathBuf {
 /// Build the daily-rotating appender. Blocking (no `WorkerGuard` to keep
 /// alive), and it re-evaluates its target on every write — which is what lets
 /// the long-lived daemon follow a rotation instead of pinning a dead inode.
-#[cfg(test)]
-fn build_appender(dir: &Path, prefix: &str, suffix: &str) -> RollingFileAppender {
+///
+/// The single builder chain for both production and tests: `init` calls this
+/// directly, so a drift here can't leave the test seam pinned to a stale copy
+/// of what production actually builds.
+fn build_appender(
+    dir: &Path,
+    prefix: &str,
+    suffix: &str,
+) -> Result<RollingFileAppender, InitError> {
     Builder::new()
         .rotation(Rotation::DAILY)
         .filename_prefix(prefix)
         .filename_suffix(suffix)
         .max_log_files(MAX_LOG_FILES)
         .build(dir)
-        .expect("rolling appender builder only fails on an invalid config")
 }
 
 /// Install the two-sink subscriber. Best-effort and infallible: a log
@@ -153,12 +163,7 @@ pub fn init(cfg: &LogConfig, verbose: u8) {
     let (appender, open_warn) = match fs::create_dir_all(&dir)
         .map_err(|e| e.to_string())
         .and_then(|()| {
-            Builder::new()
-                .rotation(Rotation::DAILY)
-                .filename_prefix(log_file_prefix(cfg))
-                .filename_suffix(log_file_suffix(cfg))
-                .max_log_files(MAX_LOG_FILES)
-                .build(&dir)
+            build_appender(&dir, &log_file_prefix(cfg), &log_file_suffix(cfg))
                 .map_err(|e| e.to_string())
         }) {
         Ok(a) => (Some(a), None),
@@ -289,7 +294,7 @@ mod tests {
     fn appender_writes_into_the_configured_dir() {
         use std::io::Write as _;
         let dir = tempdir().unwrap();
-        let mut appender = build_appender(dir.path(), "rustline", "log");
+        let mut appender = build_appender(dir.path(), "rustline", "log").unwrap();
         appender.write_all(b"hello\n").unwrap();
         appender.flush().unwrap();
         let entries: Vec<_> = fs::read_dir(dir.path())
@@ -300,5 +305,44 @@ mod tests {
         assert_eq!(entries.len(), 1, "one log file: {entries:?}");
         assert!(entries[0].starts_with("rustline."), "got {entries:?}");
         assert!(entries[0].ends_with(".log"), "got {entries:?}");
+    }
+
+    /// Round-trips `current_log_path` against the file the appender actually
+    /// creates. This is the test that would have caught Critical 1
+    /// (`current_log_path` computing the date in local time while
+    /// `RollingFileAppender` rotates on a UTC boundary): the two filenames
+    /// only ever disagree when the two clocks land on different calendar
+    /// dates, but nothing short of comparing them directly can pin that they
+    /// must always agree.
+    #[test]
+    fn current_log_path_matches_the_file_the_appender_actually_creates() {
+        use std::io::Write as _;
+        let dir = tempdir().unwrap();
+        let cfg = LogConfig {
+            file: Some(
+                dir.path()
+                    .join("rustline.log")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ..LogConfig::default()
+        };
+
+        let mut appender =
+            build_appender(dir.path(), &log_file_prefix(&cfg), &log_file_suffix(&cfg)).unwrap();
+        appender.write_all(b"hello\n").unwrap();
+        appender.flush().unwrap();
+
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(entries.len(), 1, "one log file: {entries:?}");
+
+        assert_eq!(
+            current_log_path(&cfg).file_name(),
+            entries[0].path().file_name(),
+            "doctor's reported path must name the file the appender wrote"
+        );
     }
 }

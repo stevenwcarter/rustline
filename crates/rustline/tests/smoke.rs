@@ -1427,13 +1427,21 @@ fn isolated_cmd(home: &Path, xdg_data: &Path, xdg_config: &Path) -> Command {
 }
 
 /// Reads the one log file `tracing-appender` rotated into `dir` (named
-/// `rustline.<date>.log`, so a fixed filename can't be asserted here). Each
-/// of these tests runs a single `render`, so exactly one file is expected.
+/// `rustline.<date>.log`, so a fixed filename can't be asserted here). Filtered
+/// to `rustline.`-prefixed entries so an unrelated file dropped into the same
+/// dir by a future change doesn't fail this on an unrelated count mismatch.
+/// Each of these tests runs a single `render`, so exactly one file is
+/// expected.
 fn read_only_log_file(dir: &Path) -> String {
     let mut entries: Vec<_> = fs::read_dir(dir)
         .expect("log dir created")
         .filter_map(Result::ok)
         .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("rustline."))
+        })
         .collect();
     assert_eq!(
         entries.len(),
@@ -1809,8 +1817,11 @@ fn doctor_runs_and_prints_resolved_paths() {
         "resolved plugin dir present: {stdout}"
     );
     assert!(
-        stdout.contains(&expected_log_dir.display().to_string()),
-        "resolved log dir present: {stdout}"
+        stdout.contains(&format!(
+            "log:     {}/rustline.",
+            expected_log_dir.display()
+        )),
+        "log row prints the resolved log path: {stdout}"
     );
     assert!(
         stdout.contains("(daily, 7 kept)"),
