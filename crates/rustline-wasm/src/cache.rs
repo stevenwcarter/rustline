@@ -169,4 +169,68 @@ mod tests {
         assert_eq!(e.body, "hi");
         assert!(e.last_attempt_at.is_empty());
     }
+
+    fn entry_json(fetched_at: &str, body: &str) -> String {
+        serde_json::to_string(&CacheEntry {
+            fetched_at: fetched_at.to_string(),
+            status: 200,
+            body: body.to_string(),
+            last_attempt_at: fetched_at.to_string(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_full_cache_evicts_and_the_write_then_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let cap = 1_200;
+        // Fill the namespace past the cap with distinct keys.
+        for i in 0..10 {
+            let p = cache_path(dir.path(), HTTP_NAMESPACE, &format!("https://x/{i}"));
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, entry_json("2026-07-20T12:00:00-04:00", &"z".repeat(150))).unwrap();
+        }
+        let fresh = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/new");
+        // Before: over cap, so this write would be refused forever.
+        assert!(crate::state::dir_size(dir.path()) > cap);
+        write_entry(dir.path(), &fresh, &entry_json("2026-07-26T12:00:00-04:00", "new"), cap)
+            .expect("eviction makes room");
+        assert!(read_entry(&fresh).is_some(), "the new entry landed");
+    }
+
+    #[test]
+    fn eviction_prefers_removing_the_oldest_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let ns = dir.path().join(HTTP_NAMESPACE);
+        std::fs::create_dir_all(&ns).unwrap();
+        let old = ns.join("old.json");
+        let new = ns.join("new.json");
+        std::fs::write(&old, entry_json("2020-01-01T00:00:00-00:00", &"z".repeat(400))).unwrap();
+        std::fs::write(&new, entry_json("2026-07-26T12:00:00-04:00", &"z".repeat(400))).unwrap();
+        let freed = evict_namespace(&ns, 500);
+        assert!(freed > 0, "something was evicted");
+        assert!(!old.exists(), "the oldest entry goes first");
+        assert!(new.exists(), "the newest entry is retained");
+    }
+
+    #[test]
+    fn a_cap_too_small_to_ever_fit_still_errors_without_looping() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/y");
+        let big = "z".repeat(5_000);
+        assert!(write_entry(dir.path(), &p, &big, 10).is_err());
+    }
+
+    #[test]
+    fn eviction_never_touches_files_outside_the_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let sibling = dir.path().join("counter-state.json");
+        std::fs::write(&sibling, "keep me").unwrap();
+        let ns = dir.path().join(HTTP_NAMESPACE);
+        std::fs::create_dir_all(&ns).unwrap();
+        std::fs::write(ns.join("a.json"), entry_json("2020-01-01T00:00:00-00:00", &"z".repeat(400)))
+            .unwrap();
+        evict_namespace(&ns, 0);
+        assert!(sibling.exists(), "a sibling state file is not cache");
+    }
 }
