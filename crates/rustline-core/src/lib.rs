@@ -3,6 +3,7 @@ pub mod ansi;
 pub mod assemble;
 pub mod config;
 pub mod context;
+pub mod diag;
 pub mod render;
 pub mod segment;
 pub mod themes;

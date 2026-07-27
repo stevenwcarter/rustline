@@ -29,6 +29,7 @@ mod throughput;
 mod tmux_conf;
 mod toggles;
 mod uptime;
+mod warn_once;
 mod widget_cmd;
 mod widget_tui;
 mod windows;
@@ -147,7 +148,9 @@ pub(crate) fn resolve_base_theme(name: &str) -> Option<Theme> {
 pub(crate) fn resolve_theme(cfg: &Config) -> Theme {
     let base = match cfg.theme.base.as_deref() {
         Some(name) => resolve_base_theme(name).unwrap_or_else(|| {
-            tracing::warn!("unknown theme base {name:?}; using default");
+            rustline_core::diag::warn_once(&format!("theme-base:{name}"), || {
+                tracing::warn!("unknown theme base {name:?}; using default");
+            });
             Theme::default()
         }),
         None => Theme::default(),
@@ -179,8 +182,14 @@ fn main() {
     // warning until the subscriber exists (else it would be dropped).
     let (cfg, load_warning) = Config::load_reporting(&cfg_path);
     logging::init(&cfg.log, cli.verbose);
+    // Dedup the static-misconfiguration warns across render processes. Must
+    // follow `logging::init` (the hook's own failures would otherwise be
+    // dropped) and precede every warn site below.
+    warn_once::install(&cfg_path);
     if let Some(msg) = load_warning {
-        tracing::warn!("{msg}");
+        rustline_core::diag::warn_once(&format!("config-load:{msg}"), || {
+            tracing::warn!("{msg}");
+        });
     }
     let theme = resolve_theme(&cfg);
 

@@ -30,8 +30,10 @@ impl Widget for DateTime {
         let formatted = match zone.and_then(|z| z.parse::<chrono_tz::Tz>().ok()) {
             Some(tz) => ctx.now.with_timezone(&tz).format(fmt).to_string(),
             None => {
-                if zone.is_some_and(|z| !z.is_empty()) {
-                    tracing::warn!(zone, "unknown timezone; using Local");
+                if let Some(z) = zone.filter(|z| !z.is_empty()) {
+                    crate::diag::warn_once(&format!("timezone:{z}"), || {
+                        tracing::warn!(zone, "unknown timezone; using Local");
+                    });
                 }
                 ctx.now.format(fmt).to_string()
             }

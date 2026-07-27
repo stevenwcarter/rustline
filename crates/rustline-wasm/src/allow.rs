@@ -53,7 +53,9 @@ impl AllowSet {
             match Pattern::compile(entry) {
                 Ok(p) => patterns.push(p),
                 Err(error) => {
-                    tracing::warn!(pattern = %entry, %error, "invalid allow pattern, skipping");
+                    rustline_core::diag::warn_once(&format!("allow-pattern:{entry}"), || {
+                        tracing::warn!(pattern = %entry, %error, "invalid allow pattern, skipping");
+                    });
                 }
             }
         }

@@ -379,18 +379,24 @@ impl Registry {
         // to say where a widget actually came from.
         for (name, table) in &cfg.instances {
             let Some(kind) = Config::instance_kind(table) else {
-                tracing::warn!(instance = %name, "instance missing `kind`, skipping");
+                crate::diag::warn_once(&format!("instance-no-kind:{name}"), || {
+                    tracing::warn!(instance = %name, "instance missing `kind`, skipping");
+                });
                 continue;
             };
             if registry.contains(name) {
-                tracing::warn!(
-                    instance = %name,
-                    "instance name collides with an existing widget, skipping"
-                );
+                crate::diag::warn_once(&format!("instance-collide:{name}"), || {
+                    tracing::warn!(
+                        instance = %name,
+                        "instance name collides with an existing widget, skipping"
+                    );
+                });
                 continue;
             }
             if name.len() > RANGE_NAME_MAX_BYTES {
-                tracing::warn!(instance = %name, "instance name > 15 bytes; not click-toggleable");
+                crate::diag::warn_once(&format!("instance-long-name:{name}"), || {
+                    tracing::warn!(instance = %name, "instance name > 15 bytes; not click-toggleable");
+                });
             }
             let t = table.clone();
             let summary = format!("{kind} instance");
@@ -492,7 +498,9 @@ impl Registry {
                     );
                 }
                 other => {
-                    tracing::warn!(instance = %name, kind = %other, "unknown instance kind, skipping");
+                    crate::diag::warn_once(&format!("instance-kind:{name}:{other}"), || {
+                        tracing::warn!(instance = %name, kind = %other, "unknown instance kind, skipping");
+                    });
                 }
             }
         }

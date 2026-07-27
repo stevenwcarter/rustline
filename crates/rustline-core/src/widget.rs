@@ -141,7 +141,9 @@ impl Registry {
             .filter_map(|name| {
                 let widget = self.build(name);
                 if widget.is_none() {
-                    tracing::warn!(widget = %name, "unknown widget, skipping");
+                    crate::diag::warn_once(&format!("unknown-widget:{name}"), || {
+                        tracing::warn!(widget = %name, "unknown widget, skipping");
+                    });
                 }
                 widget.map(|w| (name.clone(), w))
             })

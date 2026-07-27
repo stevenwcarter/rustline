@@ -109,12 +109,19 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
             continue;
         }
         if reg.contains(stem) {
-            tracing::warn!(plugin = %stem, "plugin name collides with a built-in, skipping");
+            rustline_core::diag::warn_once(
+                &format!("plugin-skip:builtin-collision:{stem}"),
+                || {
+                    tracing::warn!(plugin = %stem, "plugin name collides with a built-in, skipping");
+                },
+            );
             continue;
         }
         let pc = cfg.plugins.get(stem).cloned().unwrap_or_default();
         let Ok(wasm) = std::fs::read(&path) else {
-            tracing::warn!(plugin = %stem, "failed to read plugin file, skipping");
+            rustline_core::diag::warn_once(&format!("plugin-skip:read-failed:{stem}"), || {
+                tracing::warn!(plugin = %stem, "failed to read plugin file, skipping");
+            });
             continue;
         };
         // W19: verify the recorded digest before building any capability object
@@ -125,19 +132,26 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
         match integrity::verify_checksum(pc.checksum.as_deref(), &wasm) {
             integrity::ChecksumVerdict::NotRecorded | integrity::ChecksumVerdict::Match => {}
             integrity::ChecksumVerdict::Mismatch { expected, actual } => {
-                tracing::warn!(
-                    plugin = %stem,
-                    %expected,
-                    %actual,
-                    "plugin checksum mismatch, skipping"
-                );
+                rustline_core::diag::warn_once(&format!("plugin-skip:checksum:{stem}"), || {
+                    tracing::warn!(
+                        plugin = %stem,
+                        %expected,
+                        %actual,
+                        "plugin checksum mismatch, skipping"
+                    );
+                });
                 continue;
             }
             integrity::ChecksumVerdict::Malformed { recorded } => {
-                tracing::warn!(
-                    plugin = %stem,
-                    %recorded,
-                    "recorded plugin checksum is not a valid sha256 digest, skipping"
+                rustline_core::diag::warn_once(
+                    &format!("plugin-skip:checksum-malformed:{stem}"),
+                    || {
+                        tracing::warn!(
+                            plugin = %stem,
+                            %recorded,
+                            "recorded plugin checksum is not a valid sha256 digest, skipping"
+                        );
+                    },
                 );
                 continue;
             }
@@ -149,18 +163,30 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
         let mut plugin = match host::build_plugin(&wasm, ctx) {
             Ok(p) => p,
             Err(error) => {
-                tracing::warn!(plugin = %stem, %error, "failed to instantiate plugin, skipping");
+                rustline_core::diag::warn_once(&format!("plugin-skip:instantiate:{stem}"), || {
+                    tracing::warn!(plugin = %stem, %error, "failed to instantiate plugin, skipping");
+                });
                 continue;
             }
         };
         match plugin.call::<&str, &str>("name", "") {
             Ok(name) if name == stem => {}
             Ok(name) => {
-                tracing::warn!(plugin = %stem, exported = %name, "plugin name mismatch, skipping");
+                rustline_core::diag::warn_once(
+                    &format!("plugin-skip:name-mismatch:{stem}"),
+                    || {
+                        tracing::warn!(plugin = %stem, exported = %name, "plugin name mismatch, skipping");
+                    },
+                );
                 continue;
             }
             Err(error) => {
-                tracing::warn!(plugin = %stem, %error, "plugin missing name export, skipping");
+                rustline_core::diag::warn_once(
+                    &format!("plugin-skip:no-name-export:{stem}"),
+                    || {
+                        tracing::warn!(plugin = %stem, %error, "plugin missing name export, skipping");
+                    },
+                );
                 continue;
             }
         }
@@ -179,17 +205,21 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
                 tracing::info!(plugin = %stem, "plugin has no abi_version export, registering as legacy");
             }
             AbiDecision::Skip => {
-                tracing::warn!(
-                    plugin = %stem,
-                    host = ABI_VERSION,
-                    guest = ?guest_abi_version,
-                    "plugin ABI version mismatch, skipping"
-                );
+                rustline_core::diag::warn_once(&format!("plugin-skip:abi-mismatch:{stem}"), || {
+                    tracing::warn!(
+                        plugin = %stem,
+                        host = ABI_VERSION,
+                        guest = ?guest_abi_version,
+                        "plugin ABI version mismatch, skipping"
+                    );
+                });
                 continue;
             }
         }
         if stem.len() > RANGE_NAME_MAX_BYTES {
-            tracing::warn!(plugin = %stem, "plugin name > 15 bytes; not click-toggleable");
+            rustline_core::diag::warn_once(&format!("plugin-skip:long-name:{stem}"), || {
+                tracing::warn!(plugin = %stem, "plugin name > 15 bytes; not click-toggleable");
+            });
         }
         let widget = host::WasmWidget::new(plugin, options, stem);
         let shared = Arc::new(widget);
