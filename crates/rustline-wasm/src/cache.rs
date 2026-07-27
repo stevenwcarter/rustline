@@ -264,6 +264,43 @@ mod tests {
     }
 
     #[test]
+    fn write_entry_reports_the_new_total_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/y");
+        let content = entry_json("2026-07-26T12:00:00-04:00", "hi");
+        let total = write_entry(dir.path(), &p, &content, 0, 10_000).unwrap();
+        assert_eq!(total, content.len() as u64);
+        assert_eq!(total, crate::state::dir_size(dir.path()));
+    }
+
+    #[test]
+    fn write_entry_after_eviction_reports_a_re_measured_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let cap = 1_200;
+        for i in 0..10 {
+            let p = cache_path(dir.path(), HTTP_NAMESPACE, &format!("https://x/{i}"));
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, entry_json("2026-07-20T12:00:00-04:00", &"z".repeat(150))).unwrap();
+        }
+        let fresh = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/new");
+        let before = crate::state::dir_size(dir.path());
+        let total = write_entry(
+            dir.path(),
+            &fresh,
+            &entry_json("2026-07-26T12:00:00-04:00", "new"),
+            before,
+            cap,
+        )
+        .expect("eviction makes room");
+        assert_eq!(
+            total,
+            crate::state::dir_size(dir.path()),
+            "reported total is truthful"
+        );
+        assert!(total <= cap);
+    }
+
+    #[test]
     fn an_entry_without_last_attempt_at_still_deserializes() {
         // Entries written by an older build must keep working (wire-type
         // discipline: additive, defaulted fields only).

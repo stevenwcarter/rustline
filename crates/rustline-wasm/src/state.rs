@@ -106,10 +106,19 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let target = d.path().join("f");
         fs::write(&target, b"aaaa").unwrap(); // 4 bytes existing
+        let current = dir_size(d.path());
         // replacing 4 bytes with 6 -> projected 6 <= cap 8 OK
-        assert!(check_cap(d.path(), &target, 6, 8).is_ok());
+        assert!(check_cap(current, &target, 6, 8).is_ok());
         // a brand-new 10-byte file on top of the existing 4 -> 14 > cap 8
         let other = d.path().join("g");
-        assert!(check_cap(d.path(), &other, 10, 8).is_err());
+        assert!(check_cap(current, &other, 10, 8).is_err());
+    }
+
+    #[test]
+    fn check_cap_is_pure_and_does_not_walk() {
+        // A directory that does not exist has no size to walk; the caller
+        // supplies the current size, so the check still decides correctly.
+        assert!(check_cap(0, Path::new("/no/such/f"), 5, 10).is_ok());
+        assert!(check_cap(9, Path::new("/no/such/f"), 5, 10).is_err());
     }
 }

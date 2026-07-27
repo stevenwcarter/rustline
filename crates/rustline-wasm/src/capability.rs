@@ -130,4 +130,27 @@ mod tests {
         assert!(ctx.allowed_commands.allows("playerctl metadata --format x"));
         assert!(!ctx.allowed_commands.allows("playerctl play"));
     }
+
+    #[test]
+    fn state_size_is_seeded_once_then_memoized() {
+        let d = tempfile::tempdir().unwrap();
+        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), d.path().to_path_buf());
+        std::fs::create_dir_all(ctx.state_dir()).unwrap();
+        std::fs::write(ctx.state_dir().join("a"), b"12345").unwrap();
+        assert_eq!(ctx.state_size(), 5);
+        // A file added behind the memo's back is NOT observed: that is the
+        // point — the walk happens once, not once per write.
+        std::fs::write(ctx.state_dir().join("b"), b"12345").unwrap();
+        assert_eq!(ctx.state_size(), 5, "memoized, not re-walked");
+        ctx.invalidate_state_size();
+        assert_eq!(ctx.state_size(), 10, "invalidation forces a fresh walk");
+    }
+
+    #[test]
+    fn set_state_size_updates_the_memo() {
+        let d = tempfile::tempdir().unwrap();
+        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), d.path().to_path_buf());
+        ctx.set_state_size(42);
+        assert_eq!(ctx.state_size(), 42);
+    }
 }
