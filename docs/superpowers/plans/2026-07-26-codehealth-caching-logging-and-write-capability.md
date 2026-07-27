@@ -126,7 +126,7 @@ Replace the `open_log_rotates_when_oversized` and `open_log_keeps_small_file` te
     fn appender_writes_into_the_configured_dir() {
         use std::io::Write as _;
         let dir = tempdir().unwrap();
-        let mut appender = build_appender(dir.path(), "rustline", "log");
+        let mut appender = build_appender(dir.path(), "rustline", "log").unwrap();
         appender.write_all(b"hello\n").unwrap();
         appender.flush().unwrap();
         let entries: Vec<_> = fs::read_dir(dir.path())
@@ -209,18 +209,21 @@ pub(crate) fn current_log_path(cfg: &LogConfig) -> PathBuf {
 /// Build the daily-rotating appender. Blocking (no `WorkerGuard` to keep
 /// alive), and it re-evaluates its target on every write — which is what lets
 /// the long-lived daemon follow a rotation instead of pinning a dead inode.
-fn build_appender(dir: &Path, prefix: &str, suffix: &str) -> RollingFileAppender {
+fn build_appender(
+    dir: &Path,
+    prefix: &str,
+    suffix: &str,
+) -> Result<RollingFileAppender, tracing_appender::rolling::InitError> {
     Builder::new()
         .rotation(Rotation::DAILY)
         .filename_prefix(prefix)
         .filename_suffix(suffix)
         .max_log_files(MAX_LOG_FILES)
         .build(dir)
-        .expect("rolling appender builder only fails on an invalid config")
 }
 ```
 
-`build(dir)` returns `Result<RollingFileAppender, InitError>` and errors only on a self-inconsistent builder config, which this one is not — but `init` must stay infallible, so wrap the call there rather than letting the `expect` reach production:
+**There must be exactly ONE builder chain.** `init` calls `build_appender` — it does not inline a second copy. A `#[cfg(test)]`-only helper that duplicates production's chain is worse than no helper: the test then passes against a stale replica while `init`'s real chain drifts (a dropped `max_log_files`, a changed `Rotation`) undetected. Returning the `Result` also keeps the panic out of the binary entirely, so `init` stays infallible (N2) without an `expect` anywhere:
 
 ```rust
 pub fn init(cfg: &LogConfig, verbose: u8) {
@@ -228,17 +231,12 @@ pub fn init(cfg: &LogConfig, verbose: u8) {
     let (stderr_level, stderr_warn) = resolve_stderr_level(&cfg.stderr_level);
     let dir = log_dir(cfg);
 
-    let (appender, open_warn) = match fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(
-        |()| {
-            Builder::new()
-                .rotation(Rotation::DAILY)
-                .filename_prefix(log_file_prefix(cfg))
-                .filename_suffix(log_file_suffix(cfg))
-                .max_log_files(MAX_LOG_FILES)
-                .build(&dir)
+    let (appender, open_warn) = match fs::create_dir_all(&dir)
+        .map_err(|e| e.to_string())
+        .and_then(|()| {
+            build_appender(&dir, &log_file_prefix(cfg), &log_file_suffix(cfg))
                 .map_err(|e| e.to_string())
-        },
-    ) {
+        }) {
         Ok(a) => (Some(a), None),
         Err(e) => (
             None,
@@ -274,7 +272,7 @@ pub fn init(cfg: &LogConfig, verbose: u8) {
 }
 ```
 
-Keep `build_appender` as the test seam (used by `appender_writes_into_the_configured_dir`); mark it `#[cfg(test)]` if clippy flags it as dead code in a non-test build.
+`build_appender` is both the production path and the test seam (used by `appender_writes_into_the_configured_dir`). Do **not** gate it `#[cfg(test)]` — it is called from `init`, so it is live code and clippy will not flag it.
 
 - [ ] **Step 5: Update the two consumers**
 
@@ -2622,8 +2620,12 @@ Sync the same surfaces at the README's level of detail: the plugin capability ta
 
 - [ ] **Step 3: Verify no stale claims remain**
 
-Run: `grep -n "MAX_LOG_BYTES\|5 MiB\|rustline\.log\.1\|allowed_paths" CLAUDE.md README.md`
+Run: `grep -n "MAX_LOG_BYTES\|5 MiB\|rustline\.log\.1\|rustline\.log\b\|open_log\|log_path\|allowed_paths" CLAUDE.md README.md`
 Expected: no surviving claim that `allowed_paths` grants write, and no surviving 5 MiB / `.1` rotation claim.
+
+Two known stragglers the `[log]` config reference alone will not catch — check both explicitly:
+- **`CLAUDE.md:1384`** names `open_log` and `log_path` in the module map. Both functions were deleted in Task 1; the replacements are `log_dir`, `log_file_prefix`, `log_file_suffix`, `current_log_path`, and `build_appender`.
+- Anywhere claiming the log lives at a single stable `rustline.log`.
 
 - [ ] **Step 4: Commit**
 
