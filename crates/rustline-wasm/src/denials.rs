@@ -57,7 +57,7 @@ impl DenialObserver for FileDenialObserver {
                 %plugin,
                 ?kind,
                 %target,
-                "capability denied; see `rustline plugin denials`"
+                "capability denied; see `rustline plugin denials {plugin}`"
             );
         }
     }
@@ -149,13 +149,23 @@ mod tests {
     //
     // Every test that calls `observer.observe(...)` — not just the ones
     // asserting on log content — routes the call through `capture()`, even
-    // when the returned events are discarded. `tracing` caches a callsite's
-    // "interest" globally per process the first time it fires; if any test
-    // hit `observe`'s `tracing::warn!` while the ambient (non-`with_default`)
-    // dispatcher was active, that would cache the callsite as uninteresting
-    // forever, and `observe_logs_exactly_once_for_a_repeated_denial` below
-    // would then see zero events under `cargo test --workspace` even though
-    // it passes in isolation — exactly the failure mode this avoids.
+    // when the returned events are discarded. A callsite's first-ever firing
+    // registers its cached "interest" against whatever dispatcher is active
+    // at that moment; that registration races any concurrent `Dispatch::new`
+    // (which `capture()`'s `with_default` triggers) that's rebuilding cached
+    // interest for the same callsite. A firing under the ambient
+    // (non-`with_default`) dispatcher can lose that race and leave the
+    // callsite cached as uninteresting even while a real subscriber is
+    // installed elsewhere — a registration/rebuild race, not a one-time,
+    // permanent poisoning. This is not hypothetical: the identical shape
+    // (an unguarded firing alongside a `capture()`-guarded assertion on the
+    // same callsite) was measured on the analogous `rustline-core` pair —
+    // `instance_opts_falls_back_and_reports_a_type_error` firing outside
+    // `capture()` — at 57/600 filtered runs and 2/300 whole-binary runs
+    // failing (see that test's comment in
+    // `crates/rustline-core/src/widgets/mod.rs`). Without the wrapping here,
+    // `observe_logs_exactly_once_for_a_repeated_denial` below would flake the
+    // same way under `cargo test --workspace`.
     use std::sync::{Arc, Mutex};
 
     use tracing::field::{Field, Visit};
@@ -353,7 +363,7 @@ mod tests {
         assert_eq!(field(fields, "target"), Some("https://evil.example/"));
         assert_eq!(
             field(fields, "message"),
-            Some("capability denied; see `rustline plugin denials`")
+            Some("capability denied; see `rustline plugin denials weather`")
         );
     }
 

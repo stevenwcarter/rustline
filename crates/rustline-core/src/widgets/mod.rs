@@ -1002,8 +1002,19 @@ mod tests {
     #[test]
     fn instance_opts_falls_back_and_reports_a_type_error() {
         let v: toml::Value = toml::from_str("spark_width = \"8\"").unwrap();
-        let got: CpuOpts = instance_opts("cpu_alt", "cpu", v);
-        assert_eq!(got.spark_width, CpuOpts::default().spark_width);
+        // Fired under `capture` — discarding the returned events, since this
+        // test only pins the fallback value — rather than under the ambient
+        // dispatcher: `instance_opts::<CpuOpts>`'s `tracing::warn!` shares a
+        // single process-wide callsite with the identical call in
+        // `instance_opts_reports_the_type_error_via_warn_once` below. Firing
+        // it here with no subscriber installed would race that other test's
+        // `Dispatch::new` (from its own `capture` call) to register the
+        // callsite's cached interest; see `capture`'s doc comment for the
+        // measured failure rate this avoids.
+        capture(|| {
+            let got: CpuOpts = instance_opts("cpu_alt", "cpu", v);
+            assert_eq!(got.spark_width, CpuOpts::default().spark_width);
+        });
     }
 
     #[test]
@@ -1113,6 +1124,19 @@ mod tests {
         fn exit(&self, _span: &Id) {}
     }
 
+    /// Every call to `instance_opts` in this module's tests must run inside
+    /// `capture`, even when the returned events are discarded (as in
+    /// `instance_opts_falls_back_and_reports_a_type_error`). `tracing`
+    /// registers a callsite's cached interest once per process, and that
+    /// registration races a concurrent `Dispatch::new` (which `capture`
+    /// triggers via `with_default`): firing `instance_opts::<CpuOpts>`'s
+    /// `tracing::warn!` under the ambient no-op dispatcher can lose that race
+    /// and leave the callsite cached as uninteresting, so a *later* call
+    /// under a real subscriber sees nothing. Measured on this callsite before
+    /// this fix: ~9.5% of filtered `instance_opts` runs and ~0.7% of whole
+    /// `rustline-core` binary runs failed under `cargo test`'s default
+    /// multi-threaded harness (57/600 and 2/300 respectively, launched
+    /// 16-way concurrently to reproduce the race reliably).
     fn capture(f: impl FnOnce()) -> Vec<CapturedEvent> {
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscriber = RecordingSubscriber(events.clone());
