@@ -90,6 +90,10 @@ impl DaemonState {
         // `plugin_dir` isn't derived from the config, so it survives a reload;
         // clone it out before the assignment consumes `self`.
         *self = DaemonState::build(config_path, self.plugin_dir.clone());
+        // The daemon is long-lived, so this is one line per config edit, not
+        // per render — and it is the only confirmation a user gets that a warm
+        // daemon actually picked up their change.
+        tracing::info!(config = %config_path.display(), "config changed; rebuilt warm state");
         true
     }
 

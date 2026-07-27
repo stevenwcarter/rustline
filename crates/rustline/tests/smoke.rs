@@ -2527,6 +2527,172 @@ fn daemon_status_with_no_daemon_running_exits_nonzero() {
     );
 }
 
+/// B27: a stale daemon socket — a file at the socket path that `exists()`
+/// accepts but `connect` refuses — is the actionable case a user must be
+/// told about, since it costs a connect attempt on every render. This spawns
+/// the real binary (mirrors `warning_lands_in_log_file_and_not_stderr_at_default`'s
+/// pattern) rather than asserting on `try_render_at`'s return value, because
+/// the whole point of the Step 3 refactor is *which* level each failure logs
+/// at — a distinction only a real subscriber, not a `None` return, can prove.
+#[test]
+fn daemon_stale_socket_falls_back_and_warns_in_log_not_stderr() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    let runtime = data.join("runtime").join("rustline");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::write(runtime.join("daemon.sock"), b"not a socket").unwrap();
+
+    let out = isolated_cmd(&home, &data, &config)
+        .args([
+            "render",
+            "right",
+            "--session",
+            "0",
+            "--window",
+            "0",
+            "--pane",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "still falls back to an in-process render; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Default stderr level is ERROR, so a WARN must NOT surface on stderr.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("daemon socket"),
+        "stale-socket warning must not hit stderr at default level; got: {stderr}"
+    );
+
+    // The file sink (INFO) captured the WARN.
+    let log = read_only_log_file(&data.join("rustline"));
+    assert!(
+        log.contains("daemon socket exists but refuses connections"),
+        "stale-socket warning captured in log file; got: {log}"
+    );
+}
+
+/// The stale-socket WARN above is deliberately deduped (`warn_once`) because
+/// it is persistent — a dead daemon's socket file sits there across every
+/// tick. The `debug!` diagnostics for the *other* failure branches are the
+/// opposite: detail for an intermittent failure, meant for `-vvv`, and must
+/// fire on every render or `-vvv` becomes useless for exactly the case it
+/// exists to debug (see the module doc). This pins that a real daemon that
+/// accepts a connection but never answers — triggering the client's read
+/// timeout, not the connect-refused WARN branch — logs the `debug!` diagnostic
+/// on *both* of two renders, not just the first.
+#[test]
+fn daemon_debug_diagnostics_fire_on_every_render_not_once_per_generation() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    let runtime = data.join("runtime").join("rustline");
+    fs::create_dir_all(&runtime).unwrap();
+    let sock = runtime.join("daemon.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+
+    // Accept and stall past the client's 250ms read timeout, twice — once per
+    // render below. No need to speak the wire protocol at all: it's the
+    // client's `read_frame` timing out that must log at `debug`.
+    let handle = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (_stream, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+    });
+
+    let render = || {
+        let out = isolated_cmd(&home, &data, &config)
+            .args([
+                "render",
+                "right",
+                "--session",
+                "0",
+                "--window",
+                "0",
+                "--pane",
+                "0",
+                "-vvv",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "still falls back to an in-process render; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    render();
+    render();
+    handle.join().unwrap();
+
+    let log = read_only_log_file(&data.join("rustline"));
+    assert_eq!(
+        log.matches("daemon response read failed or timed out")
+            .count(),
+        2,
+        "the debug diagnostic must fire on every render, not be deduped like \
+         the stale-socket WARN; got: {log}"
+    );
+}
+
+/// The flip side of the stale-socket case above: a daemon that was simply
+/// never installed — the default for every user not opting in, and the path
+/// every other smoke test in this file already exercises via
+/// `isolated_cmd`'s empty `XDG_RUNTIME_DIR` — must never put a line in the
+/// log. Asserted explicitly so a future change that logs on this path
+/// (mutating the "actionable vs. not" distinction B27 exists to draw) fails
+/// a test instead of shipping a log line on every tick for every user not
+/// running the daemon.
+#[test]
+fn daemon_missing_socket_leaves_no_daemon_diagnostics_in_log() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+
+    let out = isolated_cmd(&home, &data, &config)
+        .args([
+            "render",
+            "right",
+            "--session",
+            "0",
+            "--window",
+            "0",
+            "--pane",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "render exited 0");
+
+    // The log dir/file may or may not exist depending on whether anything
+    // else logged at file-sink level (INFO); either way, nothing in it may
+    // mention the daemon.
+    if let Ok(entries) = fs::read_dir(data.join("rustline")) {
+        for path in entries.filter_map(Result::ok).map(|e| e.path()) {
+            let text = fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.to_ascii_lowercase().contains("daemon"),
+                "no daemon socket installed -> no daemon diagnostics in the log; got: {text}"
+            );
+        }
+    }
+}
+
 /// `rustline widget …` — enable/disable/move against the `[layout]` arrays,
 /// exercising `widget_cmd.rs`'s `toml_edit`-backed writer end to end through
 /// the real binary (Finding 2: previously pinned only by a manual transcript).
