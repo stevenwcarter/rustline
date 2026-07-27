@@ -214,13 +214,10 @@ fn store_snapshot(state_dir: &Path, snap: &CpuSnapshot) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let tmp = path.with_extension("tmp");
-    if let Err(error) = std::fs::write(&tmp, serialize_snapshot(snap)) {
-        tracing::warn!(%error, "failed to write cpu-sample temp file");
-        return;
-    }
-    if let Err(error) = std::fs::rename(&tmp, &path) {
-        tracing::warn!(%error, "failed to rename cpu-sample file");
+    if let Err(error) =
+        rustline_core::atomic_write::write_atomic(&path, serialize_snapshot(snap).as_bytes())
+    {
+        tracing::warn!(%error, "failed to write cpu-sample file");
     }
 }
 

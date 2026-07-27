@@ -200,7 +200,7 @@ pub fn write_entry(state_dir: &Path, path: &Path, content: &str, cap: u64) -> Re
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    std::fs::write(path, content).map_err(|e| e.to_string())
+    rustline_core::atomic_write::write_atomic(path, content.as_bytes()).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

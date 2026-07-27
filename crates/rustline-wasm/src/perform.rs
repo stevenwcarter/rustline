@@ -435,7 +435,7 @@ pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -
             error: e.to_string(),
         };
     }
-    match std::fs::write(&full, contents.as_bytes()) {
+    match rustline_core::atomic_write::write_atomic(&full, contents.as_bytes()) {
         Ok(()) => WriteResult {
             ok: true,
             error: String::new(),

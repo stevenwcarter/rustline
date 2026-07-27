@@ -1,6 +1,7 @@
 //! rustline-core: pure, front-end-agnostic status line rendering.
 pub mod ansi;
 pub mod assemble;
+pub mod atomic_write;
 pub mod config;
 pub mod context;
 pub mod diag;

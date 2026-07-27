@@ -32,13 +32,8 @@ pub fn write_sample(state_dir: &Path, name: &str, contents: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let tmp = path.with_extension("tmp");
-    if let Err(error) = std::fs::write(&tmp, contents) {
-        tracing::warn!(%error, %name, "failed to write sample-store temp file");
-        return;
-    }
-    if let Err(error) = std::fs::rename(&tmp, &path) {
-        tracing::warn!(%error, %name, "failed to rename sample-store file");
+    if let Err(error) = rustline_core::atomic_write::write_atomic(&path, contents.as_bytes()) {
+        tracing::warn!(%error, %name, "failed to write sample-store file");
     }
 }
 

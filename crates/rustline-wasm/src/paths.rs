@@ -76,9 +76,7 @@ pub fn ensure_wasmtime_cache_config(root: &Path) -> Option<PathBuf> {
     if std::fs::read_to_string(&config_path).ok().as_deref() == Some(body.as_str()) {
         return Some(config_path);
     }
-    let tmp = config_path.with_extension("tmp");
-    std::fs::write(&tmp, &body).ok()?;
-    std::fs::rename(&tmp, &config_path).ok()?;
+    rustline_core::atomic_write::write_atomic(&config_path, body.as_bytes()).ok()?;
     Some(config_path)
 }
 
