@@ -524,11 +524,11 @@ these shared types, not a design shortcut. Keep them serializable.
   The WASM wire types, re-exported by `rustline-core`.
 
 `rustline-wasm`:
-- `allow.rs` — `AllowSet`/`Pattern`: each `allowed_urls`/`allowed_paths` entry
-  is a glob by default or a regex when prefixed `re:`; deny-by-default (empty
-  set matches nothing); malformed patterns are logged and skipped.
-  `allowed_commands` (the exec capability's allowlist) compiles through this
-  same `AllowSet`, unchanged.
+- `allow.rs` — `AllowSet`/`Pattern`: each `allowed_urls`/`allowed_paths`/
+  `allowed_write_paths` entry is a glob by default or a regex when prefixed
+  `re:`; deny-by-default (empty set matches nothing); malformed patterns are
+  logged and skipped. `allowed_commands` (the exec capability's allowlist)
+  compiles through this same `AllowSet`, unchanged.
 - `argv.rs` — `canonical_argv(program, args) -> String`, the exec
   capability's single **matching key** an `allowed_commands` pattern is checked
   against — never executed, since the host always spawns `program` + `args`
@@ -538,8 +538,15 @@ these shared types, not a design shortcut. Keep them serializable.
   `["log", "--author=a b"]` vs `["log", "--author=a", "b"]`) can never collapse
   onto the same canonical string and silently share a grant.
 - `state.rs` — `sanitize_relpath` (rejects absolute/`..` paths for state I/O),
-  `normalize_abs` (rejects `..` for arbitrary-file I/O), `dir_size`/`check_cap`
-  (state-dir quota accounting via `walkdir`).
+  `normalize_abs` (rejects `..` for arbitrary-file I/O), `resolve_for_allowlist`
+  (the symlink gate for arbitrary-file I/O, consulted before either read/write
+  allowlist: by default denies outright on any symlink path component; when
+  the plugin's `resolve_symlinks` is set, canonicalizes first — falling back
+  to canonicalizing the parent for a not-yet-existing write target — and
+  matches the allowlist against the *resolved* location, hard-denying rather
+  than falling through if canonicalization fails; see the Config section
+  below), and `dir_size`/`check_cap` (the quota primitives — `dir_size` is no
+  longer walked per write; see `capability.rs`'s `state_size` memo below).
 - `paths.rs` — `expand_tilde`, `data_root`, `state_root`, `default_plugin_dir`
   (all under `$XDG_DATA_HOME/rustline`, falling back to `$HOME/.local/share/rustline`),
   plus `wasmtime_cache_config_path`/`ensure_wasmtime_cache_config` (W43): lazily
@@ -558,19 +565,40 @@ these shared types, not a design shortcut. Keep them serializable.
   `rl_exec_cached`) and are re-exported here, so existing `crate::abi::HttpResult`
   paths keep resolving (the same precedent as `rustline_core::segment`'s
   `Segment` re-export).
-- `cache.rs` — pure HTTP-response-cache helpers: FNV-1a URL→path, RFC3339
-  freshness (`age_secs`/`is_fresh`), quota-bounded `read_entry`/`write_entry`.
-  `cache_path(state_dir, namespace, key)` now takes a `namespace` argument —
+- `cache.rs` — pure helpers shared by both TTL caches: FNV-1a URL/argv→path,
+  RFC3339 freshness (`age_secs`/`is_fresh`), quota-bounded `read_entry`/
+  `write_entry`. `CacheEntry` carries `last_attempt_at` (when a refresh was
+  last *tried*, success or not) alongside `fetched_at` (when one last
+  *succeeded*) — without it a dead upstream would be retried on every single
+  render forever; `is_fresh` now backs that entry off like a normal fresh hit
+  until the TTL window elapses, so a failing endpoint is retried at most once
+  per TTL rather than every render. `write_entry` no longer wedges once its
+  namespace hits quota: `evict_namespace` deletes entries oldest-`fetched_at`-
+  first (a file that fails to parse sorts as oldest) until the namespace fits,
+  and `write_entry` calls it only after `check_cap` first refuses the write —
+  so a full state dir self-heals instead of failing every write from then on.
+  `cache_path(state_dir, namespace, key)` takes a `namespace` argument —
   `HTTP_NAMESPACE`/`EXEC_NAMESPACE` — so the HTTP-response cache and the exec
   capability's own TTL cache (see `perform.rs` below) live in separate
-  `<state_dir>/<namespace>/` subdirectories and can never collide even if a
-  URL and a command line happen to hash to the same digest.
-- `capability.rs` — `CapabilityCtx`: one plugin instance's allowlists (now
-  incl. `allowed_commands: AllowSet`, the exec capability's gate), state
-  root, and quota, built from `PluginConfig` and held in Extism `UserData` so
-  each instance only ever sees its own grants. `DenialKind` gains a `Command`
-  variant alongside `Url`/`Path`, so a denied exec call is recorded and
-  reported (`rustline plugin denials`) the same way as a denied URL/path.
+  `<state_dir>/<namespace>/` subdirectories, both for collision-avoidance and
+  so eviction in one never touches the other's entries.
+- `capability.rs` — `CapabilityCtx`: one plugin instance's allowlists —
+  `allowed_urls`, `allowed_paths` (read), `allowed_write_paths` (write,
+  separate from `allowed_paths` — see the Config section below),
+  `allowed_commands` (the exec capability's gate) — plus `resolve_symlinks`,
+  state root, and quota, built from `PluginConfig` and held in Extism
+  `UserData` so each instance only ever sees its own grants. `DenialKind`
+  gains a `Command` variant alongside `Url`/`Path` (a denied write is also
+  recorded as `Path`), so a denied exec call is recorded and reported
+  (`rustline plugin denials`) the same way as a denied URL/path. `state_size`
+  is an `AtomicU64` memo of the state dir's size: seeded by one `dir_size`
+  walk on first use, then updated from each write's own return value rather
+  than re-walked — `set_state_size`/`invalidate_state_size` (the latter
+  called on any write path that fails, so a failed write can't leave the
+  memo believing an eviction happened that didn't) keep it honest. `log_calls`
+  is an `AtomicU32` counting `rl_log` calls toward `perform::
+  MAX_GUEST_LOG_CALLS` — see `perform.rs`'s `perform_log` below for what
+  "per process" means for a long-lived daemon instance.
 - `fetch.rs` — `Fetcher` trait + `UreqFetcher` (the real rustls blocking HTTP
   client); the trait seam makes `perform_http_get`'s gating logic testable
   without a network.
@@ -599,9 +627,14 @@ these shared types, not a design shortcut. Keep them serializable.
   transitively, the daemon's shared render lock).
 - `perform.rs` — the eight capability-checked effect functions
   (`perform_http_get`, `perform_http_get_cached` — the TTL-cached GET:
-  gate-first, 2xx-only caching, serve-stale — `perform_state_read/write`,
-  `perform_file_read/write`, and `perform_exec`/`perform_exec_cached`); pure
-  enough to unit-test directly, incl. the denied-case tests. `perform_exec`
+  gate-first, 2xx-only caching, serve-stale, and now backing off to at most
+  one refresh attempt per TTL window on a failure (see `cache.rs` above) —
+  `perform_state_read/write`, `perform_file_read/write`, and
+  `perform_exec`/`perform_exec_cached`); pure enough to unit-test directly,
+  incl. the denied-case tests. `perform_file_read` gates on `allowed_paths`
+  and `perform_file_write` on the separate `allowed_write_paths` — an entry in
+  one never authorizes the other — both resolved through
+  `state::resolve_for_allowlist` first (see `state.rs` above); `perform_exec`
   gates on `canonical_argv(program, args)` — the **whole** command line, not
   just `program` — against `allowed_commands` before ever touching `runner`
   (gate-first, invariant N1); a non-zero exit is `ok: true` (the process ran;
@@ -616,7 +649,18 @@ these shared types, not a design shortcut. Keep them serializable.
   the host's `tracing` subscriber, so unlike the eight above it has no
   `CapabilityCtx` allowlist to check and no denied-case test; an unrecognized
   `level` string degrades to `info` (keeping the original as a field) rather
-  than dropping the message or panicking.
+  than dropping the message or panicking. Capability-free does not mean
+  unbounded, though: a guest message is truncated to `MAX_GUEST_LOG_BYTES` (2
+  KiB, the truncation marker budgeted inside that cap, not added on top), and
+  calls are capped at `MAX_GUEST_LOG_CALLS` (256) per plugin instance per
+  process — neither is a capability gate (nothing is denied, no
+  `observe_denial` fires), just a size/rate bound so a buggy or hostile guest
+  can't fill the user's disk. "Per process" means per render on the CLI path,
+  but per **daemon lifetime** once a plugin instance is warm there (see
+  `capability.rs`'s `log_calls` above), so a well-behaved plugin logging once
+  a render goes quiet after `MAX_GUEST_LOG_CALLS` renders until the daemon
+  restarts or reloads — a one-shot `warn!` at the boundary leaves a breadcrumb
+  explaining the silence.
 - `host.rs` — the `host_fn!` wrappers binding `perform_*` (incl.
   `rl_http_get_cached`, `rl_exec`/`rl_exec_cached`, and, W7, `rl_log`) to each
   plugin's `CapabilityCtx`, `build_plugin` (Extism instantiation: wasi off,
@@ -634,8 +678,10 @@ these shared types, not a design shortcut. Keep them serializable.
   `range_name` as `Some(name)` iff `name.len() <= 15` — the guest itself
   decides whether to honor `context.toggled`).
 - `manifest.rs` — plugin capability *manifests* (W24): `PluginManifest
-  { name, version, requested_urls, requested_paths, requested_commands }` and
-  `resolve_manifest(plugin_dir, name) -> Option<PluginManifest>`, which
+  { name, version, requested_urls, requested_paths, requested_write_paths,
+  requested_commands }` (D3 added `requested_write_paths`, parsed separately
+  from the read-only `requested_paths`) and `resolve_manifest(plugin_dir,
+  name) -> Option<PluginManifest>`, which
   resolves a sidecar `<plugin_dir>/<name>.toml` first (primary; supersedes
   unconditionally, even if malformed) or else an embedded `rustline-manifest`
   wasm custom section (fallback, via a hand-rolled `find_custom_section`
@@ -645,12 +691,17 @@ these shared types, not a design shortcut. Keep them serializable.
   and treated as absent, never breaking discovery (N2).
 - `denials.rs` — `FileDenialObserver` (W28), the production `DenialObserver`
   wired as the default in `register_plugins`: it dedupes `(plugin, kind,
-  target)` and appends each newly-seen capability denial as a JSON line to
+  target)` and, for each newly-seen triple, both appends a JSON line to
   `<data_root>/denials.jsonl` (best-effort — a write failure `warn!`s, never
-  panics, per N2). `denials_path()`/`read_denials_at`/`read_denials` back
-  `rustline plugin denials <name>`. NOTE: the record has no quota/rotation yet
-  — a guest that varies its `target` defeats the dedup and grows the file
-  unbounded (a follow-up; see WHATS-NEXT).
+  panics, per N2) **and** logs a `tracing::warn!` ("capability denied; see
+  `rustline plugin denials <plugin>`") — the JSONL file is no longer the only
+  place a denial surfaces, so one shows up in the log the first time it
+  happens instead of only on a manual `plugin denials` lookup; the log line
+  reuses the same dedup as the record, so a repeated denial still logs once.
+  `denials_path()`/`read_denials_at`/`read_denials` back `rustline plugin
+  denials <name>`. NOTE: the record has no quota/rotation yet — a guest that
+  varies its `target` defeats the dedup and grows the file unbounded (a
+  follow-up; see WHATS-NEXT).
 - `integrity.rs` — plugin binary integrity (W19): `sha256_hex(bytes: &[u8]) ->
   String`, the single definition of the digest both `plugin_install.rs` (at
   install time) and `register_plugins` (at load time) now share — the prior
@@ -1008,7 +1059,17 @@ failure path via `rl_log` (W7) rather than staying silent:
   *any* other outcome (connect/timeout/decode error, or a `Pong`/
   `ShuttingDown` reply), so the caller always has a safe in-process render to
   fall back to (invariant N2 extended to the daemon path — "never break the
-  bar").
+  bar"). It also now reports *why* it fell back: a missing socket stays
+  silent (not installed is not a problem), but every failure past that
+  `stat` — a timeout setter, the write, the read, an unexpected response —
+  logs at `debug` (cheap, per-tick, `-vvv` detail), except a socket that
+  *exists but refuses the connection* (a dead daemon left it behind), which is
+  `warn_once`'d instead (`"daemon-stale-socket:<path>"`) since that case is
+  actionable and persists across ticks rather than being a one-off, unlike a
+  per-tick `debug!`. `daemon.rs`'s `reload_if_changed` gets a matching
+  `info!` — one line per config edit (it only runs when the mtime actually
+  changed, so no dedup is needed), the only confirmation a user gets that a
+  warm daemon picked up their edit.
 - `daemon.rs` — the daemon server (W48): `DaemonState { config, theme,
   plugin_dir, registry, config_mtime }` holds everything warm across
   requests — parsed `Config`, resolved `Theme`, a built `Registry` (built
@@ -1157,15 +1218,19 @@ failure path via `rl_log` (W7) rather than staying silent:
   `write_toggles` (best-effort atomic temp-file + rename; a write failure
   `warn!`s and never panics — a broken toggle must never break the bar).
 - `plugin_cmd.rs` — `rustline plugin …`: `list` reads the effective `Config`;
-  `list`/`url|path|cmd list`/`denials` each take a `--json` flag (W40,
-  `plugin_list_json`/`pattern_list_json`/`denials_json`) emitting a
+  `list`/`url|path|write-path|cmd list`/`denials` each take a `--json` flag
+  (W40, `plugin_list_json`/`pattern_list_json`/`denials_json`) emitting a
   `serde_json`-pretty array instead of the human text, human output
   unchanged when the flag is absent — `list --json`'s per-plugin object now
-  also carries `allowed_commands`, alongside the existing `allowed_urls`/
-  `allowed_paths`. `url|path|cmd add/remove` all share one `pattern_cmd`
-  dispatch keyed by a private `Kind { Url, Path, Command }` (`Kind::key()` ->
-  `"allowed_urls"`/`"allowed_paths"`/`"allowed_commands"`) that mutates the
-  config file in place via `toml_edit`
+  also carries `allowed_write_paths` and `resolve_symlinks` (D3, so a plugin
+  holding a write grant can't render as read-only in machine-readable
+  output), alongside the existing `allowed_urls`/`allowed_paths`/
+  `allowed_commands`; the human `list` output prints `resolve_symlinks` too,
+  so the doc comment's "same fields the human list prints" claim stays true.
+  `url|path|write-path|cmd add/remove` all share one `pattern_cmd` dispatch
+  keyed by a private `Kind { Url, Path, WritePath, Command }` (`Kind::key()`
+  -> `"allowed_urls"`/`"allowed_paths"`/`"allowed_write_paths"`/
+  `"allowed_commands"`) that mutates the config file in place via `toml_edit`
   (preserving comments/formatting), creating `[plugins.<name>]` if absent;
   `new <name> [--path] [--force]` scaffolds a ready-to-build WASM guest
   plugin crate from embedded templates (`assets/plugin-cargo.toml.tmpl`/
@@ -1178,15 +1243,20 @@ failure path via `rl_log` (W7) rather than staying silent:
   `cargo build --target wasm32-unknown-unknown` + install step and a
   starter `[plugins.<name>]` config snippet afterward. `approve <name>
   [--yes]` (W24) resolves the plugin's manifest via `resolve_manifest`,
-  prints what it requests via `manifest_report` — which, when
-  `requested_commands` is non-empty, appends an explicit warning that
+  prints what it requests via `manifest_report` — labeling the read line
+  `allowed_paths (read-only)` and, when `requested_write_paths` is
+  non-empty, appending its own overwrite-danger banner ("lets this plugin
+  overwrite these files with any content"), mirroring the existing warning
+  that fires when `requested_commands` is non-empty (that
   `allowed_commands` runs real programs with the user's own environment and
-  permissions, and to approve only patterns they understand — and, after an
+  permissions) — approve only patterns you understand — and, after an
   interactive y/N confirmation (or unconditionally with `--yes`), writes
-  **exactly** those requested URL/path/command patterns into
-  `[plugins.<name>]`'s allowlists (idempotent append, never a wider grant).
-  The warning is part of `manifest_report`'s printed text, not the
-  confirmation prompt, so it still shows up under `--yes` and in captured
+  **exactly** those requested URL/read-path/write-path/command patterns into
+  `[plugins.<name>]`'s allowlists (idempotent append, never a wider grant);
+  the "nothing to approve" guard checks all four requested lists, so a
+  manifest requesting only `requested_write_paths` is still approvable.
+  Both warnings are part of `manifest_report`'s printed text, not the
+  confirmation prompt, so they still show up under `--yes` and in captured
   output/logs, not just an interactive session. `list` also now shows a `run
   \`plugin approve <name>\`` hint when a manifest resolves for that plugin.
   Also handles `build` (W31, any
@@ -1381,10 +1451,21 @@ failure path via `rl_log` (W7) rather than staying silent:
   curated layout it seeds live only here, **not** in any widget's code
   `Default` (those stay `""`/unchanged; see Config below).
 - `logging.rs` — `init(&LogConfig, verbose)`: installs the two-sink `tracing`
-  subscriber (rotated file + stderr), plus the pure helpers `verbosity_to_level`,
-  `parse_level`, `resolve_file_level`/`resolve_stderr_level`, `should_rotate`,
-  `open_log`, `log_path`. Best-effort: a file that can't be opened degrades to
-  stderr-only; never writes stdout.
+  subscriber (a daily-rotated file, via `tracing_appender`'s
+  `RollingFileAppender`, plus stderr), and the pure helpers
+  `verbosity_to_level`, `parse_level`, `resolve_file_level`/
+  `resolve_stderr_level`, `log_dir`/`log_file_prefix`/`log_file_suffix`
+  (decompose `[log].file` into the directory + filename prefix/suffix the
+  appender needs to name each day's generation
+  `<prefix>.<YYYY-MM-DD>.<suffix>`), `current_log_path` (today's file, in
+  UTC — the appender rotates on a UTC day boundary, so this must not use
+  local time, or `doctor`'s reported path would disagree with what the
+  appender actually writes for anyone off UTC+0), and `build_appender` (the
+  one builder chain both production `init` and the test suite call, so they
+  can't drift). `open_log`/`log_path`/`should_rotate` from the old
+  size-capped, single-generation rotator no longer exist. Best-effort: a log
+  dir that can't be created or opened degrades to stderr-only; never writes
+  stdout.
 - `main.rs` — dispatch + the `emit(markup, preview)` helper (raw markup vs
   ANSI) + `resolve_plugin_dir` (`--plugin-dir` flag › config `plugin_dir` ›
   `rustline_wasm::default_plugin_dir()`). Only `render left`/`render right`
@@ -1575,9 +1656,13 @@ config-file path for every subcommand that reads or writes it (default:
 - `rustline plugin list [--json]` — discovered/configured plugins with their
   source, allowlists, state quota, and checksum status; `--json` emits a JSON
   array of `{name, source, tag, allowed_urls, allowed_paths,
-  allowed_commands, max_state_bytes, has_manifest, checksum_status}` instead
-  of human text (the human path prints the same value as a `checksum: `
-  line per plugin). `checksum_status` is one of `"verified"`/`"unpinned"`/
+  allowed_write_paths, resolve_symlinks, allowed_commands, max_state_bytes,
+  has_manifest, checksum_status}` instead of human text (the human path
+  prints the same values, incl. `resolve_symlinks`, as `checksum: `/other
+  lines per plugin). `allowed_paths` is **read-only**; `allowed_write_paths`
+  (globs, empty = deny) is the separate write allowlist — see the Config
+  section's filesystem-capability paragraph above. `checksum_status` is one
+  of `"verified"`/`"unpinned"`/
   `"mismatch"`/`"malformed"`/`"missing"` (`plugin_checksum::
   PluginChecksumStatus`, the same read-and-verify helper backing `doctor`'s
   "plugin checksums" row above) — read-only and purely informational: it
@@ -1598,14 +1683,17 @@ config-file path for every subcommand that reads or writes it (default:
   `rustline plugin install <owner/repo>` for an installable one. `--json`
   follows the repo's existing convention (a pretty-printed array). Strictly
   read-only — writes neither config nor the toggles file.
-- `rustline plugin url|path|cmd list [--json]|add|remove <plugin> [pattern]`
-  — read or edit a plugin's `allowed_urls`/`allowed_paths`/`allowed_commands`
-  (`add`/`remove` rewrite the config file in place via `toml_edit`, preserving
+- `rustline plugin url|path|write-path|cmd list [--json]|add|remove <plugin>
+  [pattern]` — read or edit a plugin's `allowed_urls`/`allowed_paths`
+  (read)/`allowed_write_paths` (write)/`allowed_commands` (`add`/`remove`
+  rewrite the config file in place via `toml_edit`, preserving
   comments/formatting); `list --json` emits the patterns as a JSON array of
-  strings (`[]` for an absent/empty plugin) instead of one per line. `cmd` is
-  the exec capability's counterpart to `url`/`path`: its patterns are matched
-  against the whole canonical argv (`rustline_wasm::canonical_argv`), not
-  just the program name.
+  strings (`[]` for an absent/empty plugin) instead of one per line.
+  `write-path` is `path`'s write-only counterpart — a grant in one never
+  authorizes the other (see the Config section's filesystem-capability
+  paragraph above). `cmd` is the exec capability's counterpart to
+  `url`/`path`: its patterns are matched against the whole canonical argv
+  (`rustline_wasm::canonical_argv`), not just the program name.
 - `rustline plugin new <name> [--path <dir>] [--force]` — scaffold a
   ready-to-build WASM guest plugin crate at `<dir or cwd>/<name>/`
   (`Cargo.toml` with an empty `[workspace]` table + edition 2024 + cdylib,
@@ -1616,15 +1704,18 @@ config-file path for every subcommand that reads or writes it (default:
   existing `<name>/` directory without `--force`.
 - `rustline plugin approve <name> [--yes]` — resolve `<name>`'s declared
   capability manifest (a sidecar `<name>.toml` in the plugin dir, or an
-  embedded `rustline-manifest` wasm custom section), print what it requests
-  — including, when the manifest asks for `requested_commands`, an explicit
-  warning that granting `allowed_commands` runs real programs with the
-  user's own environment and permissions (part of the printed report, so it
-  shows up under `--yes` too, not just an interactive prompt) — and, after
-  an interactive y/N confirmation (or unconditionally with `--yes`), write
-  exactly those requested URL/path/command patterns into
+  embedded `rustline-manifest` wasm custom section), print what it requests —
+  labeling the read line `allowed_paths (read-only)`, and including, when the
+  manifest asks for `requested_write_paths`, an explicit overwrite-danger
+  warning, and when it asks for `requested_commands`, an explicit warning
+  that granting `allowed_commands` runs real programs with the user's own
+  environment and permissions (both part of the printed report, so they show
+  up under `--yes` too, not just an interactive prompt) — and, after an
+  interactive y/N confirmation (or unconditionally with `--yes`), write
+  exactly those requested URL/read-path/write-path/command patterns into
   `[plugins.<name>]`'s allowlists; declines (writing nothing) without
-  confirmation, and does nothing if the plugin has no manifest.
+  confirmation, and does nothing if the plugin has no manifest or if it
+  requests no capabilities at all.
 - `rustline plugin build <dir> [--release] [--plugin-dir <d>] [--yes]` —
   build any WASM guest plugin crate (any `cdylib`-for-`wasm32-unknown-unknown`
   crate, not just this repo's `plugins/*`) and install the resulting `.wasm`
@@ -2284,7 +2375,9 @@ plugin_index_url = "https://example.com/my-index.json"   # optional; overrides t
 [plugins.weather]
 source = "steve/rustline-weather"          # owner/repo; consumed by `plugin update`
 allowed_urls = ["https://wttr.in/*"]        # glob, or "re:<pattern>" for regex
-allowed_paths = []
+allowed_paths = []                          # READ-only; see the filesystem-capability paragraph below
+allowed_write_paths = []                    # WRITE-only, globs; empty = deny by default
+resolve_symlinks = false                    # default; see below for what `true` trades away
 allowed_commands = []                       # glob/"re:", matched against the WHOLE argv (see below)
 max_state_bytes = 52428800                  # default: 50 MB
 # tag = "v1.2.0"                            # recorded by `plugin install/update`
@@ -2304,14 +2397,42 @@ prefixed `re:` — regex entries are **anchored to a full-string match** (unifor
 with globs); to match a prefix/substring, include `.*` in the pattern (e.g.
 `re:https://wttr\.in/.*`).
 
+**Filesystem capability (`allowed_paths` / `allowed_write_paths` /
+`resolve_symlinks`):** `rl_file_read`/`perform_file_read` is gated by
+`allowed_paths`, which is **read-only**, and `rl_file_write`/
+`perform_file_write` by the separate `allowed_write_paths`, which is
+**write-only** — an entry in one never authorizes the other. Both are empty
+(deny-by-default) unless populated, same glob-or-`re:` shape as the other
+allowlists. **This is a change from before this batch**, when one
+`allowed_paths` list authorized both directions: an existing `allowed_paths`
+entry now grants read only, and a plugin that was writing through it fails
+closed — a denial record plus a log line — rather than silently. Every
+read/write request is resolved through `resolve_for_allowlist`
+(`rustline-wasm`'s `state.rs`, see above) before either list is consulted,
+which also closes a symlink escape: a grant is otherwise a grant over
+**names**, and a symlink planted under a granted prefix (an extracted
+archive, a synced directory, another tool) would silently redirect the
+effect to wherever it points — past the subtree the user thought they'd
+granted. By default (`resolve_symlinks = false`) a path with any symlink
+component is denied outright, closing that name-vs-subtree gap for good;
+setting `resolve_symlinks = true` on a plugin trades that closure away — the
+path is canonicalized first (falling back to canonicalizing the parent for a
+not-yet-existing write target, so a first write to a granted directory still
+works) and the allowlist is matched against the **resolved** location, so a
+grant then legitimately follows symlinks out of the directory the user
+thought they were granting. Canonicalization failing is a hard denial, never
+a silent fall-through to the raw path.
+
 A plugin may also declare a capability **manifest** — a sidecar
 `<plugin_dir>/<name>.toml` (or an embedded `rustline-manifest` wasm custom
-section) listing `requested_urls`/`requested_paths`/`requested_commands` —
-which `rustline plugin approve <name>` turns into exactly those allowlist
-entries above, after confirmation (see CLI above). A manifest alone grants
-nothing; only `approve` (or hand-editing the config) ever widens an
-allowlist. `plugin approve` prints an explicit warning when a manifest
-requests commands — see the exec-capability paragraph below.
+section) listing `requested_urls`/`requested_paths`/`requested_write_paths`/
+`requested_commands` — which `rustline plugin approve <name>` turns into
+exactly those allowlist entries above, after confirmation (see CLI above). A
+manifest alone grants nothing; only `approve` (or hand-editing the config)
+ever widens an allowlist. `plugin approve` prints an explicit
+overwrite-danger warning when a manifest requests write paths, and a
+separate explicit warning when it requests commands — see the exec-capability
+paragraph below.
 
 `source` is a typed `PluginSource` that still accepts a bare `owner/repo`
 string; `rustline plugin install <owner/repo>` (W38) downloads the plugin's
@@ -2435,17 +2556,26 @@ spawn failure, or timeout) falls back to the last-good cached entry with
 `stale: true`.
 
 **Logging:** a `[log]` table controls the two sinks. `rustline` logs to a
-rotated file (`$XDG_DATA_HOME/rustline/rustline.log`, default level `info`) and
-to stderr (default level `error`). `RUST_LOG` is **not** consulted. Raise the
-*file* level with repeated `-v` (`-v`=warn, `-vv`=info, `-vvv`=debug,
-`-vvvv`=trace); `-v` never affects stderr. The file rotates to `rustline.log.1`
-once it passes 5 MiB (one generation kept). Any level value is `off|error|warn|
-info|debug|trace` and is parsed leniently (a typo falls back to the default).
+**daily-rotated** file (default dir `$XDG_DATA_HOME/rustline`, default level
+`info`) and to stderr (default level `error`). `RUST_LOG` is **not**
+consulted. Raise the *file* level with repeated `-v` (`-v`=warn, `-vv`=info,
+`-vvv`=debug, `-vvvv`=trace); `-v` never affects stderr. Today's file is
+`<dir>/rustline.<YYYY-MM-DD>.log` (e.g. `rustline.2026-07-27.log`) — **not**
+`rustline.log.<date>` — computed in **UTC**, matching the boundary
+`tracing-appender`'s `RollingFileAppender` itself rotates on; **7** daily
+generations are kept (`MAX_LOG_FILES`), each pruned as the eighth appears.
+This replaced the old size-capped rotator: there is no 5 MiB cap and no
+single `.1` backup anymore — `[log].file`, if set, no longer names one fixed
+path. Instead it's decomposed into a directory (its parent), a filename
+prefix (its stem), and a filename suffix (its extension), which the daily
+appender recombines as `<prefix>.<date>.<suffix>` each day. Any level value
+is `off|error|warn|info|debug|trace` and is parsed leniently (a typo falls
+back to the default).
 
     [log]
     file_level   = "info"
     stderr_level = "error"
-    file         = "~/.local/share/rustline/rustline.log"   # optional override
+    file         = "~/.local/share/rustline/rustline.log"   # optional override; decomposed into dir/prefix/suffix — see above
 
 ## Invariants (load-bearing — re-check when touching these)
 
@@ -2557,9 +2687,14 @@ branch on platform.
    tests proving a denied argv never reaches a spawn (and, for the cached
    variant, never touches its own cache file either). Every deny site also
    calls `observe_denial` (before returning `ok:false`) so the default
-   `FileDenialObserver` records the `(kind, target)` for `rustline plugin
-   denials` (W28) — recording is best-effort and never changes the gate
-   outcome.
+   `FileDenialObserver` both records the `(kind, target)` for `rustline
+   plugin denials` (W28) and logs a deduped `warn!` pointing at that command
+   — recording (and now logging) is best-effort and never changes the gate
+   outcome. `perform_file_read`/`perform_file_write` are the filesystem
+   capability's instance of this pattern: they gate on the separate
+   `allowed_paths` (read) / `allowed_write_paths` (write) allowlists, after
+   first resolving the path through `resolve_for_allowlist`'s symlink gate —
+   see the Config section's filesystem-capability paragraph.
 10. **N2. A plugin never breaks the bar.** Any instantiation error, render
    error, timeout, or malformed output degrades to empty segments
    (`WasmWidget::render`), bounded by fuel + wall-clock timeout + memory caps.
