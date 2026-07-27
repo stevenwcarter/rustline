@@ -2546,37 +2546,50 @@ fn daemon_stale_socket_falls_back_and_warns_in_log_not_stderr() {
     fs::create_dir_all(&runtime).unwrap();
     fs::write(runtime.join("daemon.sock"), b"not a socket").unwrap();
 
-    let out = isolated_cmd(&home, &data, &config)
-        .args([
-            "render",
-            "right",
-            "--session",
-            "0",
-            "--window",
-            "0",
-            "--pane",
-            "0",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "still falls back to an in-process render; stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let render = || {
+        let out = isolated_cmd(&home, &data, &config)
+            .args([
+                "render",
+                "right",
+                "--session",
+                "0",
+                "--window",
+                "0",
+                "--pane",
+                "0",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "still falls back to an in-process render; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
 
-    // Default stderr level is ERROR, so a WARN must NOT surface on stderr.
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.contains("daemon socket"),
-        "stale-socket warning must not hit stderr at default level; got: {stderr}"
-    );
+        // Default stderr level is ERROR, so a WARN must NOT surface on stderr.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("daemon socket"),
+            "stale-socket warning must not hit stderr at default level; got: {stderr}"
+        );
+    };
 
-    // The file sink (INFO) captured the WARN.
+    // The stale socket is persistent across ticks (a dead daemon's leftover
+    // file doesn't go away on its own), so the WARN must route through
+    // `warn_once` and dedup across renders rather than repeat once per tick —
+    // exactly the ~86,400-lines/day spam `warn_once.rs`'s module doc warns
+    // about. Render twice against the same socket and pin the count, not
+    // just presence, so stripping the `warn_once` wrapper is caught.
+    render();
+    render();
+
     let log = read_only_log_file(&data.join("rustline"));
-    assert!(
-        log.contains("daemon socket exists but refuses connections"),
-        "stale-socket warning captured in log file; got: {log}"
+    assert_eq!(
+        log.matches("daemon socket exists but refuses connections")
+            .count(),
+        1,
+        "stale-socket warning must dedup across renders via warn_once, \
+         not repeat once per tick; got: {log}"
     );
 }
 
@@ -2664,24 +2677,34 @@ fn daemon_missing_socket_leaves_no_daemon_diagnostics_in_log() {
         dir.path().join("config"),
     );
 
-    let out = isolated_cmd(&home, &data, &config)
-        .args([
-            "render",
-            "right",
-            "--session",
-            "0",
-            "--window",
-            "0",
-            "--pane",
-            "0",
-        ])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "render exited 0");
+    let render = |extra_args: &[&str]| {
+        let out = isolated_cmd(&home, &data, &config)
+            .args([
+                "render",
+                "right",
+                "--session",
+                "0",
+                "--window",
+                "0",
+                "--pane",
+                "0",
+            ])
+            .args(extra_args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "render exited 0");
+    };
+    render(&[]);
+    // A missing socket is the default state for every user not running the
+    // daemon, so a `debug!` there would still be one line per render tick for
+    // anyone running `-vvv` — and `debug` sits below the default file-sink
+    // level (INFO), so only a `-vvv` render can catch a regression that logs
+    // at `debug` instead of staying silent.
+    render(&["-vvv"]);
 
     // The log dir/file may or may not exist depending on whether anything
-    // else logged at file-sink level (INFO); either way, nothing in it may
-    // mention the daemon.
+    // else logged at file-sink level (INFO, or DEBUG under -vvv); either way,
+    // nothing in it may mention the daemon.
     if let Ok(entries) = fs::read_dir(data.join("rustline")) {
         for path in entries.filter_map(Result::ok).map(|e| e.path()) {
             let text = fs::read_to_string(&path).unwrap_or_default();
