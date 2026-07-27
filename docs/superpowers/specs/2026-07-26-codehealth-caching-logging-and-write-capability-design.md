@@ -93,8 +93,10 @@ tracing_appender::rolling::Builder::new()
 1. **Rotation is time-based, not size-based.** `MAX_LOG_BYTES` and
    `should_rotate` are deleted along with their tests. Retention becomes
    `max_log_files(7)` — seven daily generations instead of one `.1`.
-2. **The filename gains a date suffix**: `rustline.log.2026-07-26`. There is no
-   longer a single stable `rustline.log`.
+2. **The filename gains a date component**: `rustline.2026-07-26.log`
+   (`tracing-appender` emits `{prefix}.{date}.{suffix}`). There is no longer a
+   single stable `rustline.log`. The date is **UTC**, matching the appender's
+   own rotation boundary.
 
 ### Config and reporting surface
 
@@ -107,7 +109,7 @@ its parent directory becomes the appender's directory, its file stem the
 `logging::log_path` is `pub(crate)` and consumed by `doctor.rs`. Replace it with
 a function that returns the *directory* plus the current day's filename so
 `doctor` reports something that exists, and update `doctor`'s label to name the
-pattern (`rustline.log.<date>`, 7 kept) rather than a single file.
+pattern (`rustline.<date>.log`, 7 kept) rather than a single file.
 
 ### Tests
 

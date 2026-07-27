@@ -59,7 +59,7 @@
 
 **Context:** `open_log` (logging.rs:97) evaluates rotation once at process start and `FileWriter` holds that `Arc<File>` forever. `rustline daemon run` never exits, so after the second rotation it appends to an unlinked inode and every daemon diagnostic is lost. The user's decision, recorded in `bughunt.md`, is to adopt `RollingFileAppender`.
 
-**Accepted behaviour changes (user-approved, do not re-litigate):** rotation becomes daily rather than at 5 MiB; retention becomes 7 daily generations rather than one `.1`; the file gains a date suffix (`rustline.log.2026-07-26`).
+**Accepted behaviour changes (user-approved, do not re-litigate):** rotation becomes daily rather than at 5 MiB; retention becomes 7 daily generations rather than one `.1`; the file gains a date component. Note the shape: `tracing-appender`'s `join_date` emits `{prefix}.{date}.{suffix}`, i.e. **`rustline.2026-07-26.log`** — not `rustline.log.2026-07-26`.
 
 - [ ] **Step 1: Add the dependency**
 
@@ -193,8 +193,12 @@ pub(crate) fn log_file_suffix(cfg: &LogConfig) -> String {
 
 /// Today's log file: `<log_dir>/<prefix>.<YYYY-MM-DD>.<suffix>`. Reported by
 /// `doctor`; the appender derives the same name internally.
+///
+/// The date is **UTC** because tracing-appender's rotation boundary is UTC
+/// (`OffsetDateTime::now_utc()`, unconditionally). Localizing this would make
+/// `doctor` print a path that does not exist for part of every day.
 pub(crate) fn current_log_path(cfg: &LogConfig) -> PathBuf {
-    let date = chrono::Local::now().format("%Y-%m-%d");
+    let date = chrono::Utc::now().format("%Y-%m-%d");
     log_dir(cfg).join(format!(
         "{}.{date}.{}",
         log_file_prefix(cfg),
@@ -2606,7 +2610,7 @@ Grep for each of these and update every occurrence:
 
 1. The `[plugins.*]` reference: add `allowed_write_paths` (globs, empty = deny, write only) and `resolve_symlinks` (bool, default false). State explicitly that `allowed_paths` is **read-only** and that this changed in this batch.
 2. The N3 / `allowed_paths` prose: note that the symlink gate closes the name-vs-subtree gap, and what `resolve_symlinks = true` trades away.
-3. The `[log]` reference: rotation is daily with 7 generations retained; the file is `rustline.log.<YYYY-MM-DD>`; `[log].file` is decomposed into directory + prefix + suffix. Remove any mention of the 5 MiB cap or a single `.1` generation.
+3. The `[log]` reference: rotation is daily with 7 generations retained; the file is **`rustline.<YYYY-MM-DD>.log`** (prefix, then date, then suffix — verify against a real run, not against this line); `[log].file` is decomposed into directory + prefix + suffix, and the date is UTC. Remove any mention of the 5 MiB cap or a single `.1` generation.
 4. The `rustline plugin …` subcommand list: add `write-path`.
 5. The plugin manifest reference: add `requested_write_paths`.
 6. Any statement that `rl_log` is unbounded, or that the TTL cache never evicts, or that the denial recorder is the only sink for denials — all three are now false.
