@@ -569,11 +569,15 @@ these shared types, not a design shortcut. Keep them serializable.
   RFC3339 freshness (`age_secs`/`is_fresh`), quota-bounded `read_entry`/
   `write_entry`. `CacheEntry` carries `last_attempt_at` (when a refresh was
   last *tried*, success or not) alongside `fetched_at` (when one last
-  *succeeded*) — without it a dead upstream would be retried on every single
-  render forever; `is_fresh` now backs that entry off like a normal fresh hit
-  until the TTL window elapses, so a failing endpoint is retried at most once
-  per TTL rather than every render. `write_entry` no longer wedges once its
-  namespace hits quota: `evict_namespace` deletes entries oldest-`fetched_at`-
+  *succeeded*). `is_fresh` itself is unchanged; the backoff is a second check
+  in `perform.rs`'s cached-fetch paths (`perform_http_get_cached:90-102`,
+  `perform_exec_cached:295-307`) that reuses `is_fresh` against
+  `last_attempt_at` — when a last-good entry exists, a failing endpoint is
+  retried at most once per TTL instead of every render. An endpoint that has
+  *never* succeeded has no entry to back off against, so it is still fetched
+  on every render — deliberately unchanged (see `perform.rs:172-175`).
+  `write_entry` no longer wedges once its namespace hits quota:
+  `evict_namespace` deletes entries oldest-`fetched_at`-
   first (a file that fails to parse sorts as oldest) until the namespace fits,
   and `write_entry` calls it only after `check_cap` first refuses the write —
   so a full state dir self-heals instead of failing every write from then on.

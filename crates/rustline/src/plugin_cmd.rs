@@ -787,6 +787,8 @@ fn print_next_steps(name: &str, dir: &Path) {
     println!("[plugins.{name}]");
     println!("allowed_urls = []");
     println!("allowed_paths = []");
+    println!("allowed_write_paths = []");
+    println!("resolve_symlinks = false");
     println!();
     println!("[plugins.{name}.options]");
     println!("format = \"{name}: hello!\"");

@@ -343,7 +343,9 @@ pub fn file_read(path: &str) -> Result<ReadResult, HostError> {
 }
 
 /// Write an arbitrary file via `rl_file_write` (gated by the plugin's
-/// `allowed_paths`).
+/// `allowed_write_paths` — separate from, and not granted by, `allowed_paths`
+/// — and, when `resolve_symlinks` is set, matched against the resolved
+/// target).
 pub fn file_write(path: &str, contents: &str) -> Result<WriteResult, HostError> {
     decode(&raw::file_write(path, contents)?)
 }

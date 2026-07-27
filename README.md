@@ -1070,8 +1070,9 @@ rustline plugin cmd add cmdrun "uname *"             # allowed_commands works th
 
 A plugin can also declare a capability *manifest* — a sidecar
 `<plugin_dir>/<name>.toml` (or an embedded `rustline-manifest` wasm custom
-section) listing the `allowed_urls`/`allowed_paths`/`allowed_write_paths`/
-`allowed_commands` it wants — so you don't have to hand-write them yourself:
+section) listing `requested_urls`/`requested_paths`/`requested_write_paths`/
+`requested_commands` — so you don't have to hand-write the allowlists
+yourself:
 
 ```bash
 rustline plugin approve weather        # shows what it requests, asks to confirm
@@ -1079,9 +1080,14 @@ rustline plugin approve weather --yes  # non-interactive; for scripts
 rustline plugin approve cmdrun         # commands get an extra, explicit warning
 ```
 
-`approve` writes exactly the requested patterns into
-`[plugins.<name>]`'s allowlists (never more than what's declared), and does
-nothing if the plugin has no manifest.
+`approve` prints what's requested — labeling the read line
+`allowed_paths (read-only)`, an explicit overwrite-danger banner when the
+manifest requests write paths, and a separate warning when it requests
+commands (since those run real programs with the user's own permissions) —
+then, after confirmation (or unconditionally with `--yes`), writes exactly
+those requested patterns into `[plugins.<name>]`'s allowlists (never more
+than what's declared). It does nothing if the plugin has no manifest, or if
+the manifest requests no capabilities at all.
 
 Not sure what plugins exist yet? Browse the curated index:
 

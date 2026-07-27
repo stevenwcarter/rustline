@@ -28,7 +28,8 @@ const SIZE_UNSEEDED: u64 = u64::MAX;
 pub enum DenialKind {
     /// An HTTP GET (cached or uncached) denied by `allowed_urls`.
     Url,
-    /// A file read/write denied by `allowed_paths`.
+    /// A file read denied by `allowed_paths` or a file write denied by
+    /// `allowed_write_paths` — both report as this one variant.
     Path,
     /// A subprocess run (cached or uncached) denied by `allowed_commands`.
     Command,
