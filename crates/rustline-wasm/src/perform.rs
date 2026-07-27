@@ -144,8 +144,10 @@ pub fn perform_http_get_cached(
                         last_attempt_at: now.to_string(),
                     })
                     .unwrap_or_default();
-                    if let Err(error) = write_entry(&dir, &path, &content, ctx.max_state_bytes) {
-                        tracing::warn!(%error, "negative-cache write failed");
+                    if let Err(write_error) =
+                        write_entry(&dir, &path, &content, ctx.max_state_bytes)
+                    {
+                        tracing::warn!(error = %write_error, "negative-cache write failed");
                     }
                     CachedHttpResult {
                         ok: true,
@@ -919,6 +921,13 @@ mod tests {
         let r = perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:02:10Z", &down);
         assert!(r.ok && r.stale, "still served stale");
         assert_eq!(down.calls(), 1, "no second fetch inside the backoff window");
+        // The entry served is still the last-good response, byte-for-byte:
+        // only `last_attempt_at` may have moved. A failure arm that
+        // corrupted `body`/`status` (or reported the wrong `age_secs`)
+        // would still satisfy the assertions above.
+        assert_eq!(r.body, "body");
+        assert_eq!(r.status, 200);
+        assert_eq!(r.age_secs, 130);
     }
 
     #[test]
@@ -1209,6 +1218,10 @@ mod tests {
             1,
             "no second run inside the backoff window"
         );
+        // The entry served is still the last-good response, byte-for-byte:
+        // only `last_attempt_at` may have moved.
+        assert_eq!(r.stdout, "good");
+        assert_eq!(r.age_secs, 130);
     }
 
     #[test]

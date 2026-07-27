@@ -31,6 +31,14 @@ pub struct CacheEntry {
     /// dead upstream is re-fetched on every single render forever: the
     /// fresh-hit branch can never be taken again once the TTL lapses.
     /// `#[serde(default)]` keeps old on-disk entries readable.
+    ///
+    /// The backoff this field drives (`is_fresh` in `perform_http_get_cached`/
+    /// `perform_exec_cached`) is inert whenever `ttl_secs <= 0`, since
+    /// `is_fresh` treats `[0, ttl_secs)` as fresh — an empty range when
+    /// `ttl_secs` isn't positive. `host.rs` maps an unparseable guest
+    /// `ttl_secs` string to `0` via `unwrap_or(0)`, so a guest sending
+    /// garbage silently loses the backoff and gets the pre-fix retry storm
+    /// back. Known, not fixed here — see B4's follow-up notes.
     #[serde(default)]
     pub last_attempt_at: String,
 }
