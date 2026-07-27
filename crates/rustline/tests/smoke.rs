@@ -1571,6 +1571,61 @@ fn warn_dedup_resets_when_config_mtime_changes() {
     );
 }
 
+/// Final pre-merge fix (Important 2): `resolve_base_theme`'s "invalid theme
+/// file" warn was missed by D2's original sweep — that sweep converted only
+/// `warn!` sites, and its sibling eleven lines below ("unknown theme base")
+/// WAS converted, but this one, which fires once per render on a themes-dir
+/// file that fails to parse, was not. Same shape as
+/// `warn_dedup_resets_when_config_mtime_changes` above: two renders of an
+/// unchanged malformed theme file log the warning once, not twice.
+#[test]
+fn theme_file_parse_warn_dedups_across_renders() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    fs::create_dir_all(config.join("rustline/themes")).unwrap();
+    fs::write(
+        config.join("rustline/config.toml"),
+        "[theme]\nbase = \"broken\"\n",
+    )
+    .unwrap();
+    fs::write(
+        config.join("rustline/themes/broken.toml"),
+        "this is not valid toml [[[",
+    )
+    .unwrap();
+
+    let render = || {
+        let out = isolated_cmd(&home, &data, &config)
+            .args([
+                "render",
+                "left",
+                "--session",
+                "0",
+                "--window",
+                "0",
+                "--pane",
+                "0",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "render exited 0");
+    };
+
+    render();
+    render();
+
+    let log = read_only_log_file(&data.join("rustline"));
+    assert_eq!(
+        log.matches("invalid theme file").count(),
+        1,
+        "two renders of one malformed theme file warn once, not twice; got: {log}"
+    );
+}
+
 /// IMPORTANT-2 regression: pins `install`'s refusal to install the dedup
 /// hook at all when the marker dir is wedged. The unit test
 /// `a_wedged_marker_dir_reports_reset_failure` in `warn_once.rs` only pins

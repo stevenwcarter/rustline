@@ -137,7 +137,11 @@ pub(crate) fn resolve_base_theme(name: &str) -> Option<Theme> {
                 tc.apply_to(&mut t);
                 return Some(t);
             }
-            Err(e) => tracing::warn!("invalid theme file {}: {e}", file.display()),
+            Err(e) => {
+                rustline_core::diag::warn_once(&format!("theme-file:{name}"), || {
+                    tracing::warn!("invalid theme file {}: {e}", file.display());
+                });
+            }
         }
     }
     builtin_theme(name)

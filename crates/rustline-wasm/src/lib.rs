@@ -208,7 +208,9 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
         match abi_decision(ABI_VERSION, guest_abi_version) {
             AbiDecision::Register => {}
             AbiDecision::RegisterLegacy => {
-                tracing::info!(plugin = %stem, "plugin has no abi_version export, registering as legacy");
+                rustline_core::diag::warn_once(&format!("plugin-legacy:{stem}"), || {
+                    tracing::info!(plugin = %stem, "plugin has no abi_version export, registering as legacy");
+                });
             }
             AbiDecision::Skip => {
                 rustline_core::diag::warn_once(
