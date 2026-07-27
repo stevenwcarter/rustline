@@ -132,14 +132,17 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
         match integrity::verify_checksum(pc.checksum.as_deref(), &wasm) {
             integrity::ChecksumVerdict::NotRecorded | integrity::ChecksumVerdict::Match => {}
             integrity::ChecksumVerdict::Mismatch { expected, actual } => {
-                rustline_core::diag::warn_once(&format!("plugin-skip:checksum:{stem}"), || {
-                    tracing::warn!(
-                        plugin = %stem,
-                        %expected,
-                        %actual,
-                        "plugin checksum mismatch, skipping"
-                    );
-                });
+                rustline_core::diag::warn_once(
+                    &format!("plugin-skip:checksum:{stem}:{actual}"),
+                    || {
+                        tracing::warn!(
+                            plugin = %stem,
+                            %expected,
+                            %actual,
+                            "plugin checksum mismatch, skipping"
+                        );
+                    },
+                );
                 continue;
             }
             integrity::ChecksumVerdict::Malformed { recorded } => {
@@ -163,9 +166,12 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
         let mut plugin = match host::build_plugin(&wasm, ctx) {
             Ok(p) => p,
             Err(error) => {
-                rustline_core::diag::warn_once(&format!("plugin-skip:instantiate:{stem}"), || {
-                    tracing::warn!(plugin = %stem, %error, "failed to instantiate plugin, skipping");
-                });
+                rustline_core::diag::warn_once(
+                    &format!("plugin-skip:instantiate:{stem}:{error}"),
+                    || {
+                        tracing::warn!(plugin = %stem, %error, "failed to instantiate plugin, skipping");
+                    },
+                );
                 continue;
             }
         };
@@ -173,7 +179,7 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
             Ok(name) if name == stem => {}
             Ok(name) => {
                 rustline_core::diag::warn_once(
-                    &format!("plugin-skip:name-mismatch:{stem}"),
+                    &format!("plugin-skip:name-mismatch:{stem}:{name}"),
                     || {
                         tracing::warn!(plugin = %stem, exported = %name, "plugin name mismatch, skipping");
                     },
@@ -205,14 +211,17 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
                 tracing::info!(plugin = %stem, "plugin has no abi_version export, registering as legacy");
             }
             AbiDecision::Skip => {
-                rustline_core::diag::warn_once(&format!("plugin-skip:abi-mismatch:{stem}"), || {
-                    tracing::warn!(
-                        plugin = %stem,
-                        host = ABI_VERSION,
-                        guest = ?guest_abi_version,
-                        "plugin ABI version mismatch, skipping"
-                    );
-                });
+                rustline_core::diag::warn_once(
+                    &format!("plugin-skip:abi-mismatch:{stem}:{guest_abi_version:?}"),
+                    || {
+                        tracing::warn!(
+                            plugin = %stem,
+                            host = ABI_VERSION,
+                            guest = ?guest_abi_version,
+                            "plugin ABI version mismatch, skipping"
+                        );
+                    },
+                );
                 continue;
             }
         }

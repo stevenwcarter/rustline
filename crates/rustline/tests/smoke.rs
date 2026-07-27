@@ -1498,6 +1498,79 @@ fn warning_lands_in_log_file_and_not_stderr_at_default() {
     );
 }
 
+/// Pins the `warn_once` cross-process dedup layer end-to-end: that
+/// `warn_once::install` is actually reached from `main` (a wiring
+/// regression here leaves every test in `warn_once.rs` green, since those
+/// only exercise `should_emit`/`reset_if_generation_changed` directly —
+/// never the real hook), that `marker_dir()` resolves to a real, usable
+/// path, and that installing after `logging::init` still lets the warning
+/// reach the log file. Two renders of an unchanged config log the warning
+/// once; touching the config file re-arms it for exactly one more.
+#[test]
+fn warn_dedup_resets_when_config_mtime_changes() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    fs::create_dir_all(config.join("rustline")).unwrap();
+    let config_path = config.join("rustline/config.toml");
+    let config_body = "[layout]\nleft = [\"definitely_not_a_widget\"]\n";
+    fs::write(&config_path, config_body).unwrap();
+
+    let render = || {
+        let out = isolated_cmd(&home, &data, &config)
+            .args([
+                "render",
+                "left",
+                "--session",
+                "0",
+                "--window",
+                "0",
+                "--pane",
+                "0",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "render exited 0");
+    };
+
+    // Same XDG_DATA_HOME (and thus the same marker dir) across both
+    // renders, each a fresh process — cross-process state is the whole
+    // point of this layer.
+    render();
+    render();
+
+    let log = read_only_log_file(&data.join("rustline"));
+    assert_eq!(
+        log.matches("unknown widget").count(),
+        1,
+        "two renders of one config warn once, not twice; got: {log}"
+    );
+
+    // Bump the mtime forward explicitly rather than relying on the
+    // filesystem's write-timing resolution alone (not guaranteed
+    // sub-second everywhere): this is what actually changes the
+    // generation string and re-arms the warn.
+    let before = fs::metadata(&config_path).unwrap().modified().unwrap();
+    fs::write(&config_path, config_body).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&config_path)
+        .unwrap()
+        .set_modified(before + std::time::Duration::from_secs(1))
+        .unwrap();
+    render();
+
+    let log = read_only_log_file(&data.join("rustline"));
+    assert_eq!(
+        log.matches("unknown widget").count(),
+        2,
+        "a config edit re-arms the warn for one more render; got: {log}"
+    );
+}
+
 #[test]
 fn stderr_level_override_promotes_warning_to_stderr() {
     let dir = tempdir().unwrap();
