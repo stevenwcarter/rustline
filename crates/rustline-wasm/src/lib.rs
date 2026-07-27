@@ -188,7 +188,7 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
             }
             Err(error) => {
                 rustline_core::diag::warn_once(
-                    &format!("plugin-skip:no-name-export:{stem}"),
+                    &format!("plugin-skip:no-name-export:{stem}:{error}"),
                     || {
                         tracing::warn!(plugin = %stem, %error, "plugin missing name export, skipping");
                     },

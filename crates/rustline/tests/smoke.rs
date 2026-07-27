@@ -1571,6 +1571,112 @@ fn warn_dedup_resets_when_config_mtime_changes() {
     );
 }
 
+/// IMPORTANT-2 regression: pins `install`'s refusal to install the dedup
+/// hook at all when the marker dir is wedged. The unit test
+/// `a_wedged_marker_dir_reports_reset_failure` in `warn_once.rs` only pins
+/// that `reset_if_generation_changed` *reports* failure — it calls that
+/// function directly and never exercises `install`'s early return, so a
+/// future `let _ = reset_if_generation_changed(…)` in `install` (installing
+/// the hook unconditionally regardless of the result) would leave every
+/// test in that module green. Such a regression would be dangerous in
+/// exactly the shape `CRITICAL-1` already fixed once: with the hook
+/// installed anyway, `should_emit` would find the first render's stale `k`
+/// marker still present (its removal having failed for the same wedged-dir
+/// reason) and suppress the second render's warn via `AlreadyExists` — the
+/// wrong dedup outcome arrived at by accident, not by design. Only
+/// `install`'s actual refusal (no hook installed at all, so every warn in
+/// that run emits unconditionally) produces the 1 -> 2 count asserted below;
+/// the accidental-suppression path would leave it stuck at 1.
+#[test]
+#[cfg(unix)]
+fn warn_dedup_disables_when_marker_dir_is_wedged() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Unix mode bits are meaningless to root; see the identical guard on
+    // `a_wedged_marker_dir_reports_reset_failure` in `warn_once.rs`.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: running as root, permission bits aren't enforced");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    fs::create_dir_all(config.join("rustline")).unwrap();
+    let config_path = config.join("rustline/config.toml");
+    let config_body = "[layout]\nleft = [\"definitely_not_a_widget\"]\n";
+    fs::write(&config_path, config_body).unwrap();
+
+    let render = || {
+        let out = isolated_cmd(&home, &data, &config)
+            .args([
+                "render",
+                "left",
+                "--session",
+                "0",
+                "--window",
+                "0",
+                "--pane",
+                "0",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "render exited 0");
+    };
+
+    render();
+    let log = read_only_log_file(&data.join("rustline"));
+    assert_eq!(
+        log.matches("unknown widget").count(),
+        1,
+        "first render warns once; got: {log}"
+    );
+
+    // Wedge the marker dir: an unwritable directory (blocks removing or
+    // creating entries) *and* an unwritable stamp file (blocks overwriting
+    // its content directly) — a directory-only chmod still lets an existing
+    // file's bytes be overwritten in place, so the stamp is chmod'd too,
+    // matching the established pattern at `warn_once.rs`'s
+    // `a_wedged_marker_dir_reports_reset_failure`.
+    let marker_dir = data.join("rustline/.warn-markers");
+    let stamp = marker_dir.join(".generation");
+    fs::set_permissions(&stamp, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(&marker_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Bump the config's mtime forward (content unchanged) so the next
+    // render's generation actually differs from the recorded one, driving
+    // `reset_if_generation_changed` into the remove-and-restamp path — the
+    // wedge above is what makes that path fail. An unchanged generation
+    // would short-circuit on the matching stamp before ever touching the
+    // wedged permissions, defeating the point of this test.
+    let before = fs::metadata(&config_path).unwrap().modified().unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&config_path)
+        .unwrap()
+        .set_modified(before + std::time::Duration::from_secs(1))
+        .unwrap();
+
+    render();
+
+    // Restore permissions before any assertion below can panic, so the
+    // tempdir's own Drop cleanup (which unlinks everything inside
+    // `marker_dir`) doesn't fail.
+    fs::set_permissions(&marker_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&stamp, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let log = read_only_log_file(&data.join("rustline"));
+    assert_eq!(
+        log.matches("unknown widget").count(),
+        2,
+        "a wedged marker dir must disable dedup for the whole run rather than \
+         suppress via a stale marker; got: {log}"
+    );
+}
+
 #[test]
 fn stderr_level_override_promotes_warning_to_stderr() {
     let dir = tempdir().unwrap();

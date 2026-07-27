@@ -81,7 +81,15 @@ fn reset_if_generation_changed(dir: &Path, generation: &str) -> bool {
     if std::fs::read_to_string(&stamp).ok().as_deref() == Some(generation) {
         return true;
     }
-    let _ = std::fs::remove_dir_all(dir);
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => {}
+        // The first-run path: no markers have ever been written, so there's
+        // nothing to clear. Any other error means something in `dir`
+        // couldn't be removed, so stale markers may survive — that must
+        // propagate as `false`, not be swallowed here.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return false,
+    }
     std::fs::create_dir_all(dir).is_ok() && std::fs::write(&stamp, generation).is_ok()
 }
 
@@ -242,7 +250,8 @@ mod tests {
         // above pins; `install`'s refusal to install the hook when this
         // returns `false` is what keeps an already-marked key like `k`
         // from staying wedged shut (covered end-to-end by
-        // `warn_dedup_resets_when_config_mtime_changes` in `tests/smoke.rs`).
+        // `warn_dedup_disables_when_marker_dir_is_wedged` in
+        // `tests/smoke.rs`).
         assert!(new_key_still_emits);
     }
 }
