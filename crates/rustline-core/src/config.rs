@@ -1374,9 +1374,10 @@ impl<'de> Deserialize<'de> for PluginSource {
 
 /// Per-plugin configuration, keyed by plugin name in [`Config::plugins`].
 ///
-/// Capability fields (`allowed_urls`, `allowed_paths`, `allowed_commands`,
-/// `max_state_bytes`) are enforced by the WASM host, never by the guest.
-/// `options` is opaque to the host and forwarded to the plugin verbatim.
+/// Capability fields (`allowed_urls`, `allowed_paths`, `allowed_write_paths`,
+/// `allowed_commands`, `max_state_bytes`) are enforced by the WASM host,
+/// never by the guest. `options` is opaque to the host and forwarded to the
+/// plugin verbatim.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PluginConfig {
     #[serde(default)]
@@ -1385,6 +1386,28 @@ pub struct PluginConfig {
     pub allowed_urls: Vec<String>,
     #[serde(default)]
     pub allowed_paths: Vec<String>,
+    /// Filesystem paths this plugin may **write**, as globs. Deliberately
+    /// separate from `allowed_paths`, which is read-only: the two used to be
+    /// one list, so approving a manifest that looked like "reads your aliases
+    /// to show a badge" also handed the plugin arbitrary overwrite of those
+    /// files. Empty by default — deny by default (invariant N1).
+    ///
+    /// Migration: an existing `allowed_paths` entry grants read only. A plugin
+    /// that was writing through it now fails closed, loudly (a denial record
+    /// plus a log line), rather than silently.
+    #[serde(default)]
+    pub allowed_write_paths: Vec<String>,
+    /// Resolve symlinks before matching a path against the allowlists.
+    ///
+    /// Off by default, in which case a path whose components include a symlink
+    /// is denied outright: a grant is otherwise a grant over *names*, and any
+    /// symlink planted under a granted prefix — by an extracted archive, a
+    /// synced directory, another tool — silently redirects the effect to its
+    /// target. Turning this on resolves the path first and matches the
+    /// allowlist against the *resolved* location, which is safe but means a
+    /// grant follows links out of the directory the user thought they granted.
+    #[serde(default)]
+    pub resolve_symlinks: bool,
     /// Command allow-patterns for the exec capability. Each entry is a glob by
     /// default, or a regex when prefixed `re:`, matched against the
     /// **canonical argv string** (`rustline_wasm::canonical_argv`) — the whole
@@ -1421,6 +1444,8 @@ impl Default for PluginConfig {
             source: None,
             allowed_urls: Vec::new(),
             allowed_paths: Vec::new(),
+            allowed_write_paths: Vec::new(),
+            resolve_symlinks: false,
             allowed_commands: Vec::new(),
             max_state_bytes: default_max_state_bytes(),
             checksum: None,
@@ -2149,6 +2174,26 @@ zip = "48183"
         let w = c.plugins.get("weather").unwrap();
         assert_eq!(w.tag.as_deref(), Some("v1.2.0"));
         assert_eq!(w.checksum.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn allowed_write_paths_and_resolve_symlinks_default_and_roundtrip() {
+        // Absent -> empty/false (deny-by-default, resolution off by default).
+        let default: PluginConfig = toml::from_str("").unwrap();
+        assert!(default.allowed_write_paths.is_empty());
+        assert!(!default.resolve_symlinks);
+
+        let toml = concat!(
+            "[plugins.weather]\n",
+            "allowed_write_paths = [\"/home/u/notes/*\"]\n",
+            "resolve_symlinks = true\n",
+        );
+        let c: Config = toml::from_str(toml).unwrap();
+        let serialized = toml::to_string(&c).unwrap();
+        let back: Config = toml::from_str(&serialized).unwrap();
+        let w = back.plugins.get("weather").unwrap();
+        assert_eq!(w.allowed_write_paths, vec!["/home/u/notes/*".to_string()]);
+        assert!(w.resolve_symlinks);
     }
 
     #[test]

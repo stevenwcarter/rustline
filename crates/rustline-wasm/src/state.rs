@@ -40,6 +40,56 @@ pub fn normalize_abs(path: &str) -> Result<String, String> {
     Ok(path.to_string())
 }
 
+/// Resolve a plugin-supplied absolute path into the string the allowlists are
+/// matched against.
+///
+/// `normalize_abs` alone matches against the path as *written*, so a grant is a
+/// grant over names rather than over a filesystem subtree: with
+/// `allowed_paths = ["/home/u/notes/*"]`, a symlink at `~/notes/todo` pointing
+/// at `~/.bashrc` passes the gate and the effect lands on `.bashrc`. The `..`
+/// rejection is complete for literal traversal and does nothing about this.
+///
+/// Default (`resolve_symlinks = false`): any existing symlink component is
+/// rejected outright. With `resolve_symlinks = true`: the path is canonicalized
+/// and the *canonical* string is returned, so the allowlist is matched against
+/// where the write will actually land. Either way, resolution happens strictly
+/// before the allowlist check.
+pub fn resolve_for_allowlist(path: &str, resolve_symlinks: bool) -> Result<String, String> {
+    let norm = normalize_abs(path)?;
+    let p = Path::new(&norm);
+    if !resolve_symlinks {
+        // Walk every ancestor; a component that does not exist cannot be a
+        // symlink, and a write target legitimately may not exist yet.
+        for ancestor in p.ancestors() {
+            match std::fs::symlink_metadata(ancestor) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    return Err(
+                        "symlink not allowed; set resolve_symlinks = true for this plugin".into(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        return Ok(norm);
+    }
+    // Resolve. A not-yet-existing target resolves through its parent so a
+    // first write to a granted directory still works.
+    let resolved = match std::fs::canonicalize(p) {
+        Ok(c) => c,
+        Err(_) => {
+            let parent = p.parent().ok_or("cannot resolve path")?;
+            let name = p.file_name().ok_or("cannot resolve path")?;
+            std::fs::canonicalize(parent)
+                .map_err(|e| format!("cannot resolve path: {e}"))?
+                .join(name)
+        }
+    };
+    resolved
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(|| "resolved path is not valid UTF-8".to_string())
+}
+
 #[cfg(test)]
 thread_local! {
     /// Test-only instrumentation: counts calls to [`dir_size`] on the current
@@ -148,6 +198,24 @@ mod tests {
     fn resolve_for_allowlist_keeps_normalize_abs_rules() {
         assert!(resolve_for_allowlist("relative/x", false).is_err());
         assert!(resolve_for_allowlist("/ok/../escape", false).is_err());
+    }
+
+    /// `resolve_for_allowlist(path, true)` falls back to canonicalizing the
+    /// parent when `path` itself doesn't exist yet (so a first write to a
+    /// granted directory still works — see the doc comment). When that
+    /// fallback *also* fails — the parent doesn't exist either — there is no
+    /// resolved location to match the allowlist against, and this must be a
+    /// hard denial, never a silent fall-through to the raw (unresolved)
+    /// string: that would defeat `resolve_symlinks` for exactly the
+    /// not-yet-existing-target case the feature exists to handle safely.
+    #[test]
+    fn resolve_for_allowlist_denies_rather_than_falls_through_when_canonicalization_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let unreachable = dir.path().join("missing").join("also_missing.txt");
+        assert!(
+            resolve_for_allowlist(unreachable.to_str().unwrap(), true).is_err(),
+            "canonicalization failing must deny, not fall through to the raw path"
+        );
     }
 
     #[test]

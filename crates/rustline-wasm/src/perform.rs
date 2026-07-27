@@ -17,7 +17,7 @@ use crate::cache::{
 use crate::capability::{CapabilityCtx, DenialKind};
 use crate::fetch::Fetcher;
 use crate::run::{MAX_OUTPUT_BYTES, Runner};
-use crate::state::{check_cap, normalize_abs, sanitize_relpath};
+use crate::state::{check_cap, resolve_for_allowlist, sanitize_relpath};
 
 pub fn perform_http_get(ctx: &CapabilityCtx, url: &str, fetcher: &dyn Fetcher) -> HttpResult {
     if !ctx.allowed_urls.allows(url) {
@@ -507,8 +507,17 @@ pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -
     }
 }
 
+/// Read an arbitrary file, gated by `allowed_paths` — the **read** allowlist;
+/// `allowed_write_paths` does not authorize a read (see `perform_file_write`
+/// for the write counterpart and why the two are separate).
+///
+/// **resolve → match → act (invariant N1, order load-bearing):** the path is
+/// resolved for symlinks (`resolve_for_allowlist`) strictly before the
+/// allowlist check, and the check strictly before the filesystem is touched —
+/// resolving after matching would let a symlink component slip past the
+/// allowlist entirely.
 pub fn perform_file_read(ctx: &CapabilityCtx, path: &str) -> ReadResult {
-    let norm = match normalize_abs(path) {
+    let norm = match resolve_for_allowlist(path, ctx.resolve_symlinks) {
         Ok(p) => p,
         Err(error) => {
             return ReadResult {
@@ -546,12 +555,22 @@ pub fn perform_file_read(ctx: &CapabilityCtx, path: &str) -> ReadResult {
     }
 }
 
+/// Write an arbitrary file, gated by `allowed_write_paths` — the **write**
+/// allowlist, deliberately separate from the read-only `allowed_paths`. The
+/// two used to be one list: approving a manifest that requested a path
+/// advertised as "read your aliases to show a badge" also handed the plugin
+/// arbitrary overwrite of that file (see `PluginConfig::allowed_write_paths`'s
+/// doc for the exploit and the migration ruling — an existing `allowed_paths`
+/// entry now grants read only).
+///
+/// **resolve → match → act (invariant N1, order load-bearing):** see
+/// `perform_file_read`'s doc — the same ordering applies here.
 pub fn perform_file_write(ctx: &CapabilityCtx, path: &str, contents: &str) -> WriteResult {
-    let norm = match normalize_abs(path) {
+    let norm = match resolve_for_allowlist(path, ctx.resolve_symlinks) {
         Ok(p) => p,
         Err(error) => return WriteResult { ok: false, error },
     };
-    if !ctx.allowed_paths.allows(&norm) {
+    if !ctx.allowed_write_paths.allows(&norm) {
         ctx.observe_denial(DenialKind::Path, &norm);
         return WriteResult {
             ok: false,

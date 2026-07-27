@@ -216,9 +216,13 @@ pub enum PluginCmd {
     /// Manage a plugin's URL allowlist.
     #[command(subcommand)]
     Url(PatternCmd),
-    /// Manage a plugin's filesystem-path allowlist.
+    /// Manage a plugin's filesystem-path **read** allowlist.
     #[command(subcommand)]
     Path(PatternCmd),
+    /// Manage a plugin's filesystem-path write allowlist. Separate from
+    /// `path`: a read grant never authorizes a write.
+    #[command(subcommand)]
+    WritePath(PatternCmd),
     /// Manage a plugin's command allowlist (the exec capability). Patterns are
     /// matched against the whole canonical argv, not just the program.
     #[command(subcommand)]

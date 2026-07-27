@@ -26,11 +26,12 @@ const MANIFEST_SECTION: &str = "rustline-manifest";
 
 /// A plugin's declared capability requests.
 ///
-/// `requested_urls`/`requested_paths` are exactly what `plugin approve` writes
-/// into the plugin's `allowed_urls`/`allowed_paths` — verbatim, and nothing
-/// more (per-plugin scope, deny-by-default). Every field is `#[serde(default)]`
-/// so a minimal manifest (e.g. just `requested_urls = [...]`) still parses;
-/// `name`/`version` are informational, shown by `approve`/`list`.
+/// `requested_urls`/`requested_paths`/`requested_write_paths` are exactly what
+/// `plugin approve` writes into the plugin's `allowed_urls`/`allowed_paths`/
+/// `allowed_write_paths` — verbatim, and nothing more (per-plugin scope,
+/// deny-by-default). Every field is `#[serde(default)]` so a minimal manifest
+/// (e.g. just `requested_urls = [...]`) still parses; `name`/`version` are
+/// informational, shown by `approve`/`list`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PluginManifest {
     /// The plugin's own name (should match the `.wasm`/sidecar stem).
@@ -42,9 +43,16 @@ pub struct PluginManifest {
     /// URL allow-patterns the plugin asks the user to approve.
     #[serde(default)]
     pub requested_urls: Vec<String>,
-    /// Filesystem-path allow-patterns the plugin asks the user to approve.
+    /// Read-only filesystem-path allow-patterns the plugin asks the user to
+    /// approve. Approved into `allowed_paths`, which never authorizes a
+    /// write — see `requested_write_paths` for that.
     #[serde(default)]
     pub requested_paths: Vec<String>,
+    /// Paths the plugin asks to be able to **write**. Approved into
+    /// `allowed_write_paths`, which is separate from the read-only
+    /// `allowed_paths` — see `PluginConfig` for why.
+    #[serde(default)]
+    pub requested_write_paths: Vec<String>,
     /// Command allow-patterns the plugin asks the user to approve. Written
     /// verbatim into `allowed_commands` by `plugin approve` — never widened.
     #[serde(default)]
@@ -247,6 +255,7 @@ mod tests {
                 version: "1.2.3".into(),
                 requested_urls: vec!["https://a/*".into()],
                 requested_paths: vec!["/tmp/x".into()],
+                requested_write_paths: Vec::new(),
                 requested_commands: Vec::new(),
             }
         );
@@ -370,5 +379,30 @@ mod tests {
         .unwrap();
         let m = resolve_manifest(dir.path(), "p").unwrap();
         assert!(m.requested_commands.is_empty());
+    }
+
+    #[test]
+    fn a_manifest_parses_requested_write_paths_separately_from_requested_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("p.toml"),
+            "requested_paths = [\"/home/u/.bashrc\"]\nrequested_write_paths = [\"/home/u/notes/*\"]\n",
+        )
+        .unwrap();
+        let m = resolve_manifest(dir.path(), "p").unwrap();
+        assert_eq!(m.requested_paths, ["/home/u/.bashrc"]);
+        assert_eq!(m.requested_write_paths, ["/home/u/notes/*"]);
+    }
+
+    #[test]
+    fn a_manifest_without_requested_write_paths_still_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("p.toml"),
+            "requested_paths = [\"/home/u/.bashrc\"]\n",
+        )
+        .unwrap();
+        let m = resolve_manifest(dir.path(), "p").unwrap();
+        assert!(m.requested_write_paths.is_empty());
     }
 }

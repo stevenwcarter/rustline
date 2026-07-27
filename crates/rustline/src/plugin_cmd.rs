@@ -32,6 +32,7 @@ const PLUGIN_LIB_TEMPLATE: &str = include_str!("../assets/plugin-lib.rs.tmpl");
 enum Kind {
     Url,
     Path,
+    WritePath,
     Command,
 }
 
@@ -40,6 +41,7 @@ impl Kind {
         match self {
             Kind::Url => "allowed_urls",
             Kind::Path => "allowed_paths",
+            Kind::WritePath => "allowed_write_paths",
             Kind::Command => "allowed_commands",
         }
     }
@@ -57,6 +59,7 @@ pub fn run(cmd: PluginCmd, config_path: &Path, plugin_dir: &Path) {
         } => search(config_path, plugin_dir, query.as_deref(), json, refresh),
         PluginCmd::Url(pc) => pattern_cmd(pc, Kind::Url, config_path),
         PluginCmd::Path(pc) => pattern_cmd(pc, Kind::Path, config_path),
+        PluginCmd::WritePath(pc) => pattern_cmd(pc, Kind::WritePath, config_path),
         PluginCmd::Cmd(pc) => pattern_cmd(pc, Kind::Command, config_path),
         PluginCmd::Approve(args) => approve(args, config_path, plugin_dir),
         PluginCmd::Install(args) => crate::plugin_install::install(&args, config_path, plugin_dir),
@@ -386,13 +389,15 @@ fn list(config_path: &Path, plugin_dir: &Path, json: bool) {
         println!("  checksum: {}", checksum_status.label());
         println!("  allowed_urls: {:?}", pc.allowed_urls);
         println!("  allowed_paths: {:?}", pc.allowed_paths);
+        println!("  allowed_write_paths: {:?}", pc.allowed_write_paths);
         println!("  allowed_commands: {:?}", pc.allowed_commands);
         println!("  max_state_bytes: {}", pc.max_state_bytes);
         if let Some(m) = resolve_manifest(plugin_dir, name) {
             println!(
-                "  declared capabilities: {} urls, {} paths, {} commands (run `plugin approve {name}`)",
+                "  declared capabilities: {} urls, {} paths, {} write paths, {} commands (run `plugin approve {name}`)",
                 m.requested_urls.len(),
                 m.requested_paths.len(),
+                m.requested_write_paths.len(),
                 m.requested_commands.len()
             );
         }
@@ -408,6 +413,7 @@ fn pattern_cmd(cmd: PatternCmd, kind: Kind, config_path: &Path) {
             let patterns = cfg.plugins.get(&plugin).map(|p| match kind {
                 Kind::Url => &p.allowed_urls,
                 Kind::Path => &p.allowed_paths,
+                Kind::WritePath => &p.allowed_write_paths,
                 Kind::Command => &p.allowed_commands,
             });
             if json {
@@ -451,6 +457,7 @@ fn approve(args: ApproveArgs, config_path: &Path, plugin_dir: &Path) {
     print!("{}", manifest_report(&manifest));
     if manifest.requested_urls.is_empty()
         && manifest.requested_paths.is_empty()
+        && manifest.requested_write_paths.is_empty()
         && manifest.requested_commands.is_empty()
     {
         println!("manifest requests no capabilities; nothing to approve");
@@ -479,8 +486,15 @@ fn manifest_report(m: &PluginManifest) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "plugin {name} (version {version}) requests:");
     write_requests(&mut out, "allowed_urls", &m.requested_urls);
-    write_requests(&mut out, "allowed_paths", &m.requested_paths);
+    write_requests(&mut out, "allowed_paths (read-only)", &m.requested_paths);
+    write_requests(&mut out, "allowed_write_paths", &m.requested_write_paths);
     write_requests(&mut out, "allowed_commands", &m.requested_commands);
+    if !m.requested_write_paths.is_empty() {
+        out.push_str(
+            "\n  ! allowed_write_paths lets this plugin overwrite these files with\n\
+             \x20 ! any content. Approve only paths you understand.\n",
+        );
+    }
     if !m.requested_commands.is_empty() {
         out.push_str(
             "\n  ! allowed_commands runs real programs on your machine with your\n\
@@ -532,6 +546,12 @@ fn write_grants(config_path: &Path, plugin: &str, m: &PluginManifest) {
         append_unique(
             allowlist_array(table, plugin, Kind::Path.key()),
             &m.requested_paths,
+        );
+    }
+    if !m.requested_write_paths.is_empty() {
+        append_unique(
+            allowlist_array(table, plugin, Kind::WritePath.key()),
+            &m.requested_write_paths,
         );
     }
     if !m.requested_commands.is_empty() {
@@ -927,11 +947,23 @@ mod tests {
     use super::*;
 
     fn manifest(urls: &[&str], paths: &[&str]) -> PluginManifest {
+        manifest_with_write_paths(urls, paths, &[])
+    }
+
+    /// Sibling to [`manifest`] for tests that need `requested_write_paths`
+    /// populated too, without adding a rarely-used parameter to every
+    /// existing `manifest(urls, paths)` call site.
+    fn manifest_with_write_paths(
+        urls: &[&str],
+        paths: &[&str],
+        write_paths: &[&str],
+    ) -> PluginManifest {
         PluginManifest {
             name: "w".into(),
             version: "1".into(),
             requested_urls: urls.iter().map(|s| s.to_string()).collect(),
             requested_paths: paths.iter().map(|s| s.to_string()).collect(),
+            requested_write_paths: write_paths.iter().map(|s| s.to_string()).collect(),
             requested_commands: Vec::new(),
         }
     }
@@ -1024,9 +1056,74 @@ mod tests {
         assert_eq!(list_of(&text, "w", "allowed_commands"), ["git status*"]);
     }
 
+    /// The load-bearing regression test for this task: a manifest requesting
+    /// only a *read* path must never grant a write. Before the split,
+    /// `requested_paths` was written straight into the single `allowed_paths`
+    /// list that both `perform_file_read` and `perform_file_write` gated on;
+    /// this pins that `write_grants` now writes `requested_paths` into
+    /// `allowed_paths` ONLY, never touching `allowed_write_paths`.
+    #[test]
+    fn write_grants_a_read_only_manifest_never_populates_the_write_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(&cfg, "[plugins.w]\n").unwrap();
+
+        write_grants(&cfg, "w", &manifest(&[], &["/home/u/.bashrc"]));
+
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(list_of(&text, "w", "allowed_paths"), ["/home/u/.bashrc"]);
+        assert!(
+            list_of(&text, "w", "allowed_write_paths").is_empty(),
+            "a read-only request must not grant a write: {text}"
+        );
+        assert!(!text.contains("allowed_write_paths"), "{text}");
+    }
+
+    #[test]
+    fn write_grants_writes_requested_write_paths_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(&cfg, "[plugins.w]\n").unwrap();
+
+        write_grants(
+            &cfg,
+            "w",
+            &manifest_with_write_paths(&[], &[], &["/home/u/notes/*"]),
+        );
+
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(
+            list_of(&text, "w", "allowed_write_paths"),
+            ["/home/u/notes/*"]
+        );
+        // Nothing was widened beyond what was requested.
+        assert!(list_of(&text, "w", "allowed_paths").is_empty());
+        assert!(!text.contains("allowed_urls"), "{text}");
+    }
+
+    #[test]
+    fn approving_write_paths_twice_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(&cfg, "[plugins.w]\n").unwrap();
+        let m = manifest_with_write_paths(&[], &[], &["/home/u/notes/*"]);
+        write_grants(&cfg, "w", &m);
+        write_grants(&cfg, "w", &m);
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(
+            list_of(&text, "w", "allowed_write_paths"),
+            ["/home/u/notes/*"]
+        );
+    }
+
     #[test]
     fn the_command_kind_maps_to_the_allowed_commands_key() {
         assert_eq!(Kind::Command.key(), "allowed_commands");
+    }
+
+    #[test]
+    fn the_write_path_kind_maps_to_the_allowed_write_paths_key() {
+        assert_eq!(Kind::WritePath.key(), "allowed_write_paths");
     }
 
     #[test]
@@ -1050,6 +1147,32 @@ mod tests {
             !text.to_lowercase().contains("runs real programs"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_manifest_requesting_write_paths_prints_the_overwrite_warning() {
+        let m = manifest_with_write_paths(&[], &[], &["/home/u/notes/*"]);
+        let text = manifest_report(&m);
+        assert!(text.contains("allowed_write_paths"), "{text}");
+        assert!(text.contains("/home/u/notes/*"), "{text}");
+        assert!(
+            text.to_lowercase().contains("overwrite"),
+            "the overwrite warning is shown: {text}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_without_write_paths_prints_no_overwrite_warning() {
+        let m = manifest(&["https://a/*"], &["/tmp/x"]);
+        let text = manifest_report(&m);
+        assert!(!text.to_lowercase().contains("overwrite"), "{text}");
+    }
+
+    #[test]
+    fn a_manifest_report_labels_the_read_only_path_line() {
+        let m = manifest(&[], &["/tmp/x"]);
+        let text = manifest_report(&m);
+        assert!(text.contains("allowed_paths (read-only)"), "{text}");
     }
 
     #[test]

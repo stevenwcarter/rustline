@@ -56,10 +56,23 @@ impl DenialObserver for NoopObserver {
     fn observe(&self, _plugin: &str, _kind: DenialKind, _target: &str) {}
 }
 
+/// Per-instance capability grants and quota state. `allowed_paths` (read) and
+/// `allowed_write_paths` (write) are deliberately separate allowlists — a
+/// grant on one never authorizes the other — so approving a manifest that
+/// only requests a read cannot be leveraged into an overwrite.
 pub struct CapabilityCtx {
     pub name: String,
     pub allowed_urls: AllowSet,
+    /// The **read** allowlist. Deliberately not a write grant — see
+    /// `allowed_write_paths`.
     pub allowed_paths: AllowSet,
+    /// The **write** allowlist, separate from the read-only `allowed_paths`.
+    /// See `PluginConfig::allowed_write_paths` for the exploit this split
+    /// closes.
+    pub allowed_write_paths: AllowSet,
+    /// Resolve symlinks before matching a path against either allowlist
+    /// above. See `PluginConfig::resolve_symlinks`.
+    pub resolve_symlinks: bool,
     pub allowed_commands: AllowSet,
     pub state_root: PathBuf,
     pub max_state_bytes: u64,
@@ -101,6 +114,8 @@ impl CapabilityCtx {
             name: name.to_string(),
             allowed_urls: AllowSet::compile(&pc.allowed_urls),
             allowed_paths: AllowSet::compile(&pc.allowed_paths),
+            allowed_write_paths: AllowSet::compile(&pc.allowed_write_paths),
+            resolve_symlinks: pc.resolve_symlinks,
             allowed_commands: AllowSet::compile(&pc.allowed_commands),
             state_root,
             max_state_bytes: pc.max_state_bytes,
