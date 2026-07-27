@@ -327,7 +327,7 @@ fn main() {
                 config: &cfg_path,
                 themes_dir: &themes_dir(),
                 plugin_dir: &plugin_dir,
-                log_file: &logging::log_path(&cfg.log),
+                log_file: &logging::current_log_path(&cfg.log),
                 tmux_conf: &tmux_conf_path(),
                 plugins: &cfg.plugins,
                 cfg: &cfg,

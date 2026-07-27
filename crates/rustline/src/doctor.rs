@@ -77,7 +77,7 @@ struct Check {
 
 /// Resolved paths a doctor run checks and reports, resolved by the caller
 /// the same way every other subcommand resolves them (`config_path`,
-/// `themes_dir`, `resolve_plugin_dir`, `logging::log_path`, `tmux_conf_path`
+/// `themes_dir`, `resolve_plugin_dir`, `logging::current_log_path`, `tmux_conf_path`
 /// in `main.rs`).
 pub(crate) struct DoctorPaths<'a> {
     pub config: &'a Path,
@@ -591,7 +591,7 @@ pub(crate) fn run(paths: &DoctorPaths) -> i32 {
     println!("  config:  {}", paths.config.display());
     println!("  themes:  {}", paths.themes_dir.display());
     println!("  plugins: {}", paths.plugin_dir.display());
-    println!("  log:     {}", paths.log_file.display());
+    println!("  log:     {} (daily, 7 kept)", paths.log_file.display());
 
     let fail_count = checks
         .iter()

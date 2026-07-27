@@ -1426,6 +1426,23 @@ fn isolated_cmd(home: &Path, xdg_data: &Path, xdg_config: &Path) -> Command {
     c
 }
 
+/// Reads the one log file `tracing-appender` rotated into `dir` (named
+/// `rustline.<date>.log`, so a fixed filename can't be asserted here). Each
+/// of these tests runs a single `render`, so exactly one file is expected.
+fn read_only_log_file(dir: &Path) -> String {
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .expect("log dir created")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "exactly one log file in {dir:?}: {entries:?}"
+    );
+    fs::read_to_string(entries.remove(0)).expect("log file readable")
+}
+
 #[test]
 fn warning_lands_in_log_file_and_not_stderr_at_default() {
     let dir = tempdir().unwrap();
@@ -1466,7 +1483,7 @@ fn warning_lands_in_log_file_and_not_stderr_at_default() {
     );
 
     // The file sink (INFO) captured the WARN.
-    let log = fs::read_to_string(data.join("rustline/rustline.log")).expect("log file created");
+    let log = read_only_log_file(&data.join("rustline"));
     assert!(
         log.contains("unknown widget"),
         "warning captured in log file; got: {log}"
@@ -1549,7 +1566,7 @@ fn invalid_config_warning_lands_in_log_file() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let log = fs::read_to_string(data.join("rustline/rustline.log")).expect("log file created");
+    let log = read_only_log_file(&data.join("rustline"));
     assert!(
         log.contains("invalid config"),
         "deferred load-warning reaches the log file after logging::init; got: {log}"
@@ -1570,7 +1587,7 @@ fn unwritable_log_dir_degrades_to_stderr_only() {
         dir.path().join("config"),
     );
     fs::create_dir_all(&data).unwrap();
-    // Occupies `$XDG_DATA_HOME/rustline`, so `open_log`'s
+    // Occupies `$XDG_DATA_HOME/rustline`, so `logging::init`'s
     // `create_dir_all($XDG_DATA_HOME/rustline)` fails: a non-directory
     // already exists at that path.
     fs::write(data.join("rustline"), "not a directory").unwrap();
@@ -1599,8 +1616,8 @@ fn unwritable_log_dir_degrades_to_stderr_only() {
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("cannot open log file"),
-        "file-open failure degrades to a stderr-only report; got: {stderr}"
+        stderr.contains("cannot open log dir"),
+        "dir-open failure degrades to a stderr-only report; got: {stderr}"
     );
 }
 
@@ -1775,7 +1792,10 @@ fn doctor_runs_and_prints_resolved_paths() {
     let expected_config = config.join("rustline/config.toml");
     let expected_themes = config.join("rustline/themes");
     let expected_plugins = data.join("rustline/plugins");
-    let expected_log = data.join("rustline/rustline.log");
+    // The log file name carries today's date (see `logging::current_log_path`),
+    // so only its directory is asserted here; the rotation scheme is asserted
+    // separately below.
+    let expected_log_dir = data.join("rustline");
     assert!(
         stdout.contains(&expected_config.display().to_string()),
         "resolved config path present: {stdout}"
@@ -1789,8 +1809,12 @@ fn doctor_runs_and_prints_resolved_paths() {
         "resolved plugin dir present: {stdout}"
     );
     assert!(
-        stdout.contains(&expected_log.display().to_string()),
-        "resolved log path present: {stdout}"
+        stdout.contains(&expected_log_dir.display().to_string()),
+        "resolved log dir present: {stdout}"
+    );
+    assert!(
+        stdout.contains("(daily, 7 kept)"),
+        "log row names the rotation scheme: {stdout}"
     );
 }
 
