@@ -575,23 +575,50 @@ pub fn perform_file_write(ctx: &CapabilityCtx, path: &str, contents: &str) -> Wr
     }
 }
 
-/// Longest guest log message forwarded to `tracing`, in bytes.
+/// Longest guest log message forwarded to `tracing`, in bytes — this bound
+/// includes the `TRUNCATION_MARKER` appended on truncation, so a truncated
+/// message's *body* is capped to `MAX_GUEST_LOG_BYTES - TRUNCATION_MARKER.len()`
+/// and the total never exceeds this constant. Keeping the marker inside the
+/// budget (rather than appended on top of it) is what makes this doc
+/// literally true instead of quietly overselling by `TRUNCATION_MARKER.len()`
+/// bytes — harmless at 2 KiB, but wrong if this is ever tuned against a real
+/// limit such as a syslog line cap.
 pub(crate) const MAX_GUEST_LOG_BYTES: usize = 2 * 1024;
+
 /// Most `rl_log` calls forwarded per plugin instance per process.
+///
+/// 256 and "per process, not per render" are both deliberate choices, not
+/// defaults that happened: the cap exists to bound how much a buggy loop or
+/// hostile plugin can write to the user's disk over the life of the
+/// process — the abuse case — not to give a well-behaved plugin a fresh
+/// debugging allowance every render. Resetting the budget per render would
+/// defeat it against exactly the failure mode it exists to stop, since a
+/// plugin logging every render would then log forever. That is harmless on
+/// the CLI path, where a fresh process (and so a fresh budget) starts every
+/// render; it means the counter accumulates across the daemon's whole
+/// lifetime once a plugin instance is warm there — see
+/// [`CapabilityCtx`]'s `log_calls` field
+/// for what that costs a well-behaved plugin under the daemon.
 pub(crate) const MAX_GUEST_LOG_CALLS: u32 = 256;
 
-/// Truncate `msg` to at most `MAX_GUEST_LOG_BYTES`, never splitting a
-/// character. The message is guest-supplied UTF-8, so a byte-index slice would
-/// panic on a multi-byte char straddling the cap.
+/// Appended to a guest message that was truncated. Budgeted *inside*
+/// `MAX_GUEST_LOG_BYTES` (see its doc), not added on top of it.
+const TRUNCATION_MARKER: &str = "…(truncated)";
+
+/// Truncate `msg` to at most `MAX_GUEST_LOG_BYTES` total, including
+/// `TRUNCATION_MARKER` when it truncates, and never splitting a character.
+/// The message is guest-supplied UTF-8, so a byte-index slice would panic on
+/// a multi-byte char straddling the cap.
 fn truncate_guest_msg(msg: &str) -> std::borrow::Cow<'_, str> {
     if msg.len() <= MAX_GUEST_LOG_BYTES {
         return std::borrow::Cow::Borrowed(msg);
     }
-    let mut end = MAX_GUEST_LOG_BYTES;
+    let body_cap = MAX_GUEST_LOG_BYTES.saturating_sub(TRUNCATION_MARKER.len());
+    let mut end = body_cap;
     while end > 0 && !msg.is_char_boundary(end) {
         end -= 1;
     }
-    std::borrow::Cow::Owned(format!("{}…(truncated)", &msg[..end]))
+    std::borrow::Cow::Owned(format!("{}{TRUNCATION_MARKER}", &msg[..end]))
 }
 
 /// Emit a guest log message through the host's `tracing` subscriber.
@@ -612,10 +639,14 @@ fn truncate_guest_msg(msg: &str) -> std::borrow::Cow<'_, str> {
 /// to is the user's only diagnostic when something goes wrong — so it must
 /// never be the thing that fills their disk. `msg` is truncated to
 /// `MAX_GUEST_LOG_BYTES` and calls are capped at `MAX_GUEST_LOG_CALLS` per
-/// instance per process. Neither check is a capability gate: nothing is
-/// denied, no `observe_denial` fires, and there is still no allowlist —
-/// every call still reaches `tracing`, just bounded in size and rate rather
-/// than admitted or refused.
+/// instance per process — "per process" means per render on the CLI path,
+/// but per daemon lifetime under the daemon, since a `CapabilityCtx` there is
+/// built once and kept warm (see `MAX_GUEST_LOG_CALLS`'s doc and
+/// [`CapabilityCtx`]'s `log_calls` field
+/// for what that costs a well-behaved plugin). Neither check is a capability
+/// gate: nothing is denied, no `observe_denial` fires, and there is still no
+/// allowlist — every call still reaches `tracing`, just bounded in size and
+/// rate rather than admitted or refused.
 pub fn perform_log(ctx: &CapabilityCtx, level: &str, msg: &str) {
     let calls = ctx.claim_log_call();
     if calls > MAX_GUEST_LOG_CALLS {
@@ -1544,7 +1575,7 @@ mod log_tests {
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Level, Metadata, Subscriber};
 
-    use super::{MAX_GUEST_LOG_BYTES, MAX_GUEST_LOG_CALLS, perform_log};
+    use super::{MAX_GUEST_LOG_BYTES, MAX_GUEST_LOG_CALLS, TRUNCATION_MARKER, perform_log};
     use crate::capability::CapabilityCtx;
     use rustline_core::PluginConfig;
 
@@ -1675,38 +1706,52 @@ mod log_tests {
         }
     }
 
+    /// No test in this module gives `perform_log` a real temp dir:
+    /// `rl_log` is capability-free (N1) and never touches the filesystem, so
+    /// a `tempfile::tempdir()` here would imply a capability that must not
+    /// exist. `std::path::PathBuf::from("/tmp")` is a placeholder
+    /// `state_root` that is never read, matching `capability.rs`'s own
+    /// capability tests.
+    fn unused_state_root() -> std::path::PathBuf {
+        std::path::PathBuf::from("/tmp")
+    }
+
     #[test]
     fn an_oversized_message_is_truncated() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), dir.path().into());
+        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), unused_state_root());
         let captured = with_recording_subscriber(|| {
             perform_log(&ctx, "info", &"x".repeat(10_000));
         });
-        assert!(captured.len() < 10_000, "message was truncated");
-        assert!(captured.contains("…(truncated)"), "truncation is marked");
+        assert!(
+            captured.len() <= MAX_GUEST_LOG_BYTES,
+            "message was truncated to the documented cap"
+        );
+        assert!(captured.contains(TRUNCATION_MARKER), "truncation is marked");
     }
 
     #[test]
     fn truncation_never_splits_a_multibyte_char() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), dir.path().into());
+        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), unused_state_root());
         // 3-byte chars straddling the byte cap: a naive &msg[..CAP] panics.
         let msg = "€".repeat(MAX_GUEST_LOG_BYTES);
         let captured = with_recording_subscriber(|| {
             perform_log(&ctx, "info", &msg); // must not panic
         });
-        assert!(captured.contains("…(truncated)"));
+        assert!(captured.contains(TRUNCATION_MARKER));
     }
 
     #[test]
     fn the_call_rate_is_capped_and_reported_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), dir.path().into());
+        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), unused_state_root());
         let captured = with_recording_subscriber(|| {
             for i in 0..(MAX_GUEST_LOG_CALLS + 50) {
                 perform_log(&ctx, "info", &format!("line {i}"));
             }
         });
+        assert!(
+            captured.contains(&format!("line {}", MAX_GUEST_LOG_CALLS - 1)),
+            "the last in-budget call is forwarded"
+        );
         assert!(!captured.contains(&format!("line {}", MAX_GUEST_LOG_CALLS + 10)));
         assert_eq!(
             captured.matches("guest log rate limit reached").count(),
@@ -1717,9 +1762,8 @@ mod log_tests {
 
     #[test]
     fn the_budget_is_per_plugin_instance() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = CapabilityCtx::from_config("a", &PluginConfig::default(), dir.path().into());
-        let b = CapabilityCtx::from_config("b", &PluginConfig::default(), dir.path().into());
+        let a = CapabilityCtx::from_config("a", &PluginConfig::default(), unused_state_root());
+        let b = CapabilityCtx::from_config("b", &PluginConfig::default(), unused_state_root());
         let captured = with_recording_subscriber(|| {
             for _ in 0..MAX_GUEST_LOG_CALLS {
                 perform_log(&a, "info", "from a");

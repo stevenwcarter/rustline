@@ -75,6 +75,23 @@ pub struct CapabilityCtx {
     /// is capability-free by design, so a rate cap — not a gate — is what
     /// keeps a buggy loop or a hostile plugin from filling the user's disk
     /// with the very log they would consult to find out why.
+    ///
+    /// "This process" means different things depending on how long the
+    /// process lives — the same split [`Self::state_size`] documents:
+    /// - **Short-lived renders** (`rustline render left|right`): a fresh
+    ///   process per render means a fresh budget per render, so the cap
+    ///   bounds *that render's* log volume and nothing more.
+    /// - **Daemon**: `CapabilityCtx` is built once per plugin instance and
+    ///   kept warm for the daemon's whole lifetime (`daemon.rs` builds the
+    ///   registry once and rebuilds only on a config-mtime change), so this
+    ///   counter is never reset per render — the budget is spent across
+    ///   every render the daemon serves. A well-behaved plugin logging one
+    ///   line per render goes permanently silent after
+    ///   `perform::MAX_GUEST_LOG_CALLS` renders (about 256 s at the default
+    ///   1 s tick) until the daemon restarts or its config changes. The
+    ///   one-shot `warn!` in `perform_log` leaves a breadcrumb explaining the
+    ///   silence; see `MAX_GUEST_LOG_CALLS`'s doc in `perform.rs` for why the
+    ///   budget is sized the way it is and why it is not reset per render.
     log_calls: AtomicU32,
 }
 
@@ -165,10 +182,24 @@ impl CapabilityCtx {
 
     /// Claim one guest-log slot. Returns how many calls have now been made
     /// (1-based), so the caller can emit exactly one limit notice.
+    ///
+    /// Uses `fetch_update` rather than `fetch_add` so the *stored* counter
+    /// saturates at `u32::MAX`, not just the value handed back here: a plain
+    /// `fetch_add` would still store the wrapped (post-overflow) value even
+    /// after saturating what it returns, so the counter would silently reset
+    /// to a small number every 2^32 calls — re-enabling logging and
+    /// re-firing the one-time limit notice. With a genuinely saturating
+    /// store, both the counter and this method's return value simply stop
+    /// moving once they reach `u32::MAX`, so "exactly one limit notice" is
+    /// actually true rather than true-until-2^32-calls.
     pub fn claim_log_call(&self) -> u32 {
-        self.log_calls
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1)
+        let previous = self
+            .log_calls
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_add(1))
+            })
+            .unwrap_or_else(|prev| prev);
+        previous.saturating_add(1)
     }
 
     // re-exported here so tests can build a ctx without touching the module path
