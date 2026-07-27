@@ -511,10 +511,16 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+
     use super::{CpuOpts, instance_opts};
     use crate::widget::Registry;
     use crate::{Config, Context, NetIface};
     use chrono::{Local, TimeZone};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Level, Metadata, Subscriber};
 
     fn ctx(ifaces: Vec<NetIface>) -> Context {
         Context {
@@ -1010,9 +1016,114 @@ mod tests {
     #[test]
     fn an_instance_table_with_only_the_extra_kind_key_parses_cleanly() {
         // CLAUDE.md documents the extra `kind` key as harmless; it must not be
-        // reported as a type error.
-        let v: toml::Value = toml::from_str("kind = \"cpu\"").unwrap();
+        // reported as a type error. Assert on a field the table actually
+        // sets (`spark_width = 20`), not just the default: asserting only
+        // `== CpuOpts::default().spark_width` can't tell a genuine parse
+        // (which happens to default `spark_width` because the table doesn't
+        // set it) apart from a parse *failure* (which also falls back to
+        // `T::default()`) — both produce the same value. Verified this
+        // version fails under a temporary `#[serde(deny_unknown_fields)]` on
+        // `CpuOpts` and passes without it; see the task-3 report.
+        let v: toml::Value = toml::from_str("kind = \"cpu\"\nspark_width = 20").unwrap();
         let got: CpuOpts = instance_opts("cpu_alt", "cpu", v);
-        assert_eq!(got.spark_width, CpuOpts::default().spark_width);
+        assert_eq!(got.spark_width, 20);
+    }
+
+    #[test]
+    fn instance_opts_reports_the_type_error_via_warn_once() {
+        // B12's whole point was that the old `try_into().unwrap_or_default()`
+        // was *silent*. Assert the actual reported event, not just the
+        // fallback value — a test that only checks `spark_width` would pass
+        // just as happily against the pre-fix silent code.
+        let v: toml::Value = toml::from_str("spark_width = \"8\"").unwrap();
+        let events = capture(|| {
+            let got: CpuOpts = instance_opts("cpu_alt", "cpu", v);
+            assert_eq!(got.spark_width, CpuOpts::default().spark_width);
+        });
+
+        assert_eq!(events.len(), 1, "expected exactly one warn; got {events:?}");
+        let (level, fields) = &events[0];
+        assert_eq!(*level, Level::WARN);
+        assert_eq!(field(fields, "instance"), Some("cpu_alt"));
+        assert_eq!(field(fields, "kind"), Some("cpu"));
+        assert!(
+            field(fields, "error").is_some(),
+            "expected an error field describing the type mismatch; got {fields:?}"
+        );
+
+        // Dedup itself (that a *repeat* call with the same key is
+        // suppressed) is intentionally not pinned here: `warn_once` fails
+        // open with no hook installed (`rustline_core::diag`'s default is
+        // "always emit"), so a second call in this test would emit again
+        // regardless of whether dedup logic is correct — it wouldn't pin
+        // anything. Installing a hook to observe real dedup isn't safe from
+        // a unit test either: the hook lives in a process-wide `OnceLock`
+        // (`diag::HOOK`), so installing one here would make this test's
+        // outcome depend on whichever test in this binary happens to run
+        // first. That property is already covered end-to-end, across real
+        // process boundaries, by
+        // `crates/rustline/tests/smoke.rs::warn_dedup_resets_when_config_mtime_changes`.
+    }
+
+    /// Run `f` under a scoped recording subscriber and return every event it
+    /// emitted, in order. Scoped via `tracing::subscriber::with_default`, so
+    /// it can never race or interfere with any other test's subscriber
+    /// regardless of test execution order. Ported from
+    /// `rustline-wasm/src/lib.rs`'s `capture` harness rather than inventing a
+    /// new approach.
+    type CapturedEvent = (Level, Vec<(String, String)>);
+
+    #[derive(Default)]
+    struct FieldVisitor(Vec<(String, String)>);
+
+    impl Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.0
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+    }
+
+    /// A subscriber that accepts and records every event, purely so a test
+    /// can assert what `instance_opts` logged.
+    struct RecordingSubscriber(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    impl Subscriber for RecordingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .unwrap()
+                .push((*event.metadata().level(), visitor.0));
+        }
+
+        fn enter(&self, _span: &Id) {}
+        fn exit(&self, _span: &Id) {}
+    }
+
+    fn capture(f: impl FnOnce()) -> Vec<CapturedEvent> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = RecordingSubscriber(events.clone());
+        tracing::subscriber::with_default(subscriber, f);
+        events.lock().unwrap().clone()
+    }
+
+    fn field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        fields
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
     }
 }

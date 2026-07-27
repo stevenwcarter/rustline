@@ -237,7 +237,8 @@ these shared types, not a design shortcut. Keep them serializable.
   instanceable but never clickable, so out of scope for this pass), or a name
   already registered (a built-in or an earlier instance) is `warn!`+skipped
   (invariant #3, built-in always wins); otherwise the table is re-parsed into
-  that kind's Opts (`try_into().unwrap_or_default()` — the extra `kind` key is
+  that kind's Opts (`instance_opts` — warns once via `warn_once` and falls
+  back to `<Kind>Opts::default()` on a type error; the extra `kind` key is
   harmlessly ignored, no Opts struct has `deny_unknown_fields`) and registered
   under the instance name via its `build_<kind>` helper. An instance name over
   15 bytes still registers but logs a one-time "not click-toggleable" warn
@@ -405,10 +406,11 @@ these shared types, not a design shortcut. Keep them serializable.
   typed `WidgetInstance`, so the existing `<Kind>Opts` structs are reused
   verbatim — see Config below for the TOML shape). Helper methods: `pub fn
   instance_kind(v: &toml::Value) -> Option<&str>` reads the `kind` key; `pub
-  fn instance_meta(kind: &str, v: &toml::Value) -> Option<(ColorOverride,
-  String, ClickBindings)>` dispatches on kind to parse an instance's color
-  override/`alt_format`/click bindings (one shared match arm backing both
-  projections below, mirroring `Registry`'s per-kind dispatch); `pub fn
+  fn instance_meta(name: &str, kind: &str, v: &toml::Value) ->
+  Option<(ColorOverride, String, ClickBindings)>` dispatches on kind to parse
+  an instance's color override/`alt_format`/click bindings (one shared match
+  arm backing both projections below, mirroring `Registry`'s per-kind
+  dispatch); `pub fn
   layout_kinds(&self, layout: &[String]) -> BTreeSet<String>` maps each
   layout entry to its kind (a built-in name maps to itself; an instance name
   maps to its declared `kind`) for kind-aware read-gating; `pub fn
