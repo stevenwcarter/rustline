@@ -25,6 +25,14 @@ pub struct CacheEntry {
     pub fetched_at: String,
     pub status: u16,
     pub body: String,
+    /// When a refresh was last *attempted*, successful or not — RFC3339, or
+    /// empty for an entry written before this field existed (or never
+    /// attempted). `fetched_at` only advances on success, so without this a
+    /// dead upstream is re-fetched on every single render forever: the
+    /// fresh-hit branch can never be taken again once the TTL lapses.
+    /// `#[serde(default)]` keeps old on-disk entries readable.
+    #[serde(default)]
+    pub last_attempt_at: String,
 }
 
 /// FNV-1a (64-bit) of the cache key (a URL or a canonical argv string) — a
@@ -128,6 +136,7 @@ mod tests {
             fetched_at: "2026-07-20T12:00:00-04:00".into(),
             status: 200,
             body: "hello".into(),
+            last_attempt_at: "2026-07-20T12:00:00-04:00".into(),
         };
         let content = serde_json::to_string(&entry).unwrap();
         let path = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/y");

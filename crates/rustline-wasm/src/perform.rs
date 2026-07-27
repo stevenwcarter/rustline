@@ -83,6 +83,24 @@ pub fn perform_http_get_cached(
         };
     }
 
+    // 2b) negative-cache backoff: a refresh was attempted within the last TTL
+    //     window and we still hold a last-good entry, so serve it immediately
+    //     rather than paying another blocking fetch. Without this, a dead
+    //     upstream costs a full fetch timeout on EVERY render forever.
+    if let Some(e) = &entry
+        && let Some(since_attempt) = age_secs(now, &e.last_attempt_at)
+        && is_fresh(since_attempt, ttl_secs)
+    {
+        return CachedHttpResult {
+            ok: true,
+            status: e.status,
+            body: e.body.clone(),
+            error: "refresh backoff; serving cached".to_string(),
+            stale: true,
+            age_secs: age_secs(now, &e.fetched_at).unwrap_or(0),
+        };
+    }
+
     // 3) refresh.
     match fetcher.get(url) {
         Ok((status, body)) if (200..300).contains(&status) => {
@@ -90,6 +108,7 @@ pub fn perform_http_get_cached(
                 fetched_at: now.to_string(),
                 status,
                 body: body.clone(),
+                last_attempt_at: now.to_string(),
             })
             .unwrap_or_default();
             if let Err(error) = write_entry(&dir, &path, &content, ctx.max_state_bytes) {
@@ -114,6 +133,20 @@ pub fn perform_http_get_cached(
                 // serve last-good stale (no egress beyond the failed attempt).
                 Some(e) => {
                     let age = age_secs(now, &e.fetched_at).unwrap_or(0);
+                    // Record the failed attempt so the next render backs off
+                    // instead of re-entering a blocking fetch. body/status/
+                    // fetched_at are deliberately untouched: this entry is
+                    // still the last-good response.
+                    let content = serde_json::to_string(&CacheEntry {
+                        fetched_at: e.fetched_at.clone(),
+                        status: e.status,
+                        body: e.body.clone(),
+                        last_attempt_at: now.to_string(),
+                    })
+                    .unwrap_or_default();
+                    if let Err(error) = write_entry(&dir, &path, &content, ctx.max_state_bytes) {
+                        tracing::warn!(%error, "negative-cache write failed");
+                    }
                     CachedHttpResult {
                         ok: true,
                         status: e.status,
@@ -123,6 +156,9 @@ pub fn perform_http_get_cached(
                         age_secs: age,
                     }
                 }
+                // Nothing to negative-cache against, and writing a body-less
+                // entry would corrupt the stale-serve path — behaviour here
+                // is unchanged.
                 None => CachedHttpResult {
                     ok: false,
                     error,
@@ -239,12 +275,33 @@ pub fn perform_exec_cached(
         };
     }
 
+    // negative-cache backoff: mirrors `perform_http_get_cached`'s — a refresh
+    // was attempted within the last TTL window and we still hold a last-good
+    // entry, so serve it immediately rather than paying another blocking
+    // spawn/timeout.
+    if let Some(e) = &entry
+        && let Some(since_attempt) = age_secs(now, &e.last_attempt_at)
+        && is_fresh(since_attempt, ttl_secs)
+    {
+        return CachedExecResult {
+            ok: true,
+            status: i32::from(e.status),
+            stdout: e.body.clone(),
+            stderr: String::new(),
+            error: "refresh backoff; serving cached".to_string(),
+            stale: true,
+            age_secs: age_secs(now, &e.fetched_at).unwrap_or(0),
+            truncated: false,
+        };
+    }
+
     match runner.run(program, args) {
         Ok((0, stdout, stderr)) => {
             let content = serde_json::to_string(&CacheEntry {
                 fetched_at: now.to_string(),
                 status: 0,
                 body: stdout.clone(),
+                last_attempt_at: now.to_string(),
             })
             .unwrap_or_default();
             if let Err(error) = write_entry(&dir, &path, &content, ctx.max_state_bytes) {
@@ -280,6 +337,20 @@ pub fn perform_exec_cached(
         Err(error) => match entry {
             Some(e) => {
                 let age = age_secs(now, &e.fetched_at).unwrap_or(0);
+                // Record the failed attempt so the next render backs off
+                // instead of re-entering a blocking spawn/timeout. body/
+                // status/fetched_at are deliberately untouched: this entry is
+                // still the last-good response.
+                let content = serde_json::to_string(&CacheEntry {
+                    fetched_at: e.fetched_at.clone(),
+                    status: e.status,
+                    body: e.body.clone(),
+                    last_attempt_at: now.to_string(),
+                })
+                .unwrap_or_default();
+                if let Err(write_error) = write_entry(&dir, &path, &content, ctx.max_state_bytes) {
+                    tracing::warn!(error = %write_error, "negative-cache write failed");
+                }
                 CachedExecResult {
                     ok: true,
                     status: i32::from(e.status),
@@ -292,6 +363,9 @@ pub fn perform_exec_cached(
                     truncated: false,
                 }
             }
+            // Nothing to negative-cache against, and writing a body-less
+            // entry would corrupt the stale-serve path — behaviour here is
+            // unchanged.
             None => CachedExecResult {
                 ok: false,
                 error,
@@ -1108,6 +1182,47 @@ mod tests {
             "a non-zero exit is fresh data, not a stale fallback"
         );
         assert_eq!(out.status, 128);
+    }
+
+    #[test]
+    fn exec_a_failing_refresh_is_not_retried_within_the_backoff_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _o) = ctx_with_commands_in(&["date*"], dir.path());
+
+        // Seed a good entry at T0.
+        let ok = RecordingRunner::ok(0, "good");
+        let r = perform_exec_cached(&ctx, "date", &[], 60, NOW, &ok);
+        assert!(r.ok && !r.stale);
+        assert_eq!(ok.calls().len(), 1);
+
+        // T0+120s: TTL lapsed, spawn now fails -> one attempt, stale served.
+        let down = RecordingRunner::failing("boom");
+        let r = perform_exec_cached(&ctx, "date", &[], 60, "2026-07-20T12:02:00-04:00", &down);
+        assert!(r.ok && r.stale, "last-good entry is served");
+        assert_eq!(down.calls().len(), 1);
+
+        // T0+130s: still inside the backoff window -> NO new attempt.
+        let r = perform_exec_cached(&ctx, "date", &[], 60, "2026-07-20T12:02:10-04:00", &down);
+        assert!(r.ok && r.stale, "still served stale");
+        assert_eq!(
+            down.calls().len(),
+            1,
+            "no second run inside the backoff window"
+        );
+    }
+
+    #[test]
+    fn exec_the_backoff_window_lapses_and_allows_another_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _o) = ctx_with_commands_in(&["date*"], dir.path());
+        perform_exec_cached(&ctx, "date", &[], 60, NOW, &RecordingRunner::ok(0, "good"));
+
+        let down = RecordingRunner::failing("boom");
+        perform_exec_cached(&ctx, "date", &[], 60, "2026-07-20T12:02:00-04:00", &down);
+        assert_eq!(down.calls().len(), 1);
+        // one full TTL after the failed attempt
+        perform_exec_cached(&ctx, "date", &[], 60, "2026-07-20T12:03:01-04:00", &down);
+        assert_eq!(down.calls().len(), 2, "backoff lapsed, retry allowed");
     }
 
     #[test]
