@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 
-use crate::state::check_cap;
+use crate::state;
 
 /// A cached entry, shared by both TTL caches. For the HTTP cache `status` is
 /// the (2xx) status the body was fetched under and `body` is the response
@@ -92,36 +92,44 @@ pub fn read_entry(path: &Path) -> Option<CacheEntry> {
 /// Delete entries from a cache namespace directory until it fits in
 /// `keep_bytes`, oldest first. Returns bytes freed.
 ///
-/// Ordering is by the entry's own `fetched_at` when it parses, falling back to
-/// mtime — a file we cannot parse is not a usable cache entry, so it sorts as
-/// oldest and goes first.
+/// Sizes are collected in one cheap `metadata()`-only pass first; if that
+/// alone already fits in `keep_bytes`, we return without ever reading or
+/// parsing a single entry's content — a namespace that gets asked to evict
+/// on every render must not pay a full parse when there's nothing to do.
+///
+/// Ordering is by the entry's own `fetched_at` when it parses — a file we
+/// cannot parse is not a usable cache entry, so it sorts as oldest and goes
+/// first.
 ///
 /// Best-effort throughout (invariant N2: a cache is disposable). Only ever
-/// touches regular files directly inside `dir`, which is always a
-/// `HTTP_NAMESPACE`/`EXEC_NAMESPACE` subdirectory of one plugin's own state
-/// dir — never the plugin's other state files, and never a subdirectory.
+/// touches regular files directly inside `dir` — callers must only pass a
+/// `HTTP_NAMESPACE`/`EXEC_NAMESPACE` subdirectory (see `namespace_dir`,
+/// `write_entry`'s only caller of this function).
 fn evict_namespace(dir: &Path, keep_bytes: u64) -> u64 {
     let Ok(read) = std::fs::read_dir(dir) else {
         return 0;
     };
-    let mut entries: Vec<(i64, u64, PathBuf)> = read
+    let candidates: Vec<(PathBuf, u64)> = read
         .filter_map(Result::ok)
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .filter_map(|e| {
-            let path = e.path();
-            let len = e.metadata().ok()?.len();
+        .filter_map(|e| Some((e.path(), e.metadata().ok()?.len())))
+        .collect();
+
+    let mut total: u64 = candidates.iter().map(|(_, len)| *len).sum();
+    if total <= keep_bytes {
+        return 0;
+    }
+
+    let mut entries: Vec<(i64, u64, PathBuf)> = candidates
+        .into_iter()
+        .map(|(path, len)| {
             let stamp = read_entry(&path)
                 .and_then(|c| DateTime::parse_from_rfc3339(&c.fetched_at).ok())
                 .map(|d| d.timestamp())
                 .unwrap_or(i64::MIN);
-            Some((stamp, len, path))
+            (stamp, len, path)
         })
         .collect();
-
-    let mut total: u64 = entries.iter().map(|(_, len, _)| *len).sum();
-    if total <= keep_bytes {
-        return 0;
-    }
     entries.sort_by_key(|(stamp, _, _)| *stamp); // oldest first
 
     let mut freed: u64 = 0;
@@ -137,18 +145,57 @@ fn evict_namespace(dir: &Path, keep_bytes: u64) -> u64 {
     freed
 }
 
+/// `path`'s cache namespace directory, or `None` if `path` doesn't actually
+/// sit inside a recognized one. `evict_namespace` unconditionally unlinks
+/// files under whatever directory it's given, so this is the one place that
+/// decides it's safe to call it — it must not guess: only an exact
+/// `HTTP_NAMESPACE`/`EXEC_NAMESPACE` immediate parent qualifies. A
+/// `write_entry` caller passing some other `path` (a bug, since `write_entry`
+/// is `pub`) gets a refused write instead of its state root pruned.
+fn namespace_dir(path: &Path) -> Option<&Path> {
+    let parent = path.parent()?;
+    let name = parent.file_name()?.to_str()?;
+    (name == HTTP_NAMESPACE || name == EXEC_NAMESPACE).then_some(parent)
+}
+
 /// Quota-checked write of `content` to `path` (creating the namespace
-/// directory `path` sits in — `HTTP_NAMESPACE`/`EXEC_NAMESPACE`, per the
-/// caller). `check_cap` accounts against the whole `state_dir` (invariant N3).
+/// directory `path` sits in). `check_cap` accounts against the whole
+/// `state_dir` (invariant N3); when it fails, evicts entries from `path`'s
+/// own namespace before giving up — see `namespace_dir` for why that's the
+/// only directory this ever touches.
 pub fn write_entry(state_dir: &Path, path: &Path, content: &str, cap: u64) -> Result<(), String> {
-    if let Err(first) = check_cap(state_dir, path, content.len() as u64, cap) {
+    let new_len = content.len() as u64;
+    if let Err(first) = state::check_cap(state_dir, path, new_len, cap) {
         // The cache is at quota. Without eviction this returns Err forever:
         // every subsequent render then pays a live fetch or a real subprocess
-        // spawn while a full state dir of dead entries sits on disk. Evict the
-        // namespace down to a fraction of the cap and re-check once.
-        let namespace = path.parent().unwrap_or(state_dir);
-        evict_namespace(namespace, cap / 2);
-        check_cap(state_dir, path, content.len() as u64, cap).map_err(|_| first)?;
+        // spawn while a full state dir of dead entries sits on disk.
+        let Some(namespace) = namespace_dir(path) else {
+            // `path` isn't really inside a cache namespace — refuse to
+            // guess at something safe to delete and surface the original
+            // quota error untouched.
+            return Err(first);
+        };
+        // `check_cap` doesn't hand back the projected total it computed, so
+        // recompute it here purely to size how much to evict — the
+        // pass/fail decision stays check_cap's alone (invariant N3); this
+        // only feeds `evict_namespace`'s target. Accounting against a
+        // fraction of the *whole* cap (rather than this deficit) is wrong:
+        // whatever else lives in `state_dir` — another cache namespace, real
+        // persisted state — can already exceed that fraction on its own,
+        // leaving nothing to evict even though the actual shortfall is small
+        // and lives entirely in this namespace.
+        let replaced = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let projected = state::dir_size(state_dir)
+            .saturating_sub(replaced)
+            .saturating_add(new_len);
+        let needed = projected.saturating_sub(cap);
+        let namespace_total = state::dir_size(namespace);
+        // An eighth of the namespace's own size as headroom, so a plugin
+        // riding the boundary doesn't evict again on the very next render.
+        let headroom = namespace_total / 8;
+        let keep_bytes = namespace_total.saturating_sub(needed.saturating_add(headroom));
+        evict_namespace(namespace, keep_bytes);
+        state::check_cap(state_dir, path, new_len, cap).map_err(|_| first)?;
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -354,6 +401,221 @@ mod tests {
             std::fs::read_to_string(&sibling).unwrap(),
             "x".repeat(50),
             "the sibling state file must survive a refused write"
+        );
+    }
+
+    // --- Fix pass 1: the wedge B13 was meant to remove is still reachable
+    // whenever `cap / 2` (measured against the whole-state cap) is smaller
+    // than the namespace being written to. ---
+
+    #[test]
+    fn write_entry_evicts_enough_when_another_namespace_also_shares_the_cap() {
+        // Reproduces the reviewer's "both caches in use" repro: a plugin
+        // that calls both `rl_http_get` and `rl_exec` shares one
+        // whole-state-dir cap (`check_cap`, invariant N3) across two
+        // independent cache namespaces. `cap / 2` compares half of the
+        // *whole* cap against the namespace being written — when the
+        // *other* namespace alone already exceeds that half, evicting
+        // against `cap / 2` finds the target namespace already "under
+        // budget" and frees nothing, wedging the write forever even though
+        // the actual deficit is small and lives entirely in the namespace
+        // being written.
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path();
+
+        let exec_ns = state_dir.join(EXEC_NAMESPACE);
+        std::fs::create_dir_all(&exec_ns).unwrap();
+        let exec_body = "e".repeat(400);
+        for i in 0..3 {
+            std::fs::write(
+                exec_ns.join(format!("{i}.json")),
+                entry_json("2020-01-01T00:00:00-00:00", &exec_body),
+            )
+            .unwrap();
+        }
+
+        let http_ns = state_dir.join(HTTP_NAMESPACE);
+        std::fs::create_dir_all(&http_ns).unwrap();
+        let http_body = "h".repeat(300);
+        for i in 0..2 {
+            std::fs::write(
+                http_ns.join(format!("{i}.json")),
+                entry_json("2020-01-01T00:00:00-00:00", &http_body),
+            )
+            .unwrap();
+        }
+
+        let exec_total = state::dir_size(&exec_ns);
+        let http_total = state::dir_size(&http_ns);
+        let cap = exec_total + http_total; // already exactly at the boundary
+
+        let fresh = cache_path(state_dir, HTTP_NAMESPACE, "https://x/new");
+        let content = entry_json("2026-07-26T12:00:00-04:00", "new");
+
+        write_entry(state_dir, &fresh, &content, cap).expect(
+            "the deficit is small and lives entirely in the namespace being \
+             written, so eviction must free enough room regardless of how \
+             much of the cap the exec cache alone already occupies",
+        );
+        assert!(read_entry(&fresh).is_some(), "the new http entry landed");
+        assert_eq!(
+            state::dir_size(&exec_ns),
+            exec_total,
+            "the exec namespace must not be touched by an http-cache write"
+        );
+    }
+
+    #[test]
+    fn write_entry_evicts_enough_when_real_state_files_also_share_the_cap() {
+        // Reproduces the reviewer's "weather shape" repro: a real,
+        // persisted plugin state file (not cache) lives directly in the
+        // state dir alongside the http cache namespace and shares the same
+        // whole-state cap. `cap / 2` compared against the http namespace
+        // alone is smaller than the http namespace's own size whenever the
+        // state file eats enough of the cap on its own — freeing nothing,
+        // wedging the write.
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path();
+
+        std::fs::write(state_dir.join("weather-state.json"), "s".repeat(1_200)).unwrap();
+
+        let http_ns = state_dir.join(HTTP_NAMESPACE);
+        std::fs::create_dir_all(&http_ns).unwrap();
+        let http_body = "h".repeat(700);
+        std::fs::write(
+            http_ns.join("old.json"),
+            entry_json("2020-01-01T00:00:00-00:00", &http_body),
+        )
+        .unwrap();
+
+        let http_total = state::dir_size(&http_ns);
+        let cap = state::dir_size(state_dir); // already exactly at the boundary
+
+        let fresh = cache_path(state_dir, HTTP_NAMESPACE, "https://x/new");
+        let content = entry_json("2026-07-26T12:00:00-04:00", "new");
+
+        write_entry(state_dir, &fresh, &content, cap).expect(
+            "the deficit lives entirely in the namespace being written; a \
+             real state file elsewhere in the state dir must not prevent \
+             eviction from making room",
+        );
+        assert!(read_entry(&fresh).is_some(), "the new http entry landed");
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join("weather-state.json")).unwrap(),
+            "s".repeat(1_200),
+            "a real persisted state file must survive untouched"
+        );
+        // Sanity: the http namespace did shrink (something was evicted),
+        // it didn't just happen to already fit.
+        assert!(state::dir_size(&http_ns) < http_total + content.len() as u64);
+    }
+
+    // --- `path.parent().unwrap_or(state_dir)` makes the plugin's state
+    // root a deletion target whenever `path` isn't really inside a cache
+    // namespace. `write_entry` is `pub`; nothing in the type system stopped
+    // this before a code-level guard existed. ---
+
+    #[test]
+    fn write_entry_refuses_to_evict_when_the_target_is_not_a_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path();
+        std::fs::write(state_dir.join("counter-state.json"), "x".repeat(900)).unwrap();
+        std::fs::write(state_dir.join("weather-state.json"), "y".repeat(900)).unwrap();
+
+        let result = write_entry(state_dir, &state_dir.join("newthing.json"), "hello", 1_000);
+
+        assert!(
+            result.is_err(),
+            "quota exceeded, and there is nowhere safe to evict from"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join("counter-state.json")).unwrap(),
+            "x".repeat(900),
+            "counter state must survive"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join("weather-state.json")).unwrap(),
+            "y".repeat(900),
+            "weather state must survive"
+        );
+    }
+
+    #[test]
+    fn write_entry_refuses_to_evict_when_the_path_has_no_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path();
+        std::fs::write(state_dir.join("counter-state.json"), "c".repeat(900)).unwrap();
+
+        let result = write_entry(state_dir, Path::new(""), &"x".repeat(200), 500);
+
+        assert!(
+            result.is_err(),
+            "destroying real state and still failing is strictly worse than refusing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join("counter-state.json")).unwrap(),
+            "c".repeat(900),
+            "a parent-less write target must not fall back to evicting the state root"
+        );
+    }
+
+    // --- Two load-bearing behaviours that were prose-only. ---
+
+    #[test]
+    fn evict_namespace_ignores_directories_when_sizing_the_namespace() {
+        // Only regular files should count toward `total`/eviction. Without
+        // the `is_file()` filter, a subdirectory's own (nonzero) reported
+        // size would inflate `total` forever, since `remove_file` on a
+        // directory always fails and never decrements it back down —
+        // forcing eviction to keep deleting real entries chasing a target
+        // it can never reach.
+        let dir = tempfile::tempdir().unwrap();
+        let ns = dir.path().join(HTTP_NAMESPACE);
+        std::fs::create_dir_all(ns.join("not_a_cache_entry")).unwrap();
+        let entry = ns.join("only.json");
+        let content = entry_json("2020-01-01T00:00:00-00:00", "x");
+        std::fs::write(&entry, &content).unwrap();
+
+        // The namespace already fits without touching anything, as long as
+        // the directory isn't wrongly counted.
+        let freed = evict_namespace(&ns, content.len() as u64);
+
+        assert_eq!(freed, 0, "a namespace within budget evicts nothing");
+        assert!(entry.exists(), "the only real cache entry must survive");
+    }
+
+    #[test]
+    fn write_entry_headroom_leaves_slack_not_just_the_bare_minimum() {
+        // Pins that eviction's headroom is actually nonzero: with no
+        // headroom, eviction would free exactly enough to land the write on
+        // the cap boundary and nothing more, so the very next render at the
+        // same size would immediately re-wedge.
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path();
+        let ns = state_dir.join(HTTP_NAMESPACE);
+        std::fs::create_dir_all(&ns).unwrap();
+
+        let body = "z".repeat(100);
+        let entry_len = entry_json("2020-01-01T00:00:00-00:00", &body).len() as u64;
+        for i in 0..10 {
+            let ts = format!("2020-01-{:02}T00:00:00-00:00", i + 1);
+            std::fs::write(ns.join(format!("{i}.json")), entry_json(&ts, &body)).unwrap();
+        }
+        let namespace_total = entry_len * 10;
+
+        let content = entry_json("2026-07-26T12:00:00-04:00", &body);
+        let new_len = content.len() as u64;
+        // Exactly one entry's worth over cap: the bare minimum eviction
+        // (no headroom) would free precisely one old entry and land the
+        // write exactly on the cap boundary.
+        let cap = namespace_total + new_len - entry_len;
+
+        let fresh = cache_path(state_dir, HTTP_NAMESPACE, "https://x/new");
+        write_entry(state_dir, &fresh, &content, cap).expect("the namespace can cover this");
+
+        assert!(
+            state::dir_size(&ns) < cap,
+            "headroom should leave slack under the cap, not land exactly on the boundary"
         );
     }
 }
