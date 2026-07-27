@@ -145,6 +145,26 @@ mod tests {
     }
 
     #[test]
+    fn resolve_for_allowlist_keeps_normalize_abs_rules() {
+        assert!(resolve_for_allowlist("relative/x", false).is_err());
+        assert!(resolve_for_allowlist("/ok/../escape", false).is_err());
+    }
+
+    #[test]
+    fn resolve_for_allowlist_rejects_a_symlink_component_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let under = link.join("f");
+        assert!(
+            resolve_for_allowlist(under.to_str().unwrap(), false).is_err(),
+            "a symlinked parent component escapes a name-based grant"
+        );
+    }
+
+    #[test]
     fn dir_size_sums_files() {
         let d = tempfile::tempdir().unwrap();
         fs::write(d.path().join("a"), b"12345").unwrap();

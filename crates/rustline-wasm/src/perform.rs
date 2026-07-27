@@ -733,6 +733,29 @@ mod tests {
         ctx_with_cap(urls, root, 16)
     }
 
+    /// A `CapabilityCtx` with `allowed_paths`/`allowed_write_paths`/
+    /// `resolve_symlinks` set directly, for the read/write producer tests
+    /// below. The tempdir root is canonicalized before use as the state
+    /// root: `tempfile::tempdir()` can itself sit under a symlink on some
+    /// systems (e.g. macOS's `/tmp` -> `/private/tmp`), and this ctx must not
+    /// introduce that as an incidental extra symlink hop unrelated to the
+    /// symlink each test is actually exercising.
+    fn test_ctx_paths(
+        dir: &tempfile::TempDir,
+        allowed_paths: &[&str],
+        allowed_write_paths: &[&str],
+        resolve_symlinks: bool,
+    ) -> CapabilityCtx {
+        let root = std::fs::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
+        let pc = PluginConfig {
+            allowed_paths: allowed_paths.iter().map(|s| s.to_string()).collect(),
+            allowed_write_paths: allowed_write_paths.iter().map(|s| s.to_string()).collect(),
+            resolve_symlinks,
+            ..PluginConfig::default()
+        };
+        CapabilityCtx::from_config("weather", &pc, root)
+    }
+
     // The cache tests wrap each body in a JSON envelope (fetched_at + status +
     // body), so even a short body's entry is well over `ctx_with`'s 16-byte
     // cap; tests that need a write to actually persist use a roomy cap here,
@@ -958,6 +981,111 @@ mod tests {
                 target.to_str().unwrap().to_string()
             )]
         );
+    }
+
+    // The following eight tests characterize the read/write path-grant split
+    // and the symlink escape it closes (invariant N1: `allowed_paths` is
+    // read-only, `allowed_write_paths` is the separate write grant; a grant
+    // is matched against the resolved location, not the name, once
+    // `resolve_symlinks` is on). Every legitimate producer of a read or write
+    // grant gets a test here — this narrows a shared funnel, so nothing is
+    // optional.
+
+    #[test]
+    fn a_read_grant_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("notes.txt");
+        std::fs::write(&f, "hi").unwrap();
+        let ctx = test_ctx_paths(&dir, &[&format!("{}/*", dir.path().display())], &[], false);
+        let r = perform_file_read(&ctx, f.to_str().unwrap());
+        assert!(r.ok && r.exists && r.contents == "hi");
+    }
+
+    #[test]
+    fn a_read_grant_alone_does_not_permit_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("notes.txt");
+        std::fs::write(&f, "original").unwrap();
+        let ctx = test_ctx_paths(&dir, &[&format!("{}/*", dir.path().display())], &[], false);
+        let w = perform_file_write(&ctx, f.to_str().unwrap(), "pwned");
+        assert!(!w.ok, "allowed_paths is read-only");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "original");
+    }
+
+    #[test]
+    fn a_write_grant_permits_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("notes.txt");
+        let ctx = test_ctx_paths(&dir, &[], &[&format!("{}/*", dir.path().display())], false);
+        let w = perform_file_write(&ctx, f.to_str().unwrap(), "written");
+        assert!(w.ok, "{}", w.error);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "written");
+    }
+
+    #[test]
+    fn a_write_grant_alone_does_not_permit_a_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("notes.txt");
+        std::fs::write(&f, "secret").unwrap();
+        let ctx = test_ctx_paths(&dir, &[], &[&format!("{}/*", dir.path().display())], false);
+        let r = perform_file_read(&ctx, f.to_str().unwrap());
+        assert!(!r.ok, "a write grant is not a read grant");
+    }
+
+    #[test]
+    fn a_symlink_under_a_grant_is_denied_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("bashrc");
+        std::fs::write(&target, "original").unwrap();
+        let link = dir.path().join("notes.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let glob = format!("{}/*", dir.path().display());
+        let ctx = test_ctx_paths(&dir, &[&glob], &[&glob], false);
+
+        assert!(!perform_file_read(&ctx, link.to_str().unwrap()).ok);
+        assert!(!perform_file_write(&ctx, link.to_str().unwrap(), "pwned").ok);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+    }
+
+    #[test]
+    fn resolve_symlinks_matches_the_allowlist_against_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("bashrc");
+        std::fs::write(&target, "original").unwrap();
+        let link = dir.path().join("notes.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let glob = format!("{}/*", dir.path().display());
+        let ctx = test_ctx_paths(&dir, &[&glob], &[&glob], true);
+
+        // Resolution happens BEFORE matching, so the escape is caught by the
+        // allowlist rather than slipping past it.
+        assert!(!perform_file_write(&ctx, link.to_str().unwrap(), "pwned").ok);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+    }
+
+    #[test]
+    fn resolve_symlinks_allows_a_link_whose_target_is_inside_the_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        std::fs::write(&real, "hi").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let glob = format!("{}/*", dir.path().display());
+        let ctx = test_ctx_paths(&dir, &[&glob], &[], true);
+        let r = perform_file_read(&ctx, link.to_str().unwrap());
+        assert!(r.ok && r.contents == "hi", "{}", r.error);
+    }
+
+    #[test]
+    fn a_not_yet_existing_write_target_under_a_grant_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("new.txt");
+        let glob = format!("{}/*", dir.path().display());
+        let ctx = test_ctx_paths(&dir, &[], &[&glob], true);
+        let w = perform_file_write(&ctx, f.to_str().unwrap(), "fresh");
+        assert!(w.ok, "{}", w.error);
     }
 
     #[test]
