@@ -1,6 +1,7 @@
 //! Filesystem sandboxing + state-dir quota accounting. Pure helpers used by
 //! the state/file host functions.
 
+use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
 /// Sanitize a plugin-supplied relative path for use under its own state dir.
@@ -27,15 +28,62 @@ pub fn sanitize_relpath(relpath: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+/// Why [`resolve_for_allowlist`] (or the [`normalize_abs`] it starts with)
+/// refused a path.
+///
+/// [`NotAbsolute`](Self::NotAbsolute) and [`Traversal`](Self::Traversal) are
+/// malformed-input rejections — true for any path regardless of a plugin's
+/// config — so callers must not route them to a [`crate::capability::DenialObserver`].
+/// [`SymlinkDenied`](Self::SymlinkDenied) is the one variant that names an
+/// actual policy decision: it fires exactly when `resolve_symlinks` is off,
+/// so flipping that one config value changes the outcome. It carries the
+/// normalized path so a caller that must observe the denial doesn't need to
+/// recompute it. [`Unresolvable`](Self::Unresolvable) and
+/// [`NotUtf8`](Self::NotUtf8) are local resolution failures under
+/// `resolve_symlinks = true` (a dangling parent, an unreadable intermediate
+/// directory, non-UTF-8 output) rather than a policy refusal either.
+#[derive(Debug)]
+pub enum PathResolveError {
+    /// Not an absolute path.
+    NotAbsolute,
+    /// Contained a `..` component.
+    Traversal,
+    /// A path component is a symlink and `resolve_symlinks` is off for this
+    /// plugin — this IS the policy `resolve_symlinks` toggles.
+    SymlinkDenied(String),
+    /// `resolve_symlinks = true` but the path (or its parent) could not be
+    /// canonicalized. Carries the ready-to-display message, since the two
+    /// sites that raise this (a missing parent, a failed `canonicalize`) want
+    /// different detail.
+    Unresolvable(String),
+    /// The canonicalized path is not valid UTF-8.
+    NotUtf8,
+}
+
+impl fmt::Display for PathResolveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotAbsolute => write!(f, "path must be absolute"),
+            Self::Traversal => write!(f, "path traversal not allowed"),
+            Self::SymlinkDenied(_) => write!(
+                f,
+                "symlink not allowed; set resolve_symlinks = true for this plugin"
+            ),
+            Self::Unresolvable(msg) => f.write_str(msg),
+            Self::NotUtf8 => write!(f, "resolved path is not valid UTF-8"),
+        }
+    }
+}
+
 /// Normalize an absolute path for allowlist matching: require absolute, reject
 /// any `..` component. Returns the path as a string (matched against globs).
-pub fn normalize_abs(path: &str) -> Result<String, String> {
+pub fn normalize_abs(path: &str) -> Result<String, PathResolveError> {
     let p = Path::new(path);
     if !p.is_absolute() {
-        return Err("path must be absolute".into());
+        return Err(PathResolveError::NotAbsolute);
     }
     if p.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err("path traversal not allowed".into());
+        return Err(PathResolveError::Traversal);
     }
     Ok(path.to_string())
 }
@@ -59,7 +107,10 @@ pub fn normalize_abs(path: &str) -> Result<String, String> {
 /// no `O_NOFOLLOW`/`openat` here, so a symlink swapped in between this
 /// resolution and the eventual open would not be caught. Closing that would
 /// need `openat`-style APIs, which is a larger change than this function.
-pub fn resolve_for_allowlist(path: &str, resolve_symlinks: bool) -> Result<String, String> {
+pub fn resolve_for_allowlist(
+    path: &str,
+    resolve_symlinks: bool,
+) -> Result<String, PathResolveError> {
     let norm = normalize_abs(path)?;
     let p = Path::new(&norm);
     if !resolve_symlinks {
@@ -78,9 +129,7 @@ pub fn resolve_for_allowlist(path: &str, resolve_symlinks: bool) -> Result<Strin
         for ancestor in clean.ancestors() {
             match std::fs::symlink_metadata(ancestor) {
                 Ok(m) if m.file_type().is_symlink() => {
-                    return Err(
-                        "symlink not allowed; set resolve_symlinks = true for this plugin".into(),
-                    );
+                    return Err(PathResolveError::SymlinkDenied(norm));
                 }
                 _ => {}
             }
@@ -92,17 +141,21 @@ pub fn resolve_for_allowlist(path: &str, resolve_symlinks: bool) -> Result<Strin
     let resolved = match std::fs::canonicalize(p) {
         Ok(c) => c,
         Err(_) => {
-            let parent = p.parent().ok_or("cannot resolve path")?;
-            let name = p.file_name().ok_or("cannot resolve path")?;
+            let parent = p
+                .parent()
+                .ok_or_else(|| PathResolveError::Unresolvable("cannot resolve path".to_string()))?;
+            let name = p
+                .file_name()
+                .ok_or_else(|| PathResolveError::Unresolvable("cannot resolve path".to_string()))?;
             std::fs::canonicalize(parent)
-                .map_err(|e| format!("cannot resolve path: {e}"))?
+                .map_err(|e| PathResolveError::Unresolvable(format!("cannot resolve path: {e}")))?
                 .join(name)
         }
     };
     resolved
         .to_str()
         .map(str::to_string)
-        .ok_or_else(|| "resolved path is not valid UTF-8".to_string())
+        .ok_or(PathResolveError::NotUtf8)
 }
 
 #[cfg(test)]

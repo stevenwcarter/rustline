@@ -17,7 +17,7 @@ use crate::cache::{
 use crate::capability::{CapabilityCtx, DenialKind};
 use crate::fetch::Fetcher;
 use crate::run::{MAX_OUTPUT_BYTES, Runner};
-use crate::state::{check_cap, resolve_for_allowlist, sanitize_relpath};
+use crate::state::{PathResolveError, check_cap, resolve_for_allowlist, sanitize_relpath};
 
 pub fn perform_http_get(ctx: &CapabilityCtx, url: &str, fetcher: &dyn Fetcher) -> HttpResult {
     if !ctx.allowed_urls.allows(url) {
@@ -516,13 +516,23 @@ pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -
 /// allowlist check, and the check strictly before the filesystem is touched —
 /// resolving after matching would let a symlink component slip past the
 /// allowlist entirely.
+///
+/// A symlink refusal from `resolve_for_allowlist` is itself a capability
+/// denial — `resolve_symlinks` is the config value that decides it — so it
+/// reaches `ctx.observe_denial` just like the allowlist-miss case below.
+/// `resolve_for_allowlist`'s malformed-input errors (not absolute, `..`
+/// traversal) do not: they reject the same input for every plugin regardless
+/// of config, so there is no policy decision to log.
 pub fn perform_file_read(ctx: &CapabilityCtx, path: &str) -> ReadResult {
     let norm = match resolve_for_allowlist(path, ctx.resolve_symlinks) {
         Ok(p) => p,
         Err(error) => {
+            if let PathResolveError::SymlinkDenied(target) = &error {
+                ctx.observe_denial(DenialKind::Path, target);
+            }
             return ReadResult {
                 ok: false,
-                error,
+                error: error.to_string(),
                 ..Default::default()
             };
         }
@@ -564,11 +574,20 @@ pub fn perform_file_read(ctx: &CapabilityCtx, path: &str) -> ReadResult {
 /// entry now grants read only).
 ///
 /// **resolve → match → act (invariant N1, order load-bearing):** see
-/// `perform_file_read`'s doc — the same ordering applies here.
+/// `perform_file_read`'s doc — the same ordering, and the same
+/// symlink-denial-must-observe reasoning, applies here.
 pub fn perform_file_write(ctx: &CapabilityCtx, path: &str, contents: &str) -> WriteResult {
     let norm = match resolve_for_allowlist(path, ctx.resolve_symlinks) {
         Ok(p) => p,
-        Err(error) => return WriteResult { ok: false, error },
+        Err(error) => {
+            if let PathResolveError::SymlinkDenied(target) = &error {
+                ctx.observe_denial(DenialKind::Path, target);
+            }
+            return WriteResult {
+                ok: false,
+                error: error.to_string(),
+            };
+        }
     };
     if !ctx.allowed_write_paths.allows(&norm) {
         ctx.observe_denial(DenialKind::Path, &norm);
@@ -1060,11 +1079,28 @@ mod tests {
         let link = dir.path().join("notes.txt");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let glob = format!("{}/*", dir.path().display());
-        let ctx = test_ctx_paths(&dir, &[&glob], &[&glob], false);
+        let spy = SpyObserver::default();
+        let ctx =
+            test_ctx_paths(&dir, &[&glob], &[&glob], false).with_observer(Arc::new(spy.clone()));
 
         assert!(!perform_file_read(&ctx, link.to_str().unwrap()).ok);
         assert!(!perform_file_write(&ctx, link.to_str().unwrap(), "pwned").ok);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+
+        // A symlink refusal IS a capability denial — `resolve_symlinks` is
+        // the config value that decides it — so both the read and the write
+        // must reach the observer, not just return `ok:false` to the guest.
+        // Before the fix, `resolve_for_allowlist`'s Err returned early, well
+        // before either function's `observe_denial` call, so this failed
+        // with `records() == []` on both counts.
+        let target_str = link.to_str().unwrap().to_string();
+        assert_eq!(
+            spy.records(),
+            vec![
+                ("weather".to_string(), DenialKind::Path, target_str.clone()),
+                ("weather".to_string(), DenialKind::Path, target_str),
+            ]
+        );
     }
 
     #[test]
