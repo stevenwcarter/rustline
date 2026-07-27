@@ -148,6 +148,16 @@ struct PluginEntryJson<'a> {
     tag: Option<&'a str>,
     allowed_urls: &'a [String],
     allowed_paths: &'a [String],
+    /// The plugin's **write** allowlist — separate from `allowed_paths`,
+    /// which is read-only. Omitting this field would let a plugin holding an
+    /// arbitrary-overwrite grant render as read-only in machine-readable
+    /// output, which is exactly the understated-grant shape this task's
+    /// human/write split exists to close.
+    allowed_write_paths: &'a [String],
+    /// Whether a symlink component in a requested path is resolved (and
+    /// matched against its target) rather than denied outright. See
+    /// `PluginConfig::resolve_symlinks`.
+    resolve_symlinks: bool,
     allowed_commands: &'a [String],
     max_state_bytes: u64,
     has_manifest: bool,
@@ -177,6 +187,8 @@ fn plugin_list_json(cfg: &Config, plugin_dir: &Path) -> String {
             tag: pc.tag.as_deref(),
             allowed_urls: &pc.allowed_urls,
             allowed_paths: &pc.allowed_paths,
+            allowed_write_paths: &pc.allowed_write_paths,
+            resolve_symlinks: pc.resolve_symlinks,
             allowed_commands: &pc.allowed_commands,
             max_state_bytes: pc.max_state_bytes,
             has_manifest: resolve_manifest(plugin_dir, name).is_some(),
@@ -390,6 +402,7 @@ fn list(config_path: &Path, plugin_dir: &Path, json: bool) {
         println!("  allowed_urls: {:?}", pc.allowed_urls);
         println!("  allowed_paths: {:?}", pc.allowed_paths);
         println!("  allowed_write_paths: {:?}", pc.allowed_write_paths);
+        println!("  resolve_symlinks: {}", pc.resolve_symlinks);
         println!("  allowed_commands: {:?}", pc.allowed_commands);
         println!("  max_state_bytes: {}", pc.max_state_bytes);
         if let Some(m) = resolve_manifest(plugin_dir, name) {
@@ -1116,6 +1129,45 @@ mod tests {
         );
     }
 
+    /// End-to-end coverage for `approve` itself (not just `write_grants`): a
+    /// manifest requesting *only* `requested_write_paths` — no urls, read
+    /// paths, or commands — must still be approved. `approve`'s "nothing to
+    /// approve" guard checks all four requested-capability lists; dropping
+    /// the `requested_write_paths.is_empty()` term makes a write-only
+    /// manifest look like it requests nothing, so `approve` would print
+    /// "manifest requests no capabilities; nothing to approve" and return
+    /// before ever calling `write_grants` — silently failing closed for the
+    /// one manifest shape this task introduces.
+    #[test]
+    fn approve_grants_a_write_only_manifest() {
+        let plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            plugin_dir.path().join("w.toml"),
+            "name = \"w\"\nversion = \"1\"\nrequested_write_paths = [\"/home/u/notes/*\"]\n",
+        )
+        .unwrap();
+
+        let config_dir = tempfile::tempdir().unwrap();
+        let cfg = config_dir.path().join("config.toml");
+        std::fs::write(&cfg, "[plugins.w]\n").unwrap();
+
+        approve(
+            ApproveArgs {
+                plugin: "w".to_string(),
+                yes: true,
+            },
+            &cfg,
+            plugin_dir.path(),
+        );
+
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(
+            list_of(&text, "w", "allowed_write_paths"),
+            ["/home/u/notes/*"],
+            "a write-only manifest must be approved, not silently skipped: {text}"
+        );
+    }
+
     #[test]
     fn the_command_kind_maps_to_the_allowed_commands_key() {
         assert_eq!(Kind::Command.key(), "allowed_commands");
@@ -1363,6 +1415,31 @@ mod tests {
         assert_eq!(v[0]["kind"], "url");
         assert_eq!(v[0]["target"], "https://evil.example/");
         assert_eq!(v[1]["kind"], "path");
+    }
+
+    /// A plugin holding a write grant must not render as read-only in
+    /// machine-readable output — the same understated-grant shape D3 exists
+    /// to close, reproduced one layer down at the `--json` audit surface.
+    #[test]
+    fn plugin_list_json_surfaces_a_write_grant() {
+        let mut cfg = Config::default();
+        let pc = rustline_core::PluginConfig {
+            allowed_write_paths: vec!["/home/u/.bashrc".to_string()],
+            resolve_symlinks: true,
+            ..Default::default()
+        };
+        cfg.plugins.insert("evil".to_string(), pc);
+
+        let json = plugin_list_json(&cfg, std::path::Path::new("/nonexistent-plugin-dir"));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let e = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "evil")
+            .unwrap();
+        assert_eq!(e["allowed_write_paths"][0], "/home/u/.bashrc", "{json}");
+        assert_eq!(e["resolve_symlinks"], true, "{json}");
     }
 
     #[test]

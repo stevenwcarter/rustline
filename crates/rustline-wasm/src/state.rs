@@ -54,13 +54,28 @@ pub fn normalize_abs(path: &str) -> Result<String, String> {
 /// and the *canonical* string is returned, so the allowlist is matched against
 /// where the write will actually land. Either way, resolution happens strictly
 /// before the allowlist check.
+///
+/// This closes the symlink-*component* gap, not every TOCTOU window: there is
+/// no `O_NOFOLLOW`/`openat` here, so a symlink swapped in between this
+/// resolution and the eventual open would not be caught. Closing that would
+/// need `openat`-style APIs, which is a larger change than this function.
 pub fn resolve_for_allowlist(path: &str, resolve_symlinks: bool) -> Result<String, String> {
     let norm = normalize_abs(path)?;
     let p = Path::new(&norm);
     if !resolve_symlinks {
+        // Rebuild through `components()` first: it discards a trailing
+        // separator and a lone trailing `.`, whereas `Path::ancestors` walks
+        // the string as written. Without this, a path ending "/link/" or
+        // "/link/." would have `ancestors` yield that trailing-separator form
+        // (on which `symlink_metadata` *follows* the link rather than
+        // reporting it, per POSIX lstat semantics) and then jump straight to
+        // the grandparent — never yielding the bare "/dir/link" that would
+        // catch it. `normalize_abs` already rejected any `..`, so this can't
+        // reintroduce traversal.
+        let clean: PathBuf = p.components().collect();
         // Walk every ancestor; a component that does not exist cannot be a
         // symlink, and a write target legitimately may not exist yet.
-        for ancestor in p.ancestors() {
+        for ancestor in clean.ancestors() {
             match std::fs::symlink_metadata(ancestor) {
                 Ok(m) if m.file_type().is_symlink() => {
                     return Err(
@@ -229,6 +244,41 @@ mod tests {
         assert!(
             resolve_for_allowlist(under.to_str().unwrap(), false).is_err(),
             "a symlinked parent component escapes a name-based grant"
+        );
+    }
+
+    /// `lstat`/`symlink_metadata` on a path ending in a trailing separator
+    /// *follows* the symlink (POSIX semantics — a trailing slash asserts "this
+    /// must be a directory"), and `Path::ancestors` walks the string as
+    /// written, so without normalizing first the ancestors walk would check
+    /// the trailing-slash form (not a symlink, by the above) and then jump
+    /// straight to the grandparent, never checking the bare directory itself.
+    #[test]
+    fn resolve_for_allowlist_rejects_a_symlink_named_with_a_trailing_separator() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let trailing = format!("{}/", link.display());
+        assert!(
+            resolve_for_allowlist(&trailing, false).is_err(),
+            "a trailing separator must not let the symlink slip past the ancestors walk"
+        );
+    }
+
+    /// Same gap as above, for a trailing `/.` instead of a trailing `/`.
+    #[test]
+    fn resolve_for_allowlist_rejects_a_symlink_named_with_a_trailing_curdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let trailing = format!("{}/.", link.display());
+        assert!(
+            resolve_for_allowlist(&trailing, false).is_err(),
+            "a trailing `.` component must not let the symlink slip past the ancestors walk"
         );
     }
 

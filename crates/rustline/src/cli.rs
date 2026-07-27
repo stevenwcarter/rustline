@@ -216,7 +216,7 @@ pub enum PluginCmd {
     /// Manage a plugin's URL allowlist.
     #[command(subcommand)]
     Url(PatternCmd),
-    /// Manage a plugin's filesystem-path **read** allowlist.
+    /// Manage a plugin's filesystem-path read allowlist.
     #[command(subcommand)]
     Path(PatternCmd),
     /// Manage a plugin's filesystem-path write allowlist. Separate from
@@ -231,7 +231,7 @@ pub enum PluginCmd {
     Approve(ApproveArgs),
     /// Download a plugin's `.wasm` from its GitHub release into the plugin dir
     /// and record its provenance — granting NO capabilities (use `approve` or
-    /// `url|path add` afterward).
+    /// `url|path|write-path add` afterward).
     Install(InstallArgs),
     /// Re-resolve the latest release for a recorded `owner/repo` source,
     /// re-download, and update the plugin's `checksum`/`tag`.
