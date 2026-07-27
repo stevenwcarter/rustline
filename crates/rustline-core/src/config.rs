@@ -1252,8 +1252,12 @@ pub struct LogConfig {
     /// stderr-sink level: off|error|warn|info|debug|trace. Default "error".
     #[serde(default = "default_stderr_level")]
     pub stderr_level: String,
-    /// Log-file path override (`~/` expanded by the binary). Default:
-    /// `$XDG_DATA_HOME/rustline/rustline.log`.
+    /// Log-file path override (`~/` expanded by the binary), decomposed by
+    /// the binary into a directory (the path's parent), a filename prefix
+    /// (its stem), and a filename suffix (its extension) — the pieces
+    /// `tracing-appender`'s daily rotation needs to name each generation
+    /// `{prefix}.<date>.{suffix}`. Default: unset, which resolves to
+    /// `$XDG_DATA_HOME/rustline/rustline.<date>.log`.
     #[serde(default)]
     pub file: Option<String>,
 }

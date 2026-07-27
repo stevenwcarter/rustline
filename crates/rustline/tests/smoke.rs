@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
@@ -1770,6 +1770,24 @@ fn config_edit_does_not_recreate_existing_file() {
     );
 }
 
+/// Extracts the path from doctor's `  log:     {path} (daily, 7 kept)` row
+/// (see `doctor.rs`'s resolved-paths printout). Panics with the full stdout
+/// on a shape mismatch so a future change to the row's formatting fails
+/// loudly here instead of silently returning a bogus path.
+fn doctor_log_row_path(stdout: &str) -> PathBuf {
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("log:"))
+        .unwrap_or_else(|| panic!("doctor prints a log: row: {stdout}"));
+    let path_str = line
+        .trim_start()
+        .strip_prefix("log:")
+        .map(str::trim)
+        .and_then(|s| s.strip_suffix(" (daily, 7 kept)"))
+        .unwrap_or_else(|| panic!("log: row has the expected shape: {line}"));
+    PathBuf::from(path_str)
+}
+
 #[test]
 fn doctor_runs_and_prints_resolved_paths() {
     // Host-dependent (tmux may or may not be installed, running, or have
@@ -1826,6 +1844,58 @@ fn doctor_runs_and_prints_resolved_paths() {
     assert!(
         stdout.contains("(daily, 7 kept)"),
         "log row names the rotation scheme: {stdout}"
+    );
+
+    // `doctor`'s own `logging::init` creates the file it reports, so this
+    // holds unconditionally and catches any future drift between the
+    // filename `current_log_path` reports and the one the appender actually
+    // wrote.
+    let log_path = doctor_log_row_path(&stdout);
+    assert!(
+        log_path.exists(),
+        "doctor's reported log path must exist on disk: {log_path:?}"
+    );
+}
+
+/// `doctor`'s reported log filename must not depend on the host's timezone:
+/// `RollingFileAppender` always rotates on a UTC day boundary, so
+/// `current_log_path` must compute its date in UTC too. A test that only
+/// runs at one TZ can't reliably prove that — reverting to
+/// `chrono::Local::now()` fails under, say, `America/Detroit` during its
+/// UTC-offset window, but passes under `TZ=UTC`, which is what most CI boxes
+/// (and Docker's default) run as. So instead this spawns `rustline doctor`
+/// twice, under two TZs whose local calendar dates can never agree —
+/// `Etc/GMT-14` (UTC+14) and `Etc/GMT+12` (UTC-12) are 26 hours apart, more
+/// than a full day — and asserts the reported filenames match. On
+/// `Utc::now()` they always match; on `Local::now()` they can never both
+/// match, regardless of what timezone the test itself happens to run under.
+#[test]
+fn doctor_log_path_is_timezone_invariant() {
+    let log_filename_under_tz = |tz: &str| -> String {
+        let dir = tempdir().unwrap();
+        let (home, data, config) = (
+            dir.path().join("home"),
+            dir.path().join("data"),
+            dir.path().join("config"),
+        );
+        let out = isolated_cmd(&home, &data, &config)
+            .env("TZ", tz)
+            .arg("doctor")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        doctor_log_row_path(&stdout)
+            .file_name()
+            .unwrap_or_else(|| panic!("log path has a file name: {stdout}"))
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    let east = log_filename_under_tz("Etc/GMT-14");
+    let west = log_filename_under_tz("Etc/GMT+12");
+    assert_eq!(
+        east, west,
+        "doctor's reported log filename must not depend on the host timezone"
     );
 }
 

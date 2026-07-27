@@ -308,12 +308,19 @@ mod tests {
     }
 
     /// Round-trips `current_log_path` against the file the appender actually
-    /// creates. This is the test that would have caught Critical 1
-    /// (`current_log_path` computing the date in local time while
-    /// `RollingFileAppender` rotates on a UTC boundary): the two filenames
-    /// only ever disagree when the two clocks land on different calendar
-    /// dates, but nothing short of comparing them directly can pin that they
-    /// must always agree.
+    /// creates, pinning that the two agree on the whole filename shape
+    /// (dir/prefix/date/suffix) for a single write under the test process's
+    /// own clock.
+    ///
+    /// This does *not* by itself prove the date component is
+    /// timezone-invariant: both `current_log_path` and the appender read the
+    /// same process clock here, so a shared bug (e.g. both computing the
+    /// date in local time instead of UTC) would still pass this test,
+    /// especially on a UTC-hosted CI box where local time and UTC never
+    /// disagree. That gap is closed separately by
+    /// `doctor_log_path_is_timezone_invariant` in `tests/smoke.rs`, which
+    /// spawns `rustline doctor` under two widely-separated `TZ` values and
+    /// asserts the reported filename doesn't change.
     #[test]
     fn current_log_path_matches_the_file_the_appender_actually_creates() {
         use std::io::Write as _;
