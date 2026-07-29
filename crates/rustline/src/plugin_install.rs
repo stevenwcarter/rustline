@@ -522,6 +522,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_install_name_never_masks_a_charset_violation_with_too_long() {
+        // Regression (check-order fix): `RangeName::parse` used to check
+        // length before charset, so a name that was BOTH too long AND
+        // charset-invalid (e.g. a path-traversal-ish `--name` value) hit
+        // `TooLong` first, and this function's warn-don't-refuse mapping
+        // (`Ok(false)`) let it straight through — `do_install` would then
+        // join it into `plugin_dir.join(format!("{name}.wasm"))` and write
+        // it as a raw `[plugins.<name>]` key. Must be a hard `Err`, not
+        // `Ok(false)`.
+        let name = "../../../tmp/evil";
+        assert!(name.len() > MAX_PLUGIN_NAME_BYTES);
+        assert!(validate_install_name(name).is_err());
+    }
+
+    #[test]
     fn install_writes_source_tag_checksum() {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path().join("plugins");

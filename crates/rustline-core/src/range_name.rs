@@ -49,14 +49,21 @@ pub enum NameError {
 
 impl RangeName {
     /// Parse `s` into a [`RangeName`], checking (in order) non-emptiness,
-    /// the [`RANGE_NAME_MAX_BYTES`] length cap, the `[A-Za-z0-9_-]` charset,
-    /// and the reserved name `"window"`.
+    /// the `[A-Za-z0-9_-]` charset, the reserved name `"window"`, and the
+    /// [`RANGE_NAME_MAX_BYTES`] length cap.
+    ///
+    /// Charset/reserved are checked BEFORE length deliberately: a `TooLong`
+    /// verdict is mapped by `validate_install_name` (rustline bin) to
+    /// `Ok(false)` (warn-don't-refuse — an installed plugin longer than the
+    /// range cap just isn't click-toggleable). A name that is BOTH too long
+    /// AND charset-invalid (e.g. a path-traversal-ish `--name` value like
+    /// `../../../tmp/evil`) must never be let through that warn-don't-refuse
+    /// path just because it also happens to be too long — checking charset
+    /// first means such a name always reports `BadChar`, a hard error, never
+    /// `TooLong`.
     pub fn parse(s: &str) -> Result<RangeName, NameError> {
         if s.is_empty() {
             return Err(NameError::Empty);
-        }
-        if s.len() > RANGE_NAME_MAX_BYTES {
-            return Err(NameError::TooLong { len: s.len() });
         }
         if let Some(ch) = s
             .chars()
@@ -66,6 +73,9 @@ impl RangeName {
         }
         if s == RESERVED {
             return Err(NameError::Reserved);
+        }
+        if s.len() > RANGE_NAME_MAX_BYTES {
+            return Err(NameError::TooLong { len: s.len() });
         }
         Ok(RangeName(s.to_string()))
     }
@@ -114,6 +124,22 @@ mod tests {
             Err(NameError::BadChar { ch: '#' })
         );
         assert_eq!(RangeName::parse("window"), Err(NameError::Reserved));
+    }
+
+    #[test]
+    fn a_doubly_invalid_name_reports_the_charset_violation_not_too_long() {
+        // Order matters (see `parse`'s doc comment): `validate_install_name`
+        // (rustline bin) maps a `TooLong` verdict to `Ok(false)`
+        // (warn-don't-refuse), but every other `NameError` to a hard `Err`.
+        // A name that is BOTH too long AND charset-invalid — e.g. a
+        // path-traversal-ish `--name` value — must never have its charset
+        // violation masked by the length check, or `do_install` would join
+        // it into a path and write it into the config as a raw key. Checking
+        // charset before length is what pins that.
+        let name = "../../../tmp/evil";
+        assert_eq!(name.len(), 17);
+        assert!(name.len() > RANGE_NAME_MAX_BYTES);
+        assert_eq!(RangeName::parse(name), Err(NameError::BadChar { ch: '.' }));
     }
 
     #[test]
