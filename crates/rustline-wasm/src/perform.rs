@@ -1753,6 +1753,464 @@ mod tests {
         let exec = crate::cache::cache_path(dir.path(), EXEC_NAMESPACE, "same-key");
         assert_ne!(http, exec);
     }
+
+    /// Characterization tests pinning today's guest-visible wire JSON for
+    /// every `perform_*` outcome path, written BEFORE the [T4] typecheck
+    /// refactor that moves each function's flag-combination construction
+    /// behind a private outcome enum + `From` impl. These must keep passing,
+    /// byte-for-byte, straight through that refactor — that is what proves
+    /// the enums are a transcription of the existing literals, not a
+    /// redesign. Nested here (rather than a sibling module) so it can reuse
+    /// this module's fakes/ctx helpers via `super::*` without duplicating or
+    /// widening their visibility.
+    mod wire_pins {
+        use super::*;
+
+        // ---- http {denied, 2xx, transport-error} ----
+
+        #[test]
+        fn wire_pin_http_denied() {
+            let ctx = ctx_with(&[], std::env::temp_dir());
+            let r = perform_http_get(&ctx, "https://x.example/", &DeadFetcher);
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"status":0,"body":"","error":"url not allowed: https://x.example/"}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_http_ok() {
+            let ctx = ctx_with(&["https://wttr.in/*"], std::env::temp_dir());
+            let r = perform_http_get(&ctx, "https://wttr.in/48183", &FakeFetcher(200, "sunny"));
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"status":200,"body":"sunny","error":""}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_http_transport_error() {
+            let ctx = ctx_with(&["https://wttr.in/*"], std::env::temp_dir());
+            let r = perform_http_get(&ctx, "https://wttr.in/48183", &DeadFetcher);
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"status":0,"body":"","error":"connection refused"}"#
+            );
+        }
+
+        // ---- cached-http {denied, fresh-hit, refresh, served-stale, never-succeeded} ----
+
+        #[test]
+        fn wire_pin_cached_http_denied() {
+            let ctx = ctx_with(&[], std::env::temp_dir());
+            let r = perform_http_get_cached(
+                &ctx,
+                "https://x.example/",
+                1800,
+                "2026-07-20T12:00:00-04:00",
+                &DeadFetcher,
+            );
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"status":0,"body":"","error":"url not allowed: https://x.example/","stale":false,"age_secs":0}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_http_fresh_hit() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with_cap(&["https://wttr.in/*"], root.path().to_path_buf(), 1_000_000);
+            let url = "https://wttr.in/48183";
+            let f = CountingFetcher {
+                calls: std::sync::Arc::new(AtomicUsize::new(0)),
+                status: 200,
+                body: "sunny-72",
+            };
+            perform_http_get_cached(&ctx, url, 1800, "2026-07-20T12:00:00-04:00", &f);
+            let r2 = perform_http_get_cached(&ctx, url, 1800, "2026-07-20T12:10:00-04:00", &f);
+            assert_eq!(
+                serde_json::to_string(&r2).unwrap(),
+                r#"{"ok":true,"status":200,"body":"sunny-72","error":"","stale":false,"age_secs":600}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_http_refresh() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with_cap(&["https://wttr.in/*"], root.path().to_path_buf(), 1_000_000);
+            let url = "https://wttr.in/48183";
+            perform_http_get_cached(
+                &ctx,
+                url,
+                60,
+                "2026-07-20T12:00:00-04:00",
+                &FakeFetcher(200, "a"),
+            );
+            let r = perform_http_get_cached(
+                &ctx,
+                url,
+                60,
+                "2026-07-20T14:00:00-04:00",
+                &FakeFetcher(200, "b"),
+            );
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"status":200,"body":"b","error":"","stale":false,"age_secs":0}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_http_served_stale() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with_cap(&["https://wttr.in/*"], root.path().to_path_buf(), 1_000_000);
+            let url = "https://wttr.in/48183";
+            perform_http_get_cached(
+                &ctx,
+                url,
+                1800,
+                "2026-07-20T09:00:00-04:00",
+                &FakeFetcher(200, "good-55"),
+            );
+            let r =
+                perform_http_get_cached(&ctx, url, 1800, "2026-07-20T15:00:00-04:00", &DeadFetcher);
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"status":200,"body":"good-55","error":"connection refused","stale":true,"age_secs":21600}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_http_never_succeeded() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with_cap(&["https://x/*"], root.path().to_path_buf(), 1_000_000);
+            let down = ScriptedFetcher::err("connection refused");
+            let r = perform_http_get_cached(&ctx, "https://x/y", 60, "2026-07-26T12:00:00Z", &down);
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"status":0,"body":"","error":"connection refused","stale":false,"age_secs":0}"#
+            );
+        }
+
+        // ---- exec {denied, ran-zero, ran-nonzero, could-not-run} ----
+
+        #[test]
+        fn wire_pin_exec_denied() {
+            let (ctx, _o) = ctx_with_commands(&[]);
+            let runner = RecordingRunner::ok(0, "should not happen");
+            let out = perform_exec(&ctx, "playerctl", &argv(&["metadata"]), &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":false,"status":-1,"stdout":"","stderr":"","error":"command not allowed: playerctl metadata","truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_exec_ran_zero() {
+            let (ctx, _o) = ctx_with_commands(&["echo*"]);
+            let runner = RecordingRunner::ok(0, "hello\n");
+            let out = perform_exec(&ctx, "echo", &argv(&["hello"]), &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":0,"stdout":"hello\n","stderr":"","error":"","truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_exec_ran_nonzero() {
+            let (ctx, _o) = ctx_with_commands(&["false*"]);
+            let runner = RecordingRunner::ok(1, "");
+            let out = perform_exec(&ctx, "false", &[], &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":1,"stdout":"","stderr":"","error":"","truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_exec_could_not_run() {
+            let (ctx, _o) = ctx_with_commands(&["missing*"]);
+            let runner = RecordingRunner::failing("no such file");
+            let out = perform_exec(&ctx, "missing", &[], &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":false,"status":-1,"stdout":"","stderr":"","error":"no such file","truncated":false}"#
+            );
+        }
+
+        // ---- cached-exec {denied, fresh-hit, zero-exit-cached, nonzero-fresh, stale-fallback} ----
+
+        #[test]
+        fn wire_pin_cached_exec_denied() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&[], dir.path());
+            let runner = RecordingRunner::ok(0, "x");
+            let out = perform_exec_cached(&ctx, "date", &[], 60, NOW, &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":false,"status":-1,"stdout":"","stderr":"","error":"command not allowed: date","stale":false,"age_secs":0,"truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_exec_fresh_hit() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&["date*"], dir.path());
+            perform_exec_cached(
+                &ctx,
+                "date",
+                &[],
+                3600,
+                NOW,
+                &RecordingRunner::ok(0, "first"),
+            );
+            let out = perform_exec_cached(
+                &ctx,
+                "date",
+                &[],
+                3600,
+                NOW,
+                &RecordingRunner::ok(0, "second"),
+            );
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":0,"stdout":"first","stderr":"","error":"","stale":false,"age_secs":0,"truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_exec_zero_exit_cached() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&["date*"], dir.path());
+            let out = perform_exec_cached(
+                &ctx,
+                "date",
+                &[],
+                3600,
+                NOW,
+                &RecordingRunner::ok(0, "first run"),
+            );
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":0,"stdout":"first run","stderr":"","error":"","stale":false,"age_secs":0,"truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_exec_nonzero_fresh() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&["flaky*"], dir.path());
+            let out = perform_exec_cached(
+                &ctx,
+                "flaky",
+                &[],
+                3600,
+                NOW,
+                &RecordingRunner::ok(3, "bad"),
+            );
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":3,"stdout":"bad","stderr":"","error":"","stale":false,"age_secs":0,"truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_exec_stale_fallback() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&["date*"], dir.path());
+            perform_exec_cached(&ctx, "date", &[], 60, NOW, &RecordingRunner::ok(0, "good"));
+            let out = perform_exec_cached(
+                &ctx,
+                "date",
+                &[],
+                60,
+                LATER,
+                &RecordingRunner::failing("boom"),
+            );
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":0,"stdout":"good","stderr":"","error":"boom","stale":true,"age_secs":7200,"truncated":false}"#
+            );
+        }
+
+        // ---- state-read {found, absent, failed, bad-relpath} ----
+
+        #[test]
+        fn wire_pin_state_read_found() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            perform_state_write(&ctx, "weather.json", "0123456789");
+            let r = perform_state_read(&ctx, "weather.json");
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"exists":true,"contents":"0123456789","error":""}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_state_read_absent() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            let r = perform_state_read(&ctx, "nope.json");
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"exists":false,"contents":"","error":""}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_state_read_bad_relpath() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            let r = perform_state_read(&ctx, "../escape");
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"exists":false,"contents":"","error":"path traversal not allowed"}"#
+            );
+        }
+
+        /// A relpath that resolves to a directory rather than a file, so
+        /// `std::fs::read_to_string` fails with something other than
+        /// `NotFound` — the "real I/O failure" outcome path, distinct from
+        /// both `Absent` and the `bad-relpath` validation failure above.
+        #[test]
+        fn wire_pin_state_read_failed() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            std::fs::create_dir_all(ctx.state_dir().join("adir")).unwrap();
+            let r = perform_state_read(&ctx, "adir");
+            // `std::io::Error`'s Display text for reading a directory is
+            // platform-specific; pinned to this Linux dev/CI box's actual
+            // wording (verified with a throwaway probe), not guessed.
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"exists":false,"contents":"","error":"Is a directory (os error 21)"}"#
+            );
+        }
+
+        // ---- state-write {written, quota-refused, bad-relpath} ----
+
+        #[test]
+        fn wire_pin_state_write_written() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            let w = perform_state_write(&ctx, "weather.json", "0123456789");
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":true,"error":""}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_state_write_bad_relpath() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            let w = perform_state_write(&ctx, "../escape", "x");
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":false,"error":"path traversal not allowed"}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_state_write_quota_refused() {
+            let root = tempfile::tempdir().unwrap();
+            let cap = 10;
+            let ctx = ctx_with_cap(&[], root.path().to_path_buf(), cap);
+            std::fs::create_dir_all(ctx.state_dir()).unwrap();
+            std::fs::write(ctx.state_dir().join("existing.json"), "z".repeat(9)).unwrap();
+            let w = perform_state_write(&ctx, "a.json", "0123456789"); // 9 + 10 > cap 10
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":false,"error":"state quota exceeded"}"#
+            );
+        }
+
+        // ---- file-read {denied, found, failed} ----
+
+        #[test]
+        fn wire_pin_file_read_denied() {
+            let ctx = ctx_with(&[], std::env::temp_dir());
+            let r = perform_file_read(&ctx, "/etc/hostname");
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"exists":false,"contents":"","error":"path not allowed: /etc/hostname"}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_file_read_found() {
+            let dir = tempfile::tempdir().unwrap();
+            let f = dir.path().join("notes.txt");
+            std::fs::write(&f, "hi").unwrap();
+            let ctx = test_ctx_paths(&dir, &[&format!("{}/*", dir.path().display())], &[], false);
+            let r = perform_file_read(&ctx, f.to_str().unwrap());
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"exists":true,"contents":"hi","error":""}"#
+            );
+        }
+
+        /// A path that resolves and is allowlisted but is a directory, so the
+        /// eventual `std::fs::read_to_string` fails with something other than
+        /// `NotFound` — the "real I/O failure" path, distinct from both
+        /// `denied` and a plain missing file.
+        #[test]
+        fn wire_pin_file_read_failed() {
+            let dir = tempfile::tempdir().unwrap();
+            let sub = dir.path().join("subdir");
+            std::fs::create_dir_all(&sub).unwrap();
+            let ctx = test_ctx_paths(&dir, &[&format!("{}/*", dir.path().display())], &[], false);
+            let r = perform_file_read(&ctx, sub.to_str().unwrap());
+            // Same platform-specific `io::Error` text as `wire_pin_state_read_failed`.
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"exists":false,"contents":"","error":"Is a directory (os error 21)"}"#
+            );
+        }
+
+        // ---- file-write {denied, written, failed} ----
+
+        #[test]
+        fn wire_pin_file_write_denied() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("should_not_be_written.txt");
+            let ctx = ctx_with(&[], std::env::temp_dir());
+            let w = perform_file_write(&ctx, target.to_str().unwrap(), "secret");
+            let expected = format!(
+                r#"{{"ok":false,"error":"path not allowed: {}"}}"#,
+                target.to_str().unwrap()
+            );
+            assert_eq!(serde_json::to_string(&w).unwrap(), expected);
+        }
+
+        #[test]
+        fn wire_pin_file_write_written() {
+            let dir = tempfile::tempdir().unwrap();
+            let f = dir.path().join("notes.txt");
+            let ctx = test_ctx_paths(&dir, &[], &[&format!("{}/*", dir.path().display())], false);
+            let w = perform_file_write(&ctx, f.to_str().unwrap(), "written");
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":true,"error":""}"#
+            );
+        }
+
+        /// A write target that IS an existing directory, so `std::fs::write`
+        /// fails — the "real I/O failure" path, distinct from `denied`.
+        #[test]
+        fn wire_pin_file_write_failed() {
+            let dir = tempfile::tempdir().unwrap();
+            let sub = dir.path().join("subdir");
+            std::fs::create_dir_all(&sub).unwrap();
+            let ctx = test_ctx_paths(&dir, &[], &[&format!("{}/*", dir.path().display())], false);
+            let w = perform_file_write(&ctx, sub.to_str().unwrap(), "x");
+            // Same platform-specific `io::Error` text as the read-failure pins above.
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":false,"error":"Is a directory (os error 21)"}"#
+            );
+        }
+    }
 }
 
 /// `perform_log` has no `CapabilityCtx` to pass through a fake `Fetcher`, so
