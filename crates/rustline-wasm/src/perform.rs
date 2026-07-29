@@ -17,7 +17,9 @@ use crate::cache::{
 use crate::capability::{CapabilityCtx, DenialKind};
 use crate::fetch::Fetcher;
 use crate::run::{MAX_OUTPUT_BYTES, Runner};
-use crate::state::{PathResolveError, check_cap, resolve_for_allowlist, sanitize_relpath};
+use crate::state::{
+    PathResolveError, SandboxRelPath, check_cap, resolve_for_allowlist, sanitize_relpath,
+};
 
 pub fn perform_http_get(ctx: &CapabilityCtx, url: &str, fetcher: &dyn Fetcher) -> HttpResult {
     if !ctx.allowed_urls.allows(url) {
@@ -409,7 +411,7 @@ fn is_truncated(stdout: &str, stderr: &str) -> bool {
 }
 
 pub fn perform_state_read(ctx: &CapabilityCtx, relpath: &str) -> ReadResult {
-    let rel = match sanitize_relpath(relpath) {
+    let rel: SandboxRelPath = match sanitize_relpath(relpath) {
         Ok(r) => r,
         Err(error) => {
             return ReadResult {
@@ -419,7 +421,7 @@ pub fn perform_state_read(ctx: &CapabilityCtx, relpath: &str) -> ReadResult {
             };
         }
     };
-    let full = ctx.state_dir().join(rel);
+    let full = ctx.state_dir().join(&rel);
     match std::fs::read_to_string(&full) {
         Ok(contents) => ReadResult {
             ok: true,
@@ -441,12 +443,12 @@ pub fn perform_state_read(ctx: &CapabilityCtx, relpath: &str) -> ReadResult {
 }
 
 pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -> WriteResult {
-    let rel = match sanitize_relpath(relpath) {
+    let rel: SandboxRelPath = match sanitize_relpath(relpath) {
         Ok(r) => r,
         Err(error) => return WriteResult { ok: false, error },
     };
     let dir = ctx.state_dir();
-    let full = dir.join(rel);
+    let full = dir.join(&rel);
     let new_len = contents.len() as u64;
     if check_cap(ctx.state_size(), &full, new_len, ctx.max_state_bytes).is_err() {
         // The refusal may be the memo's own fault: it can go stale-high
@@ -524,7 +526,7 @@ pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -
 /// traversal) do not: they reject the same input for every plugin regardless
 /// of config, so there is no policy decision to log.
 pub fn perform_file_read(ctx: &CapabilityCtx, path: &str) -> ReadResult {
-    let norm = match resolve_for_allowlist(path, ctx.resolve_symlinks) {
+    let resolved = match resolve_for_allowlist(path, ctx.resolve_symlinks) {
         Ok(p) => p,
         Err(error) => {
             if let PathResolveError::SymlinkDenied(target) = &error {
@@ -537,15 +539,18 @@ pub fn perform_file_read(ctx: &CapabilityCtx, path: &str) -> ReadResult {
             };
         }
     };
-    if !ctx.allowed_paths.allows(&norm) {
-        ctx.observe_denial(DenialKind::Path, &norm);
-        return ReadResult {
-            ok: false,
-            error: format!("path not allowed: {norm}"),
-            ..Default::default()
-        };
-    }
-    match std::fs::read_to_string(&norm) {
+    let allowed = match ctx.allowed_paths.check_path(resolved) {
+        Ok(allowed) => allowed,
+        Err(denied) => {
+            ctx.observe_denial(DenialKind::Path, denied.as_str());
+            return ReadResult {
+                ok: false,
+                error: format!("path not allowed: {}", denied.as_str()),
+                ..Default::default()
+            };
+        }
+    };
+    match std::fs::read_to_string(&allowed) {
         Ok(contents) => ReadResult {
             ok: true,
             exists: true,
@@ -577,7 +582,7 @@ pub fn perform_file_read(ctx: &CapabilityCtx, path: &str) -> ReadResult {
 /// `perform_file_read`'s doc — the same ordering, and the same
 /// symlink-denial-must-observe reasoning, applies here.
 pub fn perform_file_write(ctx: &CapabilityCtx, path: &str, contents: &str) -> WriteResult {
-    let norm = match resolve_for_allowlist(path, ctx.resolve_symlinks) {
+    let resolved = match resolve_for_allowlist(path, ctx.resolve_symlinks) {
         Ok(p) => p,
         Err(error) => {
             if let PathResolveError::SymlinkDenied(target) = &error {
@@ -589,19 +594,22 @@ pub fn perform_file_write(ctx: &CapabilityCtx, path: &str, contents: &str) -> Wr
             };
         }
     };
-    if !ctx.allowed_write_paths.allows(&norm) {
-        ctx.observe_denial(DenialKind::Path, &norm);
-        return WriteResult {
-            ok: false,
-            error: format!("path not allowed: {norm}"),
-        };
-    }
+    let allowed = match ctx.allowed_write_paths.check_path(resolved) {
+        Ok(allowed) => allowed,
+        Err(denied) => {
+            ctx.observe_denial(DenialKind::Path, denied.as_str());
+            return WriteResult {
+                ok: false,
+                error: format!("path not allowed: {}", denied.as_str()),
+            };
+        }
+    };
     // Deliberately not `write_atomic`: `path` is an arbitrary allowlisted
     // absolute path a plugin asked to write, not a temp/cache/state file this
     // module owns. Rename-replace would change the target's inode and
     // permissions and break existing hard links — not what a plugin writing
     // to a user-designated path should do.
-    match std::fs::write(&norm, contents.as_bytes()) {
+    match std::fs::write(&allowed, contents.as_bytes()) {
         Ok(()) => WriteResult {
             ok: true,
             error: String::new(),

@@ -8,6 +8,8 @@
 use globset::{Glob, GlobMatcher};
 use regex::Regex;
 
+use crate::state::{AllowedPath, ResolvedPath};
+
 /// A single compiled allow-pattern.
 pub enum Pattern {
     Glob(GlobMatcher),
@@ -65,6 +67,16 @@ impl AllowSet {
     /// True iff any pattern in the set matches `subject`.
     pub fn allows(&self, subject: &str) -> bool {
         self.0.iter().any(|p| p.is_match(subject))
+    }
+
+    /// Consume a resolved path; return the only token the filesystem effects
+    /// accept, or give the path back on a miss (so the caller can report it).
+    pub fn check_path(&self, path: ResolvedPath) -> Result<AllowedPath, ResolvedPath> {
+        if self.allows(path.as_str()) {
+            Ok(AllowedPath::from_checked(path))
+        } else {
+            Err(path)
+        }
     }
 }
 

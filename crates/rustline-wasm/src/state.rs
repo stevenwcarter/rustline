@@ -4,10 +4,70 @@
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
+/// An absolute path that has been normalized (and, when configured,
+/// symlink-resolved) by this module. Constructible ONLY here, so holding one
+/// IS the proof that resolution ran before any allowlist check (N1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedPath(String);
+
+impl ResolvedPath {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for ResolvedPath {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+impl fmt::Display for ResolvedPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A state-dir-relative path that passed [`sanitize_relpath`] (no absolute,
+/// no `..`). Constructible only here; `state_dir().join(...)` should only
+/// ever see one of these (N3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SandboxRelPath(PathBuf);
+
+impl AsRef<Path> for SandboxRelPath {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// A [`ResolvedPath`] that additionally matched an allowlist. The filesystem
+/// effect functions accept ONLY this token, making "resolve → match → act" a
+/// type-level fact instead of statement order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AllowedPath(ResolvedPath);
+
+impl AllowedPath {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Sole constructor, used by `AllowSet::check_path`. `pub(crate)` so no
+    /// caller outside the crate can mint one without an allowlist match.
+    pub(crate) fn from_checked(p: ResolvedPath) -> Self {
+        Self(p)
+    }
+}
+
+impl AsRef<Path> for AllowedPath {
+    fn as_ref(&self) -> &Path {
+        self.0.as_ref()
+    }
+}
+
 /// Sanitize a plugin-supplied relative path for use under its own state dir.
 /// Rejects absolute paths and any `..` traversal; strips `.`; requires a
 /// non-empty result.
-pub fn sanitize_relpath(relpath: &str) -> Result<PathBuf, String> {
+pub fn sanitize_relpath(relpath: &str) -> Result<SandboxRelPath, String> {
     let p = Path::new(relpath);
     if p.is_absolute() {
         return Err("absolute path not allowed".into());
@@ -25,7 +85,7 @@ pub fn sanitize_relpath(relpath: &str) -> Result<PathBuf, String> {
     if out.as_os_str().is_empty() {
         return Err("empty path".into());
     }
-    Ok(out)
+    Ok(SandboxRelPath(out))
 }
 
 /// Why [`resolve_for_allowlist`] (or the [`normalize_abs`] it starts with)
@@ -76,8 +136,9 @@ impl fmt::Display for PathResolveError {
 }
 
 /// Normalize an absolute path for allowlist matching: require absolute, reject
-/// any `..` component. Returns the path as a string (matched against globs).
-pub fn normalize_abs(path: &str) -> Result<String, PathResolveError> {
+/// any `..` component. Returns a [`ResolvedPath`] (matched against globs via
+/// [`ResolvedPath::as_str`]).
+pub fn normalize_abs(path: &str) -> Result<ResolvedPath, PathResolveError> {
     let p = Path::new(path);
     if !p.is_absolute() {
         return Err(PathResolveError::NotAbsolute);
@@ -85,7 +146,7 @@ pub fn normalize_abs(path: &str) -> Result<String, PathResolveError> {
     if p.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(PathResolveError::Traversal);
     }
-    Ok(path.to_string())
+    Ok(ResolvedPath(path.to_string()))
 }
 
 /// Resolve a plugin-supplied absolute path into the string the allowlists are
@@ -110,9 +171,9 @@ pub fn normalize_abs(path: &str) -> Result<String, PathResolveError> {
 pub fn resolve_for_allowlist(
     path: &str,
     resolve_symlinks: bool,
-) -> Result<String, PathResolveError> {
+) -> Result<ResolvedPath, PathResolveError> {
     let norm = normalize_abs(path)?;
-    let p = Path::new(&norm);
+    let p = Path::new(norm.as_str());
     if !resolve_symlinks {
         // Rebuild through `components()` first: it discards a trailing
         // separator and a lone trailing `.`, whereas `Path::ancestors` walks
@@ -129,7 +190,7 @@ pub fn resolve_for_allowlist(
         for ancestor in clean.ancestors() {
             match std::fs::symlink_metadata(ancestor) {
                 Ok(m) if m.file_type().is_symlink() => {
-                    return Err(PathResolveError::SymlinkDenied(norm));
+                    return Err(PathResolveError::SymlinkDenied(norm.as_str().to_string()));
                 }
                 _ => {}
             }
@@ -154,7 +215,7 @@ pub fn resolve_for_allowlist(
     };
     resolved
         .to_str()
-        .map(str::to_string)
+        .map(|s| ResolvedPath(s.to_string()))
         .ok_or(PathResolveError::NotUtf8)
 }
 
@@ -246,12 +307,12 @@ mod tests {
         assert!(sanitize_relpath("a/../../b").is_err());
         assert!(sanitize_relpath("").is_err());
         assert_eq!(
-            sanitize_relpath("weather.json").unwrap(),
-            std::path::PathBuf::from("weather.json")
+            sanitize_relpath("weather.json").unwrap().as_ref(),
+            Path::new("weather.json")
         );
         assert_eq!(
-            sanitize_relpath("./sub/x").unwrap(),
-            std::path::PathBuf::from("sub/x")
+            sanitize_relpath("./sub/x").unwrap().as_ref(),
+            Path::new("sub/x")
         );
     }
 
@@ -259,7 +320,20 @@ mod tests {
     fn normalize_abs_requires_absolute_and_rejects_parent() {
         assert!(normalize_abs("relative/x").is_err());
         assert!(normalize_abs("/ok/../escape").is_err());
-        assert_eq!(normalize_abs("/var/lib/x").unwrap(), "/var/lib/x");
+        assert_eq!(normalize_abs("/var/lib/x").unwrap().as_str(), "/var/lib/x");
+    }
+
+    /// The only way to obtain a [`ResolvedPath`] is via [`normalize_abs`] /
+    /// [`resolve_for_allowlist`]. This test just exercises the two
+    /// constructors and the accessors; the real guarantee is the private
+    /// field (a `ResolvedPath("x".into())` outside this module must not
+    /// compile).
+    #[test]
+    fn resolved_path_only_comes_from_the_resolver() {
+        let p = normalize_abs("/etc/hostname").unwrap();
+        assert_eq!(p.as_str(), "/etc/hostname");
+        let r = resolve_for_allowlist("/etc/hostname", false).unwrap();
+        assert!(r.as_str().starts_with('/'));
     }
 
     #[test]
