@@ -1,6 +1,6 @@
 use crate::widgets::bar;
 use crate::widgets::spark::sparkline;
-use crate::{Context, RangeName, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget, WidgetName};
 
 /// Nerd-Font memory/RAM glyph (nf-md-memory 󰍛).
 const MEMORY_ICON: &str = "\u{f035b}";
@@ -9,7 +9,7 @@ const MEMORY_ICON: &str = "\u{f035b}";
 pub struct MemoryWidget {
     /// Registry/layout name; the toggle key threaded through render + click,
     /// and this instance's range name (invariant #7).
-    pub name: String,
+    pub name: WidgetName,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
@@ -204,7 +204,7 @@ mod tests {
     fn memory_toggled_uses_alt_format() {
         let g = 1024u64.pow(3);
         let mut c = ctx(mem(16 * g, 8 * g, 8 * g));
-        c.toggled.insert("memory".to_string());
+        c.toggled.insert(WidgetName::from("memory"));
         let out = MemoryWidget {
             name: "memory".into(),
             format: "{percent}%".into(),

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::env;
 
 use crate::cli::{RegionArgs, WindowArgs};
-use rustline_core::{Config, Context, NetIface, Theme, WidgetKind, WindowCtx};
+use rustline_core::{Config, Context, NetIface, Theme, WidgetKind, WidgetName, WindowCtx};
 
 /// Read the 1/5/15-minute load average via `getloadavg(3)`.
 ///
@@ -75,7 +75,7 @@ pub(crate) fn read_interfaces() -> Vec<NetIface> {
 /// output byte-identical (W45, W56, W57).
 pub fn build_region_context(
     args: &RegionArgs,
-    layout: &[String],
+    layout: &[WidgetName],
     theme: &Theme,
     cfg: &Config,
 ) -> Context {
@@ -266,7 +266,7 @@ mod tests {
         // layout (field is populated by the same read).
         let ctx = build_region_context(
             &RegionArgs::default(),
-            &["lan_ip".to_string()],
+            &[WidgetName::from("lan_ip")],
             &Theme::default(),
             &Config::default(),
         );
@@ -294,7 +294,7 @@ mod tests {
         for name in ["lan_ip", "tailscale_ip"] {
             let ctx = build_region_context(
                 &RegionArgs::default(),
-                &[name.to_string()],
+                &[WidgetName::from(name)],
                 &Theme::default(),
                 &Config::default(),
             );
@@ -317,7 +317,7 @@ mod tests {
         // read_battery() call.
         let ctx = build_region_context(
             &RegionArgs::default(),
-            &["battery".to_string()],
+            &[WidgetName::from("battery")],
             &Theme::default(),
             &Config::default(),
         );
@@ -340,7 +340,7 @@ mod tests {
         // read_uptime() call.
         let ctx = build_region_context(
             &RegionArgs::default(),
-            &["uptime".to_string()],
+            &[WidgetName::from("uptime")],
             &Theme::default(),
             &Config::default(),
         );
@@ -364,7 +364,7 @@ mod tests {
         // read_media() call.
         let ctx = build_region_context(
             &RegionArgs::default(),
-            &["media".to_string()],
+            &[WidgetName::from("media")],
             &Theme::default(),
             &Config::default(),
         );
@@ -439,7 +439,7 @@ mod tests {
         // histories stay empty. The default config's formats
         // (`{icon} {percent}%` / `{icon} {used}/{total}`) never touch the
         // history ring — the byte-identical-by-default case (W45).
-        let layout = ["cpu".to_string(), "memory".to_string()];
+        let layout = [WidgetName::from("cpu"), WidgetName::from("memory")];
         let ctx = build_region_context(
             &RegionArgs::default(),
             &layout,
@@ -466,7 +466,7 @@ mod tests {
         unsafe {
             std::env::set_var("XDG_DATA_HOME", tmp.path());
         }
-        let layout = ["cpu".to_string(), "memory".to_string()];
+        let layout = [WidgetName::from("cpu"), WidgetName::from("memory")];
         let ctx = build_region_context(&RegionArgs::default(), &layout, &Theme::default(), &cfg);
         // SAFETY: matches the set above; restores the process env for other tests.
         unsafe {
@@ -492,7 +492,7 @@ mod tests {
         unsafe {
             std::env::set_var("XDG_DATA_HOME", tmp.path());
         }
-        let layout = ["cpu".to_string(), "memory".to_string()];
+        let layout = [WidgetName::from("cpu"), WidgetName::from("memory")];
         let ctx = build_region_context(&RegionArgs::default(), &layout, &Theme::default(), &cfg);
         // SAFETY: matches the set above; restores the process env for other tests.
         unsafe {
@@ -513,7 +513,7 @@ mod tests {
         t.insert("kind".into(), "cpu".into());
         t.insert("format".into(), "{icon} {spark} {percent}%".into());
         cfg.instances.insert("cpu2".into(), toml::Value::Table(t));
-        let layout = ["cpu2".to_string()];
+        let layout = [WidgetName::from("cpu2")];
         let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: serialized by ENV_LOCK against the other env-mutating tests.
         unsafe {
@@ -565,7 +565,7 @@ mod tests {
         // both the singular `disk` and the `disks` map.
         let ctx = build_region_context(
             &RegionArgs::default(),
-            &["disk".to_string()],
+            &[WidgetName::from("disk")],
             &Theme::default(),
             &Config::default(),
         );
@@ -589,7 +589,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.instances
             .insert("disk_data".into(), toml::Value::Table(table));
-        let layout = ["disk".to_string(), "disk_data".to_string()];
+        let layout = [WidgetName::from("disk"), WidgetName::from("disk_data")];
         let ctx = build_region_context(&RegionArgs::default(), &layout, &Theme::default(), &cfg);
         assert!(ctx.disks.contains_key("/"), "base mount read fired");
         assert!(ctx.disks.contains_key(&mount2), "instance mount read fired");
@@ -692,7 +692,7 @@ mod tests {
         unsafe {
             std::env::set_var("XDG_DATA_HOME", tmp.path());
         }
-        let layout = ["throughput".to_string()];
+        let layout = [WidgetName::from("throughput")];
         let first = build_region_context(
             &RegionArgs::default(),
             &layout,

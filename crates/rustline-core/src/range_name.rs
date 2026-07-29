@@ -84,6 +84,15 @@ impl RangeName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Parse a widget identity into its clickable range form, if it fits.
+    ///
+    /// Lives here rather than on `WidgetName` itself: `RangeName` is defined
+    /// in `rustline-core`, but `WidgetName` lives in `rustline-abi` (shared
+    /// with a WASM guest), and `rustline-abi` cannot depend on `rustline-core`.
+    pub fn of_widget(name: &rustline_abi::WidgetName) -> Option<RangeName> {
+        RangeName::parse(name.as_str()).ok()
+    }
 }
 
 impl Deref for RangeName {

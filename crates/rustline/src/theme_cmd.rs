@@ -7,8 +7,8 @@ use std::path::Path;
 use std::process::Command;
 
 use rustline_core::{
-    Color, Config, Context, Direction, Registry, Theme, ThemeConfig, WindowCtx, builtin_theme,
-    builtin_theme_names, render_named_region, render_window, tmux_to_ansi,
+    Color, Config, Context, Direction, Registry, Theme, ThemeConfig, WidgetName, WindowCtx,
+    builtin_theme, builtin_theme_names, render_named_region, render_window, tmux_to_ansi,
 };
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value as EditValue, value};
 
@@ -225,12 +225,12 @@ fn preview_theme_ansi(theme: &Theme, show_alerts: bool) -> String {
     let reg = Registry::with_builtins(&cfg);
     let mut ctx = sample_context(theme, show_alerts);
     let right = vec![
-        "cwd".to_string(),
-        "cpu".to_string(),
-        "memory".to_string(),
-        "battery".to_string(),
-        "loadavg".to_string(),
-        "datetime".to_string(),
+        WidgetName::from("cwd"),
+        WidgetName::from("cpu"),
+        WidgetName::from("memory"),
+        WidgetName::from("battery"),
+        WidgetName::from("loadavg"),
+        WidgetName::from("datetime"),
     ];
     // `cfg` is `Config::default()` here (a synthetic preview, not the user's
     // real config), so this is always empty — kept for parity with the real

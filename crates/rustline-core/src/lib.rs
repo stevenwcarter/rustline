@@ -21,7 +21,7 @@ pub use config::{
 };
 pub use context::{
     Battery, BatteryState, Context, CpuUsage, DiskInfo, GitInfo, MediaInfo, MemInfo, NetIface,
-    Throughput, WindowCtx,
+    Throughput, WidgetName, WindowCtx,
 };
 pub use range_name::{NameError, RANGE_NAME_MAX_BYTES, RangeName};
 pub use render::{Direction, Theme, render_region};

@@ -1,11 +1,11 @@
 use crate::widgets::net;
-use crate::{Context, RangeName, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget, WidgetName};
 
 /// Renders the machine's Tailscale IPv4 (the `100.64.0.0/10` address).
 pub struct TailscaleIp {
     /// Registry/layout name; the toggle key threaded through render + click,
     /// and this instance's range name (invariant #7).
-    pub name: String,
+    pub name: WidgetName,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn tailscale_toggled_uses_alt_format() {
         let mut c = ctx(vec![ifc("tailscale0", "100.101.4.7")]);
-        c.toggled.insert("tailscale_ip".to_string());
+        c.toggled.insert(WidgetName::from("tailscale_ip"));
         let w = TailscaleIp {
             name: "tailscale_ip".into(),
             format: "{ip}".into(),

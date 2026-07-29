@@ -1,5 +1,5 @@
 use crate::config::WidgetKind;
-use crate::{Context, RangeName, Segment};
+use crate::{Context, RangeName, Segment, WidgetName};
 use std::collections::HashMap;
 
 /// Something that can render itself into one or more [`Segment`]s given the
@@ -68,7 +68,7 @@ pub struct WidgetDescriptor {
 /// without building an instance.
 #[derive(Default)]
 pub struct Registry {
-    factories: HashMap<String, Factory>,
+    factories: HashMap<WidgetName, Factory>,
     descriptors: Vec<WidgetDescriptor>,
 }
 
@@ -106,7 +106,8 @@ impl Registry {
         desc: WidgetDescriptor,
         factory: Box<dyn Fn() -> Box<dyn Widget> + Send + Sync>,
     ) {
-        self.factories.insert(desc.name.clone(), factory);
+        self.factories
+            .insert(WidgetName::from(desc.name.as_str()), factory);
         self.descriptors.retain(|d| d.name != desc.name);
         self.descriptors.push(desc);
     }
@@ -140,11 +141,11 @@ impl Registry {
     /// widget means a caller (e.g. `render_named_region`) never needs a
     /// second `names`-filtering pass just to recover which widget came from
     /// which name.
-    pub fn resolve(&self, names: &[String]) -> Vec<(String, Box<dyn Widget>)> {
+    pub fn resolve(&self, names: &[WidgetName]) -> Vec<(WidgetName, Box<dyn Widget>)> {
         names
             .iter()
             .filter_map(|name| {
-                let widget = self.build(name);
+                let widget = self.build(name.as_str());
                 if widget.is_none() {
                     crate::diag::warn_once(&format!("unknown-widget:{name}"), || {
                         tracing::warn!(widget = %name, "unknown widget, skipping");

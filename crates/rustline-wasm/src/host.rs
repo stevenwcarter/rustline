@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use extism::{Manifest, PTR, PluginBuilder, UserData, Wasm, host_fn};
 use rustline_abi::ABI_VERSION;
-use rustline_core::{Context, RangeName, Segment, Widget};
+use rustline_core::{Context, RangeName, Segment, Widget, WidgetName};
 
 use crate::abi::{CachedExecResult, ExecResult, RenderInput};
 use crate::capability::CapabilityCtx;
@@ -194,7 +194,7 @@ pub fn build_plugin_with_cache(
 pub struct WasmWidget {
     plugin: Arc<Mutex<extism::Plugin>>,
     options: Arc<serde_json::Value>,
-    name: Arc<str>,
+    name: WidgetName,
     /// One-shot latch for the poisoned-mutex warning. The daemon renders this
     /// widget every tick, so without it a single earlier panic would log once
     /// per refresh forever.
@@ -212,7 +212,7 @@ impl WasmWidget {
         Self {
             plugin: Arc::new(Mutex::new(plugin)),
             options: Arc::new(options),
-            name: Arc::from(name),
+            name: WidgetName::from(name),
             poison_reported: Arc::new(AtomicBool::new(false)),
             decode_reported: Arc::new(AtomicBool::new(false)),
         }
@@ -245,10 +245,13 @@ impl Widget for WasmWidget {
         // partially-updated Rust struct behind, and genuinely broken guest
         // state surfaces as the next `call` returning `Err`, which the arm
         // below already degrades to empty segments (N2).
-        let (mut plugin, _) =
-            recover_poisoned(self.plugin.lock(), &self.poison_reported, &self.name);
+        let (mut plugin, _) = recover_poisoned(
+            self.plugin.lock(),
+            &self.poison_reported,
+            self.name.as_str(),
+        );
         match plugin.call::<&str, &str>("render", &payload) {
-            Ok(out) => decode_render_output(&self.name, out, &self.decode_reported).0,
+            Ok(out) => decode_render_output(self.name.as_str(), out, &self.decode_reported).0,
             Err(error) => {
                 tracing::warn!(%error, "plugin render failed, rendering empty");
                 Vec::new()
@@ -259,7 +262,7 @@ impl Widget for WasmWidget {
     fn range_name(&self) -> Option<RangeName> {
         // A plugin is clickable when its name parses as a `RangeName`; the
         // guest decides whether to honor `context.toggled`.
-        plugin_range_name(&self.name)
+        plugin_range_name(self.name.as_str())
     }
 }
 
@@ -345,7 +348,7 @@ fn recover_poisoned<'a, T>(
 #[cfg(test)]
 mod tests {
     use rustline_abi::ABI_VERSION;
-    use rustline_core::{Config, Context, RangeName, Registry};
+    use rustline_core::{Config, Context, RangeName, Registry, WidgetName};
 
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -365,7 +368,7 @@ mod tests {
             home: "/home/steve".into(),
             hostname: "h".into(),
             now: chrono::Local::now(),
-            toggled: std::collections::BTreeSet::from([name.to_string()]),
+            toggled: std::collections::BTreeSet::from([WidgetName::from(name)]),
             ..Default::default()
         }
     }

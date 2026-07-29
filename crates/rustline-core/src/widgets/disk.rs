@@ -1,6 +1,6 @@
 use crate::widgets::bar;
 use crate::widgets::memory::format_bytes;
-use crate::{Context, RangeName, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget, WidgetName};
 
 /// Renders filesystem usage for a configured mount, read from
 /// `Context.disks` keyed by this instance's own `mount` (W46 — multiple
@@ -13,7 +13,7 @@ use crate::{Context, RangeName, Segment, Widget};
 pub struct DiskWidget {
     /// Registry/layout name; the toggle key threaded through render + click,
     /// and this instance's range name (invariant #7).
-    pub name: String,
+    pub name: WidgetName,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
@@ -204,7 +204,7 @@ mod tests {
     fn disk_toggled_uses_alt_format() {
         let g = 1024u64.pow(3);
         let mut c = ctx(disk(16 * g, 8 * g, 8 * g));
-        c.toggled.insert("disk".to_string());
+        c.toggled.insert(WidgetName::from("disk"));
         let out = DiskWidget {
             name: "disk".into(),
             format: "{percent}%".into(),

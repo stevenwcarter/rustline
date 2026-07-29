@@ -807,6 +807,8 @@ mod tests {
     #[cfg(feature = "wasm-e2e")]
     #[test]
     fn real_weather_wasm_installed_with_a_matching_checksum_still_registers() {
+        use rustline_core::WidgetName;
+
         let wasm_src = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../plugins/weather/target/wasm32-unknown-unknown/release/weather.wasm"
@@ -831,7 +833,12 @@ mod tests {
 
         let cfg = Config::load(&config_path);
         let mut reg = rustline_core::Registry::new();
-        rustline_wasm::register_plugins(&mut reg, &cfg, &plugin_dir, &["weather".to_string()]);
+        rustline_wasm::register_plugins(
+            &mut reg,
+            &cfg,
+            &plugin_dir,
+            &[WidgetName::from("weather")],
+        );
         assert!(
             reg.contains("weather"),
             "a plugin whose install-recorded digest matches its on-disk bytes must register"

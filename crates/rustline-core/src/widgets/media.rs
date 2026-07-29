@@ -1,4 +1,4 @@
-use crate::{Context, RangeName, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget, WidgetName};
 
 /// Renders the current now-playing track (artist/title/status) from
 /// `Context::media`. Pure — reads only `Context::media`.
@@ -11,7 +11,7 @@ use crate::{Context, RangeName, Segment, Widget};
 pub struct Media {
     /// Registry/layout name; the toggle key threaded through render + click,
     /// and this instance's range name (invariant #7).
-    pub name: String,
+    pub name: WidgetName,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn toggled_uses_alt_format() {
         let mut c = ctx(info("Radiohead", "Karma Police", "Playing"));
-        c.toggled.insert("media".to_string());
+        c.toggled.insert(WidgetName::from("media"));
         let out = w("{title}", "{artist} - {title}", "").render(&c);
         assert_eq!(out[0].text, "Radiohead - Karma Police");
         // untoggled -> normal format

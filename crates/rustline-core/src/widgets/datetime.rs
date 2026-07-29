@@ -1,10 +1,10 @@
-use crate::{Context, RangeName, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget, WidgetName};
 
 /// Renders the current time, formatted with a `chrono` strftime string.
 pub struct DateTime {
     /// Registry/layout name; the toggle key threaded through render + click,
     /// and this instance's range name (invariant #7).
-    pub name: String,
+    pub name: WidgetName,
     pub format: String,
     pub alt_format: String,
     /// An IANA zone name to render in instead of `ctx.now`'s local zone;
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn datetime_toggled_uses_alt_format() {
         let mut c = ctx_at();
-        c.toggled.insert("datetime".to_string());
+        c.toggled.insert(WidgetName::from("datetime"));
         let w = DateTime {
             name: "datetime".into(),
             format: "%H:%M".into(),

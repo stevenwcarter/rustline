@@ -1,13 +1,13 @@
 //! Shared click-toggle helpers: which format string is active given the
 //! toggle set, and whether a widget is a clickable range.
 
-use crate::{Context, RangeName};
+use crate::{Context, RangeName, WidgetName};
 
 /// The active format string for a widget: its `alt` view when the widget has a
 /// non-empty `alt` AND its `name` is in `ctx.toggled`, else its normal `format`.
 pub(crate) fn active_format<'a>(
     ctx: &Context,
-    name: &str,
+    name: &WidgetName,
     format: &'a str,
     alt: &'a str,
 ) -> &'a str {
@@ -24,11 +24,11 @@ pub(crate) fn active_format<'a>(
 /// carrying a `#` from an unvalidated `[instances.<name>]` TOML key — now
 /// falls out here too, not just an over-length one: `RangeName::parse` is the
 /// only place this rule is checked.
-pub(crate) fn clickable_range(name: &str, alt: &str) -> Option<RangeName> {
+pub(crate) fn clickable_range(name: &WidgetName, alt: &str) -> Option<RangeName> {
     if alt.is_empty() {
         None
     } else {
-        RangeName::parse(name).ok()
+        RangeName::of_widget(name)
     }
 }
 
@@ -67,7 +67,7 @@ mod tests {
             media: None,
             toggled: toggled
                 .iter()
-                .map(|s| s.to_string())
+                .map(|s| WidgetName::from(*s))
                 .collect::<BTreeSet<_>>(),
             cpu_history: Vec::new(),
             mem_history: Vec::new(),
@@ -77,22 +77,26 @@ mod tests {
 
     #[test]
     fn active_format_picks_alt_only_when_toggled_and_alt_nonempty() {
-        assert_eq!(active_format(&ctx(&["cpu"]), "cpu", "F", "A"), "A");
-        assert_eq!(active_format(&ctx(&[]), "cpu", "F", "A"), "F"); // not toggled
-        assert_eq!(active_format(&ctx(&["cpu"]), "cpu", "F", ""), "F"); // empty alt
-        assert_eq!(active_format(&ctx(&["mem"]), "cpu", "F", "A"), "F"); // other toggled
+        let cpu = WidgetName::from("cpu");
+        assert_eq!(active_format(&ctx(&["cpu"]), &cpu, "F", "A"), "A");
+        assert_eq!(active_format(&ctx(&[]), &cpu, "F", "A"), "F"); // not toggled
+        assert_eq!(active_format(&ctx(&["cpu"]), &cpu, "F", ""), "F"); // empty alt
+        assert_eq!(active_format(&ctx(&["mem"]), &cpu, "F", "A"), "F"); // other toggled
     }
 
     #[test]
     fn clickable_range_requires_alt_and_fits_15_bytes() {
         assert_eq!(
-            clickable_range("cpu", "A"),
+            clickable_range(&WidgetName::from("cpu"), "A"),
             Some(RangeName::parse("cpu").unwrap())
         );
-        assert_eq!(clickable_range("cpu", ""), None); // no alt -> not clickable
-        assert_eq!(clickable_range("this_name_is_16b", "A"), None); // 16 bytes > 15
+        assert_eq!(clickable_range(&WidgetName::from("cpu"), ""), None); // no alt -> not clickable
         assert_eq!(
-            clickable_range("fifteen_bytes__", "A"),
+            clickable_range(&WidgetName::from("this_name_is_16b"), "A"),
+            None
+        ); // 16 bytes > 15
+        assert_eq!(
+            clickable_range(&WidgetName::from("fifteen_bytes__"), "A"),
             Some(RangeName::parse("fifteen_bytes__").unwrap())
         ); // exactly 15
     }
@@ -104,6 +108,6 @@ mod tests {
         // an unvalidated `[instances.<name>]` TOML key) was still "clickable"
         // and got written unescaped into `#[range=user|...]` markup at the
         // render boundary — a forgery hole. It must be `None` now.
-        assert_eq!(clickable_range("a#[norange]", "A"), None);
+        assert_eq!(clickable_range(&WidgetName::from("a#[norange]"), "A"), None);
     }
 }

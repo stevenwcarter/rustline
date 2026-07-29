@@ -36,7 +36,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use rustline_core::{Config, PluginConfig, WidgetKind};
+use rustline_core::{Config, PluginConfig, WidgetKind, WidgetName};
 
 use crate::plugin_checksum::{PluginChecksumStatus, status_for};
 use crate::{daemon, daemon_client};
@@ -88,7 +88,7 @@ pub(crate) struct DoctorPaths<'a> {
     /// The configured `[plugins.*]` table, so the checksum row (see
     /// [`check_plugin_checksums`]) can report on every plugin the user has
     /// configured, not just ones that happen to be discovered on disk.
-    pub plugins: &'a HashMap<String, PluginConfig>,
+    pub plugins: &'a HashMap<WidgetName, PluginConfig>,
     /// The whole effective config, so [`check_readers`] can resolve which
     /// reader kinds the active layout actually uses (including
     /// `[instances.*]`) rather than guessing from widget names.
@@ -376,7 +376,7 @@ fn check_daemon() -> Check {
 /// file is named explicitly, since those are the actionable ones. An empty
 /// `[plugins.*]` table reports a clean, unambiguous "no plugins configured"
 /// rather than an empty/confusing row.
-fn check_plugin_checksums(plugins: &HashMap<String, PluginConfig>, plugin_dir: &Path) -> Check {
+fn check_plugin_checksums(plugins: &HashMap<WidgetName, PluginConfig>, plugin_dir: &Path) -> Check {
     const NAME: &str = "plugin checksums";
     if plugins.is_empty() {
         return Check {
@@ -386,7 +386,7 @@ fn check_plugin_checksums(plugins: &HashMap<String, PluginConfig>, plugin_dir: &
         };
     }
 
-    let mut names: Vec<&str> = plugins.keys().map(String::as_str).collect();
+    let mut names: Vec<&str> = plugins.keys().map(WidgetName::as_str).collect();
     names.sort_unstable();
 
     let (mut verified, mut unpinned) = (0usize, 0usize);
@@ -443,7 +443,7 @@ fn check_plugin_checksums(plugins: &HashMap<String, PluginConfig>, plugin_dir: &
 /// rendered at all — a different problem this check isn't meant to surface
 /// (that one's already flagged by `widget enable/move --region center`'s
 /// stderr note and `widget edit`'s outright refusal to edit `center`).
-fn readable_layout(cfg: &Config) -> Vec<String> {
+fn readable_layout(cfg: &Config) -> Vec<WidgetName> {
     let mut names = cfg.layout.left.clone();
     names.extend(cfg.layout.right.iter().cloned());
     names
@@ -465,7 +465,7 @@ fn readable_layout(cfg: &Config) -> Vec<String> {
 /// outright broken, and a `None` reading is frequently legitimate — no
 /// battery, not inside a repository, no media player running. Same rule
 /// [`check_plugin_checksums`] follows.
-fn check_readers(cfg: &Config, layout: &[String]) -> Check {
+fn check_readers(cfg: &Config, layout: &[WidgetName]) -> Check {
     const NAME: &str = "widget readers";
     let kinds = cfg.layout_kinds(layout);
 
@@ -699,10 +699,10 @@ mod tests {
         std::fs::write(dir.path().join("bare.wasm"), b"whatever").unwrap();
         let mut plugins = HashMap::new();
         plugins.insert(
-            "good".to_string(),
+            "good".into(),
             pc(Some(&rustline_wasm::sha256_hex(b"good bytes"))),
         );
-        plugins.insert("bare".to_string(), pc(None));
+        plugins.insert("bare".into(), pc(None));
 
         let check = check_plugin_checksums(&plugins, dir.path());
         assert_eq!(check.status, CheckStatus::Ok);
@@ -716,7 +716,7 @@ mod tests {
         std::fs::write(dir.path().join("bad.wasm"), b"actual bytes").unwrap();
         let mut plugins = HashMap::new();
         plugins.insert(
-            "bad".to_string(),
+            "bad".into(),
             pc(Some(&rustline_wasm::sha256_hex(b"different bytes"))),
         );
 
@@ -738,8 +738,8 @@ mod tests {
         std::fs::write(dir.path().join("weird.wasm"), b"bytes").unwrap();
         // `ghost` has no .wasm file on disk at all.
         let mut plugins = HashMap::new();
-        plugins.insert("weird".to_string(), pc(Some("not-a-real-digest")));
-        plugins.insert("ghost".to_string(), pc(None));
+        plugins.insert("weird".into(), pc(Some("not-a-real-digest")));
+        plugins.insert("ghost".into(), pc(None));
 
         let check = check_plugin_checksums(&plugins, dir.path());
         assert_eq!(check.status, CheckStatus::Warn);
@@ -758,11 +758,11 @@ mod tests {
         let cfg = Config::default();
         for layout in [
             vec![],
-            vec!["cpu".to_string(), "memory".to_string()],
+            vec![WidgetName::from("cpu"), WidgetName::from("memory")],
             vec![
-                "git".to_string(),
-                "media".to_string(),
-                "battery".to_string(),
+                WidgetName::from("git"),
+                WidgetName::from("media"),
+                WidgetName::from("battery"),
             ],
         ] {
             let check = check_readers(&cfg, &layout);
@@ -788,9 +788,9 @@ mod tests {
         // nothing in the render pipeline reads it, so a reader for a
         // center-only widget was never actually invoked by a real render.
         let mut cfg = Config::default();
-        cfg.layout.left = vec!["git".to_string()];
-        cfg.layout.right = vec!["cpu".to_string()];
-        cfg.layout.center = vec!["battery".to_string()];
+        cfg.layout.left = vec![WidgetName::from("git")];
+        cfg.layout.right = vec![WidgetName::from("cpu")];
+        cfg.layout.center = vec![WidgetName::from("battery")];
 
         let layout = readable_layout(&cfg);
         assert!(layout.iter().any(|n| n == "git"), "{layout:?}");
@@ -809,7 +809,7 @@ mod tests {
         // through `readable_layout` fixes that; assert it end to end
         // through `check_readers` itself, not just the layout union.
         let mut cfg = Config::default();
-        cfg.layout.left = vec!["git".to_string()];
+        cfg.layout.left = vec![WidgetName::from("git")];
         cfg.layout.right = vec![];
 
         let check = check_readers(&cfg, &readable_layout(&cfg));

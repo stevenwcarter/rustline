@@ -49,7 +49,7 @@ use crate::config::{
     LoadAvgOpts, MediaOpts, MemoryOpts, TailscaleIpOpts, ThroughputOpts, UptimeOpts, WidgetKind,
 };
 use crate::widget::{Registry, WidgetDescriptor, WidgetSource};
-use crate::{Config, RangeName, Widget};
+use crate::{Config, RangeName, Widget, WidgetName};
 
 /// Build a minimal-boilerplate `WidgetDescriptor` for a built-in widget.
 fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDescriptor {
@@ -109,7 +109,7 @@ fn build_instance(name: &str, spec: &InstanceSpec) -> Box<dyn Widget> {
 
 pub(crate) fn build_loadavg(name: &str, o: &LoadAvgOpts) -> Box<dyn Widget> {
     Box::new(LoadAvg {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -120,7 +120,7 @@ pub(crate) fn build_loadavg(name: &str, o: &LoadAvgOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_datetime(name: &str, o: &DateTimeOpts) -> Box<dyn Widget> {
     Box::new(DateTime {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         timezone: o.timezone.clone(),
@@ -129,7 +129,7 @@ pub(crate) fn build_datetime(name: &str, o: &DateTimeOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_lan_ip(name: &str, o: &LanIpOpts) -> Box<dyn Widget> {
     Box::new(LanIp {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -139,7 +139,7 @@ pub(crate) fn build_lan_ip(name: &str, o: &LanIpOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_tailscale_ip(name: &str, o: &TailscaleIpOpts) -> Box<dyn Widget> {
     Box::new(TailscaleIp {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -148,7 +148,7 @@ pub(crate) fn build_tailscale_ip(name: &str, o: &TailscaleIpOpts) -> Box<dyn Wid
 
 pub(crate) fn build_battery(name: &str, o: &BatteryOpts) -> Box<dyn Widget> {
     Box::new(BatteryWidget {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -160,7 +160,7 @@ pub(crate) fn build_battery(name: &str, o: &BatteryOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_cpu(name: &str, o: &CpuOpts) -> Box<dyn Widget> {
     Box::new(CpuWidget {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -173,7 +173,7 @@ pub(crate) fn build_cpu(name: &str, o: &CpuOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_memory(name: &str, o: &MemoryOpts) -> Box<dyn Widget> {
     Box::new(MemoryWidget {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -186,7 +186,7 @@ pub(crate) fn build_memory(name: &str, o: &MemoryOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_git(name: &str, o: &GitOpts) -> Box<dyn Widget> {
     Box::new(GitWidget {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -196,7 +196,7 @@ pub(crate) fn build_git(name: &str, o: &GitOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_disk(name: &str, o: &DiskOpts) -> Box<dyn Widget> {
     Box::new(DiskWidget {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -209,7 +209,7 @@ pub(crate) fn build_disk(name: &str, o: &DiskOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_uptime(name: &str, o: &UptimeOpts) -> Box<dyn Widget> {
     Box::new(Uptime {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -218,7 +218,7 @@ pub(crate) fn build_uptime(name: &str, o: &UptimeOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_media(name: &str, o: &MediaOpts) -> Box<dyn Widget> {
     Box::new(Media {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -227,7 +227,7 @@ pub(crate) fn build_media(name: &str, o: &MediaOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_throughput(name: &str, o: &ThroughputOpts) -> Box<dyn Widget> {
     Box::new(ThroughputWidget {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -405,7 +405,7 @@ impl Registry {
                 });
                 continue;
             }
-            if registry.contains(name) {
+            if registry.contains(name.as_str()) {
                 crate::diag::warn_once(&format!("instance-collide:{name}"), || {
                     tracing::warn!(
                         instance = %name,
@@ -420,7 +420,7 @@ impl Registry {
             // it just never becomes clickable, since `clickable_range` (via
             // each widget's `range_name()`) refuses to produce a `RangeName`
             // for it either. This is the same rule, checked once.
-            if let Err(err) = RangeName::parse(name) {
+            if let Err(err) = RangeName::parse(name.as_str()) {
                 crate::diag::warn_once(&format!("instance-unclickable:{name}"), || {
                     tracing::warn!(instance = %name, %err, "not click-toggleable: {err}");
                 });
@@ -436,8 +436,8 @@ impl Registry {
                     let n = name.clone();
                     let spec = spec.clone();
                     registry.register_described(
-                        instance_descriptor(name, &summary, spec.kind()),
-                        Box::new(move || build_instance(&n, &spec)),
+                        instance_descriptor(name.as_str(), &summary, spec.kind()),
+                        Box::new(move || build_instance(n.as_str(), &spec)),
                     );
                 }
                 InstanceParse::NoKind => unreachable!("handled by the early `continue` above"),

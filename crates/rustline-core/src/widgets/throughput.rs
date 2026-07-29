@@ -1,5 +1,5 @@
 use crate::widgets::memory::format_bytes;
-use crate::{Context, RangeName, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget, WidgetName};
 
 /// Renders network throughput (download/upload bytes-per-second), read from
 /// `Context.throughputs` keyed by this instance's own `iface_key` (W46 —
@@ -18,7 +18,7 @@ use crate::{Context, RangeName, Segment, Widget};
 pub struct ThroughputWidget {
     /// Registry/layout name; the toggle key threaded through render + click,
     /// and this instance's range name (invariant #7).
-    pub name: String,
+    pub name: WidgetName,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn throughput_toggled_uses_alt_format() {
         let mut c = ctx(rate(1024, 2048));
-        c.toggled.insert("throughput".to_string());
+        c.toggled.insert(WidgetName::from("throughput"));
         let out = ThroughputWidget {
             name: "throughput".into(),
             format: "{down}".into(),

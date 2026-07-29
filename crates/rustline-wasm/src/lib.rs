@@ -23,7 +23,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rustline_abi::ABI_VERSION;
-use rustline_core::{Config, PluginConfig, RangeName, Registry, WidgetDescriptor, WidgetSource};
+use rustline_core::{
+    Config, PluginConfig, RangeName, Registry, WidgetDescriptor, WidgetName, WidgetSource,
+};
 
 pub use argv::canonical_argv;
 pub use capability::{CapabilityCtx, DenialKind, DenialObserver};
@@ -93,7 +95,12 @@ pub fn discover_plugin_names(plugin_dir: &Path) -> Vec<String> {
 /// with a built-in, a checksum that fails to verify against the recorded
 /// digest, a `name()` export that disagrees with the stem, or any
 /// instantiation error is logged and skipped — never fatal.
-pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, needed: &[String]) {
+pub fn register_plugins(
+    reg: &mut Registry,
+    cfg: &Config,
+    plugin_dir: &Path,
+    needed: &[WidgetName],
+) {
     let root = state_root();
     // One resolved path, reused per plugin below: each instance gets its own
     // `FileDenialObserver` (cheap — just a `PathBuf` clone) writing to the
@@ -291,7 +298,7 @@ pub fn instantiate_named(
 mod tests {
     use std::sync::Arc;
 
-    use rustline_core::{Config, PluginConfig, Registry};
+    use rustline_core::{Config, PluginConfig, Registry, WidgetName};
 
     use super::{
         AbiDecision, DenialObserver, abi_decision, discover_plugin_names, instantiate_named,
@@ -425,7 +432,7 @@ mod tests {
     fn cfg_with_stub_checksum(checksum: Option<String>) -> Config {
         let mut cfg = Config::default();
         cfg.plugins.insert(
-            "stub".to_string(),
+            "stub".into(),
             PluginConfig {
                 checksum,
                 ..Default::default()
@@ -454,7 +461,7 @@ mod tests {
 
         let mut reg = Registry::new();
         let events = capture(|| {
-            register_plugins(&mut reg, &cfg, dir.path(), &["stub".to_string()]);
+            register_plugins(&mut reg, &cfg, dir.path(), &[WidgetName::from("stub")]);
         });
 
         assert!(
@@ -489,7 +496,7 @@ mod tests {
 
         let mut reg = Registry::new();
         let events = capture(|| {
-            register_plugins(&mut reg, &cfg, dir.path(), &["stub".to_string()]);
+            register_plugins(&mut reg, &cfg, dir.path(), &[WidgetName::from("stub")]);
         });
 
         assert!(

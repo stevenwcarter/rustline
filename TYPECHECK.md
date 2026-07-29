@@ -16,14 +16,7 @@ Last triage: 2026-07-29 against `codehealth/2026-07-26-batch2` @ 7d3ea13. Toolch
 
 ## Critical
 
-### T6. The widget identity (registry key = layout entry = tmux range name = toggle key = click/override map key) is a bare `String` threaded through every crate: `Registry::build / Layout.left / Context.toggled / RangeGroup.range` (crates/rustline-core/src/widget.rs:65)
-- Lens: newtype
-- Impact: 20 (bug-prevention 4 × blast-radius 5)
-- Effort: XL (70 sites, public-API: yes)
-- Risk: low
-- Blast radius: 70 sites across 27 files (crates/rustline-abi/src/lib.rs; crates/rustline-core/src/{widget.rs, config.rs, context.rs, render.rs, assemble.rs, widgets/toggle.rs, the 12 clickable widget modules}; crates/rustline-wasm/src/host.rs; crates/rustline/src/{toggles.rs, click.rs, plugin_index.rs, plugin_install.rs, widget_cmd.rs, widget_tui.rs}; crates/rustline-plugin-sdk/src/lib.rs)
-- Proposed type: `#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)] #[serde(transparent)] pub struct WidgetName(String);` in rustline-abi (so host and guest share it), with `From<&str>`, `Display`, `AsRef<str>`, and `fits_tmux_range(&self) -> bool` folding in `RANGE_NAME_MAX_BYTES` (delegate to T1's `RangeName::parse` if both execute). `#[serde(transparent)]` is load-bearing twice: `WireContext.toggled`/`Context.toggled` keep serializing as a JSON array of plain strings (byte-identical wire, invariant #2), and `Layout.left/center/right` as `Vec<WidgetName>` plus the `plugins`/`instances` map keys as `HashMap<WidgetName, _>` keep the accepted TOML shape (`left = ["cpu", "git"]`, `[plugins.weather]`) unchanged. Thread through `Registry::{register, build, contains, resolve}`, `toggle::{active_format, clickable_range}`, `assemble::render_named_region`'s names/overrides, `Widget::range_name`, `toggles::{parse_toggles, apply_toggle}`, and `click::{resolve_click, dispatch, ClickExecutor::toggle}`. The concrete swap this makes uncompilable: `active_format(ctx, name, format, alt)` takes an identity followed immediately by two format-template `&str`s, called identically from twelve widget modules — passing `&self.format` where `&self.name` belongs compiles today and silently makes a widget un-toggleable while emitting a bogus `#[range=user|…]` (invariant #7's silent-failure mode). Renames are NOT part of this — every field/variant name stays as-is.
-- [x] execute   [ ] skip
+_(none)_
 
 ## High
 

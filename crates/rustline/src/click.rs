@@ -20,7 +20,7 @@
 
 use std::process::{Command, Stdio};
 
-use rustline_core::{ClickBinding, Config};
+use rustline_core::{ClickBinding, Config, WidgetName};
 
 use crate::toggles;
 
@@ -50,7 +50,7 @@ pub enum ClickAction {
 /// never spawning real processes.
 pub trait ClickExecutor {
     /// Flip `range`'s membership in the toggle state file.
-    fn toggle(&self, range: &str);
+    fn toggle(&self, range: &WidgetName);
     /// Open `url` with the OS opener.
     fn open_url(&self, url: &str);
     /// Run `command` via `sh -c`, detached.
@@ -109,7 +109,7 @@ pub fn resolve_click(cfg: &Config, range: &str, button: &str) -> ClickAction {
 /// [`ClickAction::Toggle`].
 pub fn dispatch(action: ClickAction, range: &str, exec: &impl ClickExecutor) {
     match action {
-        ClickAction::Toggle => exec.toggle(range),
+        ClickAction::Toggle => exec.toggle(&WidgetName::from(range)),
         ClickAction::OpenUrl(url) => exec.open_url(&url),
         ClickAction::Run(command) => exec.run(&command),
         ClickAction::NoOp => {}
@@ -121,9 +121,9 @@ pub fn dispatch(action: ClickAction, range: &str, exec: &impl ClickExecutor) {
 pub struct RealExecutor;
 
 impl ClickExecutor for RealExecutor {
-    fn toggle(&self, range: &str) {
+    fn toggle(&self, range: &WidgetName) {
         let mut set = toggles::read_toggles();
-        toggles::apply_toggle(&mut set, range);
+        toggles::apply_toggle(&mut set, range.as_str());
         toggles::write_toggles(&set);
     }
 
@@ -174,7 +174,7 @@ mod tests {
     }
 
     impl ClickExecutor for FakeExecutor {
-        fn toggle(&self, range: &str) {
+        fn toggle(&self, range: &WidgetName) {
             self.calls.borrow_mut().push(format!("toggle:{range}"));
         }
         fn open_url(&self, url: &str) {

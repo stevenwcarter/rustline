@@ -179,7 +179,7 @@ fn plugin_list_json(cfg: &Config, plugin_dir: &Path) -> String {
         .plugins
         .iter()
         .map(|(name, pc)| PluginEntryJson {
-            name,
+            name: name.as_str(),
             // Display keeps `source` a flat string for the `string|null` JSON schema; the
             // future-only Url/Path PluginSource variants would Display as "url: X"/"path: X"
             // — revisit if install-by-url/path ships.
@@ -191,10 +191,10 @@ fn plugin_list_json(cfg: &Config, plugin_dir: &Path) -> String {
             resolve_symlinks: pc.resolve_symlinks,
             allowed_commands: &pc.allowed_commands,
             max_state_bytes: pc.max_state_bytes,
-            has_manifest: resolve_manifest(plugin_dir, name).is_some(),
+            has_manifest: resolve_manifest(plugin_dir, name.as_str()).is_some(),
             checksum_status: crate::plugin_checksum::status_for(
                 plugin_dir,
-                name,
+                name.as_str(),
                 pc.checksum.as_deref(),
             )
             .label(),
@@ -283,7 +283,11 @@ fn sample_context() -> CoreContext {
 /// toggles file.
 fn run_plugin(args: &RunArgs, config_path: &Path, plugin_dir: &Path) {
     let cfg = Config::load(config_path);
-    let pc = cfg.plugins.get(&args.name).cloned().unwrap_or_default();
+    let pc = cfg
+        .plugins
+        .get(args.name.as_str())
+        .cloned()
+        .unwrap_or_default();
     let observer = Arc::new(CollectingObserver::default());
     let widget = rustline_wasm::instantiate_named(plugin_dir, &args.name, &pc, observer.clone());
     let Some(widget) = widget else {
@@ -397,7 +401,7 @@ fn list(config_path: &Path, plugin_dir: &Path, json: bool) {
             }
         }
         let checksum_status =
-            crate::plugin_checksum::status_for(plugin_dir, name, pc.checksum.as_deref());
+            crate::plugin_checksum::status_for(plugin_dir, name.as_str(), pc.checksum.as_deref());
         println!("  checksum: {}", checksum_status.label());
         println!("  allowed_urls: {:?}", pc.allowed_urls);
         println!("  allowed_paths: {:?}", pc.allowed_paths);
@@ -405,7 +409,7 @@ fn list(config_path: &Path, plugin_dir: &Path, json: bool) {
         println!("  resolve_symlinks: {}", pc.resolve_symlinks);
         println!("  allowed_commands: {:?}", pc.allowed_commands);
         println!("  max_state_bytes: {}", pc.max_state_bytes);
-        if let Some(m) = resolve_manifest(plugin_dir, name) {
+        if let Some(m) = resolve_manifest(plugin_dir, name.as_str()) {
             println!(
                 "  declared capabilities: {} urls, {} paths, {} write paths, {} commands (run `plugin approve {name}`)",
                 m.requested_urls.len(),
@@ -423,7 +427,7 @@ fn pattern_cmd(cmd: PatternCmd, kind: Kind, config_path: &Path) {
     match cmd {
         PatternCmd::List { plugin, json } => {
             let cfg = Config::load(config_path);
-            let patterns = cfg.plugins.get(&plugin).map(|p| match kind {
+            let patterns = cfg.plugins.get(plugin.as_str()).map(|p| match kind {
                 Kind::Url => &p.allowed_urls,
                 Kind::Path => &p.allowed_paths,
                 Kind::WritePath => &p.allowed_write_paths,
@@ -1425,7 +1429,7 @@ mod tests {
             resolve_symlinks: true,
             ..Default::default()
         };
-        cfg.plugins.insert("evil".to_string(), pc);
+        cfg.plugins.insert("evil".into(), pc);
 
         let json = plugin_list_json(&cfg, std::path::Path::new("/nonexistent-plugin-dir"));
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1446,7 +1450,7 @@ mod tests {
             allowed_urls: vec!["https://wttr.in/*".to_string()],
             ..Default::default()
         };
-        cfg.plugins.insert("weather".to_string(), pc);
+        cfg.plugins.insert("weather".into(), pc);
         // A path with no manifest sidecar → has_manifest false.
         let json = plugin_list_json(&cfg, std::path::Path::new("/nonexistent-plugin-dir"));
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1475,7 +1479,7 @@ mod tests {
             checksum: Some(rustline_wasm::sha256_hex(bytes)),
             ..Default::default()
         };
-        cfg.plugins.insert("weather".to_string(), pc);
+        cfg.plugins.insert("weather".into(), pc);
 
         let json = plugin_list_json(&cfg, dir.path());
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1498,7 +1502,7 @@ mod tests {
             checksum: Some(rustline_wasm::sha256_hex(b"different bytes")),
             ..Default::default()
         };
-        cfg.plugins.insert("weather".to_string(), pc);
+        cfg.plugins.insert("weather".into(), pc);
 
         let json = plugin_list_json(&cfg, dir.path());
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();

@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use rustline_core::{Config, Registry};
+use rustline_core::{Config, Registry, WidgetName};
 use rustline_wasm::{CapabilityCtx, CompileCache, build_plugin_with_cache, state_root};
 
 use super::fixture::fabricated_context;
@@ -61,7 +61,8 @@ pub fn bench_plugins(
     }
 
     let mut registry = Registry::new();
-    rustline_wasm::register_plugins(&mut registry, cfg, plugin_dir, &stems);
+    let needed: Vec<WidgetName> = stems.iter().map(|s| WidgetName::from(s.as_str())).collect();
+    rustline_wasm::register_plugins(&mut registry, cfg, plugin_dir, &needed);
     let ctx = fabricated_context();
     let mut rows = Vec::new();
 
@@ -153,7 +154,7 @@ pub fn bench_plugin_builds(cfg: &Config, plugin_dir: &Path, real_iters: usize) -
         let Ok(bytes) = std::fs::read(plugin_dir.join(format!("{stem}.wasm"))) else {
             continue;
         };
-        let pc = cfg.plugins.get(stem).cloned().unwrap_or_default();
+        let pc = cfg.plugins.get(stem.as_str()).cloned().unwrap_or_default();
         let build = |cache: CompileCache| {
             let ctx = CapabilityCtx::from_config(stem, &pc, root.clone());
             let _ = build_plugin_with_cache(&bytes, ctx, cache);

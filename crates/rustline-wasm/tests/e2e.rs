@@ -9,7 +9,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rustline_core::{Config, Context, PluginConfig, Registry, Widget, WidgetSource};
+use rustline_core::{Config, Context, PluginConfig, Registry, Widget, WidgetName, WidgetSource};
 use rustline_wasm::capability::CapabilityCtx;
 use rustline_wasm::{WasmWidget, build_plugin, register_plugins, sha256_hex};
 
@@ -126,7 +126,7 @@ fn register_plugins_records_a_plugin_sourced_descriptor() {
         &mut reg,
         &Config::default(),
         plugin_dir.path(),
-        &["weather".to_string()],
+        &[WidgetName::from("weather")],
     );
 
     let desc = reg
@@ -206,7 +206,7 @@ fn staged_weather() -> (tempfile::TempDir, Vec<u8>) {
 fn cfg_with_checksum(checksum: Option<String>) -> Config {
     let mut cfg = Config::default();
     cfg.plugins.insert(
-        "weather".to_string(),
+        "weather".into(),
         PluginConfig {
             checksum,
             ..Default::default()
@@ -217,7 +217,7 @@ fn cfg_with_checksum(checksum: Option<String>) -> Config {
 
 fn register_weather(cfg: &Config, dir: &std::path::Path) -> Registry {
     let mut reg = Registry::new();
-    register_plugins(&mut reg, cfg, dir, &["weather".to_string()]);
+    register_plugins(&mut reg, cfg, dir, &[WidgetName::from("weather")]);
     reg
 }
 
