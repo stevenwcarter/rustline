@@ -9,7 +9,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
-use rustline_core::{Config, Context as CoreContext, Segment, Widget};
+use rustline_core::{Config, Context as CoreContext, NameError, RangeName, Segment, Widget};
 use rustline_wasm::{DenialKind, DenialObserver, PluginManifest, resolve_manifest};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
@@ -676,31 +676,26 @@ fn write_doc(config_path: &Path, doc: &DocumentMut) {
 /// `..`, spaces, and dots are all rejected without special-casing each), at
 /// most 15 bytes (tmux's `range=user|X` byte cap — invariant #7, so the
 /// scaffolded plugin stays click-toggleable), and not the reserved name
-/// `window`. Pure and unit-tested so the scaffold command can reject a bad
-/// name before touching disk.
+/// `window`. Rebuilt on [`RangeName::parse`] (T1) — the one place this rule
+/// is actually checked — but keeps its own pre-existing message text per
+/// variant rather than `NameError`'s `Display`, since those strings are this
+/// command's user-facing contract. Pure and unit-tested so the scaffold
+/// command can reject a bad name before touching disk.
 fn validate_plugin_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("plugin name must not be empty".to_string());
-    }
-    if name == RESERVED_PLUGIN_NAME {
-        return Err(format!("plugin name {RESERVED_PLUGIN_NAME:?} is reserved"));
-    }
-    if name.len() > MAX_PLUGIN_NAME_BYTES {
-        return Err(format!(
-            "plugin name {name:?} is {} bytes; must be at most {MAX_PLUGIN_NAME_BYTES} \
-             (tmux's range=user|X limit)",
-            name.len()
-        ));
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err(format!(
+    match RangeName::parse(name) {
+        Ok(_) => Ok(()),
+        Err(NameError::Empty) => Err("plugin name must not be empty".to_string()),
+        Err(NameError::TooLong { len }) => Err(format!(
+            "plugin name {name:?} is {len} bytes; must be at most {MAX_PLUGIN_NAME_BYTES} \
+             (tmux's range=user|X limit)"
+        )),
+        Err(NameError::BadChar { .. }) => Err(format!(
             "plugin name {name:?} may only contain letters, digits, `_`, and `-`"
-        ));
+        )),
+        Err(NameError::Reserved) => {
+            Err(format!("plugin name {RESERVED_PLUGIN_NAME:?} is reserved"))
+        }
     }
-    Ok(())
 }
 
 /// Whether `plugin new` must refuse to scaffold into a directory that

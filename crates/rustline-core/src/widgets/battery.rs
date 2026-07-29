@@ -1,4 +1,4 @@
-use crate::{Battery, BatteryState, Context, Segment, Widget};
+use crate::{Battery, BatteryState, Context, RangeName, Segment, Widget};
 
 /// Renders battery percentage, charge state, and a level-bucketed,
 /// charging-aware Nerd-Font icon. Pure — reads only `Context::battery`.
@@ -88,7 +88,7 @@ impl Widget for BatteryWidget {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -308,7 +308,7 @@ mod tests {
                 icon: None,
             }
             .range_name(),
-            Some("battery")
+            Some(RangeName::parse("battery").unwrap())
         );
     }
 

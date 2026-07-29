@@ -16,7 +16,7 @@ use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{Context as _, anyhow, bail};
-use rustline_core::{Config, PluginSource};
+use rustline_core::{Config, NameError, PluginSource, RangeName};
 use serde_json::Value;
 use toml_edit::{DocumentMut, Item, Table, value};
 
@@ -131,22 +131,22 @@ fn release_api_url(owner: &str, repo: &str, tag: Option<&str>) -> String {
 /// isn't click-toggleable (`register_plugins` warns and registers it anyway),
 /// so `install` warns rather than refusing. Returns `Ok(clickable)` where
 /// `clickable` is whether the name fits the range cap.
+///
+/// Rebuilt on [`RangeName::parse`] (T1): every [`NameError`] variant maps to
+/// this command's own pre-existing message text, except `TooLong`, which
+/// warn-don't-refuses exactly as before (`Ok(false)` rather than `Err`).
 fn validate_install_name(name: &str) -> Result<bool, String> {
-    if name.is_empty() {
-        return Err("plugin name must not be empty".to_string());
-    }
-    if name == RESERVED_PLUGIN_NAME {
-        return Err(format!("plugin name {RESERVED_PLUGIN_NAME:?} is reserved"));
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err(format!(
+    match RangeName::parse(name) {
+        Ok(_) => Ok(true),
+        Err(NameError::TooLong { .. }) => Ok(false),
+        Err(NameError::Empty) => Err("plugin name must not be empty".to_string()),
+        Err(NameError::BadChar { .. }) => Err(format!(
             "plugin name {name:?} may only contain letters, digits, `_`, and `-`"
-        ));
+        )),
+        Err(NameError::Reserved) => {
+            Err(format!("plugin name {RESERVED_PLUGIN_NAME:?} is reserved"))
+        }
     }
-    Ok(name.len() <= MAX_PLUGIN_NAME_BYTES)
 }
 
 /// Resolve a release, download its `.wasm`, install it into `plugin_dir`, and

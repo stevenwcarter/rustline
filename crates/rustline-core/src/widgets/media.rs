@@ -1,4 +1,4 @@
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget};
 
 /// Renders the current now-playing track (artist/title/status) from
 /// `Context::media`. Pure — reads only `Context::media`.
@@ -45,7 +45,7 @@ impl Widget for Media {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -155,7 +155,10 @@ mod tests {
 
     #[test]
     fn range_name_some_only_with_alt_format() {
-        assert_eq!(w("{title}", "{artist}", "").range_name(), Some("media"));
+        assert_eq!(
+            w("{title}", "{artist}", "").range_name(),
+            Some(RangeName::parse("media").unwrap())
+        );
         assert_eq!(w("{title}", "", "").range_name(), None);
     }
 }

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use extism::{Manifest, PTR, PluginBuilder, UserData, Wasm, host_fn};
 use rustline_abi::ABI_VERSION;
-use rustline_core::{Context, RANGE_NAME_MAX_BYTES, Segment, Widget};
+use rustline_core::{Context, RangeName, Segment, Widget};
 
 use crate::abi::{CachedExecResult, ExecResult, RenderInput};
 use crate::capability::CapabilityCtx;
@@ -256,19 +256,20 @@ impl Widget for WasmWidget {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
-        // A plugin is clickable when its name fits tmux's user-range byte
-        // limit; the guest decides whether to honor `context.toggled`.
+    fn range_name(&self) -> Option<RangeName> {
+        // A plugin is clickable when its name parses as a `RangeName`; the
+        // guest decides whether to honor `context.toggled`.
         plugin_range_name(&self.name)
     }
 }
 
-/// A plugin's clickable range name: `Some(name)` when it fits tmux's
-/// [`RANGE_NAME_MAX_BYTES`]-byte `range=user|X` limit; else `None`. Pulled out
-/// of `WasmWidget::range_name` so the boundary can be pinned by a hermetic
-/// unit test without needing a real `extism::Plugin` instance.
-fn plugin_range_name(name: &str) -> Option<&str> {
-    (name.len() <= RANGE_NAME_MAX_BYTES).then_some(name)
+/// A plugin's clickable range name: `Some(name)` when it parses as a
+/// [`RangeName`]; else `None` (this now also rejects a charset-violating
+/// `.wasm` stem, not just an over-length one — the same rule, checked once).
+/// Pulled out of `WasmWidget::range_name` so the boundary can be pinned by a
+/// hermetic unit test without needing a real `extism::Plugin` instance.
+fn plugin_range_name(name: &str) -> Option<RangeName> {
+    RangeName::parse(name).ok()
 }
 
 /// Decode a guest's `render` output, returning the segments plus the decode
@@ -344,7 +345,7 @@ fn recover_poisoned<'a, T>(
 #[cfg(test)]
 mod tests {
     use rustline_abi::ABI_VERSION;
-    use rustline_core::{Config, Context, Registry};
+    use rustline_core::{Config, Context, RangeName, Registry};
 
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -520,11 +521,23 @@ mod tests {
         // rustline-core one, without needing a real `extism::Plugin`.
         let fifteen = "fifteen_bytes__";
         assert_eq!(fifteen.len(), 15);
-        assert_eq!(plugin_range_name(fifteen), Some(fifteen));
+        assert_eq!(
+            plugin_range_name(fifteen),
+            Some(RangeName::parse(fifteen).unwrap())
+        );
 
         let sixteen = "this_name_is_16b";
         assert_eq!(sixteen.len(), 16);
         assert_eq!(plugin_range_name(sixteen), None);
+    }
+
+    #[test]
+    fn plugin_range_name_rejects_a_charset_violating_stem() {
+        // T1: a `.wasm` filename stem carrying a `#` used to still be
+        // "clickable" here (the old check was length-only), which would have
+        // written it unescaped into `#[range=user|...]` markup — the same
+        // forgery hole `RangeName` closes for widget/instance names.
+        assert_eq!(plugin_range_name("a#[norange]"), None);
     }
 
     #[test]

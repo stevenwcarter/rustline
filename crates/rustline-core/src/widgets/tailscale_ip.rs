@@ -1,5 +1,5 @@
 use crate::widgets::net;
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget};
 
 /// Renders the machine's Tailscale IPv4 (the `100.64.0.0/10` address).
 pub struct TailscaleIp {
@@ -18,7 +18,7 @@ impl Widget for TailscaleIp {
         net::render_ip(fmt, ip, &self.down_format)
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }

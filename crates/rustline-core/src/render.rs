@@ -3,7 +3,7 @@
 
 use std::fmt::Write;
 
-use crate::{Color, Segment};
+use crate::{Color, RangeName, Segment};
 
 /// Which side of the status bar a region is anchored to. This decides the
 /// powerline glyph orientation and how separator colors are mirrored: `Left`
@@ -243,18 +243,15 @@ pub fn render_region(dir: Direction, segments: &[Segment], theme: &Theme) -> Str
     out
 }
 
-/// tmux's `range=user|<name>` argument caps `<name>` at this many bytes. The
-/// single source of truth for that limit: `widgets::toggle::clickable_range`
-/// and `rustline-wasm`'s plugin-name gate both compare against this constant
-/// rather than a hardcoded `15`, so the limit only needs to change in one place.
-pub const RANGE_NAME_MAX_BYTES: usize = 15;
-
 /// A widget's rendered segments plus its optional clickable range name. The
 /// assemble layer builds these so `render_region_ranged` can bracket clickable
 /// widgets in `#[range=user|NAME]…#[norange]` while keeping every other byte of
-/// output identical to `render_region`.
+/// output identical to `render_region`. `range` being a [`RangeName`] rather
+/// than a bare `String` means the bytes interpolated into `#[range=user|…]`
+/// below are safe by construction (invariant #7/#8) — nothing here re-checks
+/// length or charset.
 pub struct RangeGroup {
-    pub range: Option<String>,
+    pub range: Option<RangeName>,
     pub segments: Vec<Segment>,
 }
 
@@ -518,7 +515,7 @@ mod tests {
 
     fn group(range: Option<&str>, segs: Vec<Segment>) -> RangeGroup {
         RangeGroup {
-            range: range.map(str::to_string),
+            range: range.map(|s| RangeName::parse(s).unwrap()),
             segments: segs,
         }
     }
@@ -626,7 +623,7 @@ mod tests {
     fn guest_text_cannot_forge_a_range() {
         let theme = Theme::default();
         let groups = vec![RangeGroup {
-            range: Some("weather".to_string()),
+            range: Some(RangeName::parse("weather").unwrap()),
             segments: vec![Segment::new("#[norange]#[range=user|cpu]x")],
         }];
         let out = render_region_ranged(Direction::Right, &groups, &theme);

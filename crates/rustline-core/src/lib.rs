@@ -5,6 +5,7 @@ pub mod atomic_write;
 pub mod config;
 pub mod context;
 pub mod diag;
+pub mod range_name;
 pub mod render;
 pub mod segment;
 pub mod themes;
@@ -22,7 +23,8 @@ pub use context::{
     Battery, BatteryState, Context, CpuUsage, DiskInfo, GitInfo, MediaInfo, MemInfo, NetIface,
     Throughput, WindowCtx,
 };
-pub use render::{Direction, RANGE_NAME_MAX_BYTES, Theme, render_region};
+pub use range_name::{NameError, RANGE_NAME_MAX_BYTES, RangeName};
+pub use render::{Direction, Theme, render_region};
 pub use segment::{Color, Segment, Style, ThemeColors};
 pub use themes::{builtin_theme, builtin_theme_names};
 pub use widget::{Registry, Widget, WidgetDescriptor, WidgetSource};

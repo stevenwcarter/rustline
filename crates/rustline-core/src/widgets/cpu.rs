@@ -1,6 +1,6 @@
 use crate::widgets::bar;
 use crate::widgets::spark::sparkline;
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget};
 
 /// Nerd-Font CPU/chip glyph (nf-md-chip 󰘚).
 const CPU_ICON: &str = "\u{f061a}";
@@ -61,7 +61,7 @@ impl Widget for CpuWidget {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -146,7 +146,10 @@ mod tests {
 
     #[test]
     fn range_name_some_only_with_alt_format() {
-        assert_eq!(w2("{percent}%", "{bar}", "").range_name(), Some("cpu"));
+        assert_eq!(
+            w2("{percent}%", "{bar}", "").range_name(),
+            Some(RangeName::parse("cpu").unwrap())
+        );
         assert_eq!(w2("{percent}%", "", "").range_name(), None);
     }
 

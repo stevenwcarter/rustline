@@ -23,9 +23,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rustline_abi::ABI_VERSION;
-use rustline_core::{
-    Config, PluginConfig, RANGE_NAME_MAX_BYTES, Registry, WidgetDescriptor, WidgetSource,
-};
+use rustline_core::{Config, PluginConfig, RangeName, Registry, WidgetDescriptor, WidgetSource};
 
 pub use argv::canonical_argv;
 pub use capability::{CapabilityCtx, DenialKind, DenialObserver};
@@ -227,9 +225,15 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
                 continue;
             }
         }
-        if stem.len() > RANGE_NAME_MAX_BYTES {
-            rustline_core::diag::warn_once(&format!("plugin-skip:long-name:{stem}"), || {
-                tracing::warn!(plugin = %stem, "plugin name > 15 bytes; not click-toggleable");
+        // Permissive (invariant N2): a stem that fails to parse as a
+        // `RangeName` (too long, a `[A-Za-z0-9_-]` violation, or the reserved
+        // `window`) still registers below — it just never becomes clickable,
+        // since `WasmWidget::range_name` (via `host::plugin_range_name`)
+        // refuses to produce a `RangeName` for it either. Same rule, checked
+        // once.
+        if let Err(err) = RangeName::parse(stem) {
+            rustline_core::diag::warn_once(&format!("plugin-skip:unclickable:{stem}"), || {
+                tracing::warn!(plugin = %stem, %err, "not click-toggleable: {err}");
             });
         }
         let widget = host::WasmWidget::new(plugin, options, stem);

@@ -1,4 +1,4 @@
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget};
 
 /// Renders the current time, formatted with a `chrono` strftime string.
 pub struct DateTime {
@@ -41,7 +41,7 @@ impl Widget for DateTime {
         vec![Segment::new(formatted)]
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -187,7 +187,7 @@ mod tests {
                 timezone: None,
             }
             .range_name(),
-            Some("datetime")
+            Some(RangeName::parse("datetime").unwrap())
         );
     }
 }

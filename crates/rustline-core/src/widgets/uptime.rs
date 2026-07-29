@@ -1,4 +1,4 @@
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget};
 
 /// Renders system uptime, humanized (`3d 4h`, `1h 15m`, `12m`, `<1m`).
 ///
@@ -35,7 +35,7 @@ impl Widget for Uptime {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -146,7 +146,10 @@ mod tests {
 
     #[test]
     fn range_name_some_only_with_alt_format() {
-        assert_eq!(w("{uptime}", "u:{uptime}", "").range_name(), Some("uptime"));
+        assert_eq!(
+            w("{uptime}", "u:{uptime}", "").range_name(),
+            Some(RangeName::parse("uptime").unwrap())
+        );
         assert_eq!(w("{uptime}", "", "").range_name(), None);
     }
 }

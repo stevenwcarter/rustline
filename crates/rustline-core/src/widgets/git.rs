@@ -1,4 +1,4 @@
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget};
 
 /// Renders the current git branch (or short SHA when `HEAD` is detached) plus
 /// a dirty marker and ahead/behind/staged/unstaged counts for the pane's
@@ -60,7 +60,7 @@ impl Widget for GitWidget {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -180,7 +180,7 @@ mod tests {
     fn range_name_some_only_with_alt_format() {
         assert_eq!(
             w("{branch}", "{branch}{dirty}", "").range_name(),
-            Some("git")
+            Some(RangeName::parse("git").unwrap())
         );
         assert_eq!(w("{branch}", "", "").range_name(), None);
     }

@@ -1,5 +1,5 @@
 use crate::widgets::net;
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget};
 
 /// Renders the machine's LAN IPv4, selected from `Context.interfaces`.
 pub struct LanIp {
@@ -19,7 +19,7 @@ impl Widget for LanIp {
         net::render_ip(fmt, ip, &self.down_format)
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }

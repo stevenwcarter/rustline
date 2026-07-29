@@ -1,6 +1,6 @@
 use crate::widgets::bar;
 use crate::widgets::spark::sparkline;
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget};
 
 /// Nerd-Font memory/RAM glyph (nf-md-memory 󰍛).
 const MEMORY_ICON: &str = "\u{f035b}";
@@ -90,7 +90,7 @@ impl Widget for MemoryWidget {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -242,7 +242,7 @@ mod tests {
             crit_percent: 92.0,
             icon: None,
         };
-        assert_eq!(alt.range_name(), Some("memory"));
+        assert_eq!(alt.range_name(), Some(RangeName::parse("memory").unwrap()));
     }
 
     #[test]

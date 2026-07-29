@@ -49,7 +49,7 @@ use crate::config::{
     MemoryOpts, TailscaleIpOpts, ThroughputOpts, UptimeOpts, instance_opts,
 };
 use crate::widget::{Registry, WidgetDescriptor, WidgetSource};
-use crate::{Config, RANGE_NAME_MAX_BYTES, Widget};
+use crate::{Config, RangeName, Widget};
 
 /// Build a minimal-boilerplate `WidgetDescriptor` for a built-in widget.
 fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDescriptor {
@@ -393,9 +393,15 @@ impl Registry {
                 });
                 continue;
             }
-            if name.len() > RANGE_NAME_MAX_BYTES {
-                crate::diag::warn_once(&format!("instance-long-name:{name}"), || {
-                    tracing::warn!(instance = %name, "instance name > 15 bytes; not click-toggleable");
+            // Permissive (invariant N2): a name that fails to parse as a
+            // `RangeName` (too long, a `[A-Za-z0-9_-]` violation, or the
+            // reserved `window`) still registers below and still renders —
+            // it just never becomes clickable, since `clickable_range` (via
+            // each widget's `range_name()`) refuses to produce a `RangeName`
+            // for it either. This is the same rule, checked once.
+            if let Err(err) = RangeName::parse(name) {
+                crate::diag::warn_once(&format!("instance-unclickable:{name}"), || {
+                    tracing::warn!(instance = %name, %err, "not click-toggleable: {err}");
                 });
             }
             let t = table.clone();
@@ -908,7 +914,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(w.range_name(), Some("clock_utc"));
+        assert_eq!(
+            w.range_name(),
+            Some(crate::RangeName::parse("clock_utc").unwrap())
+        );
     }
 
     #[test]
@@ -996,7 +1005,10 @@ mod tests {
         );
         let reg = Registry::with_builtins(&cfg);
         let w = reg.build("clk").unwrap();
-        assert_eq!(w.range_name(), Some("clk"));
+        assert_eq!(
+            w.range_name(),
+            Some(crate::RangeName::parse("clk").unwrap())
+        );
     }
 
     #[test]

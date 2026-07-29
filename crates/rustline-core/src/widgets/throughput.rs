@@ -1,5 +1,5 @@
 use crate::widgets::memory::format_bytes;
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget};
 
 /// Renders network throughput (download/upload bytes-per-second), read from
 /// `Context.throughputs` keyed by this instance's own `iface_key` (W46 —
@@ -53,7 +53,7 @@ impl Widget for ThroughputWidget {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -195,6 +195,9 @@ mod tests {
         assert_eq!(base.range_name(), None);
         let mut alt = w("x", "");
         alt.alt_format = "{down}".into();
-        assert_eq!(alt.range_name(), Some("throughput"));
+        assert_eq!(
+            alt.range_name(),
+            Some(RangeName::parse("throughput").unwrap())
+        );
     }
 }

@@ -1,4 +1,4 @@
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget};
 
 /// Renders the 1/5/15-minute load average, when available.
 ///
@@ -39,7 +39,7 @@ impl Widget for LoadAvg {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -265,7 +265,10 @@ mod tests {
 
     #[test]
     fn range_name_some_only_with_alt_format() {
-        assert_eq!(w("{load1}", "{load1:.1}", "").range_name(), Some("loadavg"));
+        assert_eq!(
+            w("{load1}", "{load1:.1}", "").range_name(),
+            Some(RangeName::parse("loadavg").unwrap())
+        );
         assert_eq!(w("{load1}", "", "").range_name(), None);
     }
 

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use crate::render::{Direction, RangeGroup, Theme, render_region_ranged, render_window_pill};
-use crate::{ColorOverride, Context, Registry, Segment, Widget, WindowCtx};
+use crate::{ColorOverride, Context, RangeName, Registry, Segment, Widget, WindowCtx};
 
 /// Fill in each segment's background from `theme.palette`, cycling through
 /// it in order, but only where a segment doesn't already carry an explicit
@@ -111,20 +111,20 @@ pub fn render_named_region(
     // Render each widget (panic-guarded), apply its color override (if any,
     // looked up by the name `resolve` paired it with), and keep its
     // clickable range name.
-    let rendered: Vec<(Option<String>, Vec<Segment>)> = widgets
+    let rendered: Vec<(Option<RangeName>, Vec<Segment>)> = widgets
         .iter()
         .map(|(name, w)| {
             let mut segments = render_guarded(name, w.as_ref(), ctx);
             if let Some(over) = overrides.get(name) {
                 apply_color_override(&mut segments, over);
             }
-            (w.range_name().map(str::to_string), segments)
+            (w.range_name(), segments)
         })
         .collect();
 
     // Assign palette across the FLATTENED region (unchanged global cycling),
     // then regroup by remembered lengths so range markup can bracket each widget.
-    let range_names: Vec<Option<String>> = rendered.iter().map(|(n, _)| n.clone()).collect();
+    let range_names: Vec<Option<RangeName>> = rendered.iter().map(|(n, _)| n.clone()).collect();
     let lens: Vec<usize> = rendered.iter().map(|(_, s)| s.len()).collect();
     let mut flat: Vec<Segment> = rendered.into_iter().flat_map(|(_, s)| s).collect();
     assign_palette(&mut flat, theme);
@@ -399,8 +399,8 @@ mod tests {
             fn render(&self, _c: &Context) -> Vec<Segment> {
                 vec![Segment::new("hi")]
             }
-            fn range_name(&self) -> Option<&str> {
-                Some("clicky")
+            fn range_name(&self) -> Option<RangeName> {
+                Some(RangeName::parse("clicky").unwrap())
             }
         }
         let mut reg = Registry::with_builtins(&Config::default());
@@ -419,6 +419,45 @@ mod tests {
         );
         assert!(out.contains("#[norange]"), "closes range: {out}");
         assert!(out.contains("hi"), "text present: {out}");
+    }
+
+    #[test]
+    fn charset_violating_instance_name_never_reaches_range_markup() {
+        // T1 render-boundary characterization: register an `[instances.<name>]`
+        // entry whose name would forge markup if interpolated unescaped (the
+        // exact PoC from `range_name.rs`'s `BadChar` test). Before `RangeName`
+        // existed, `Registry::with_builtins`'s instance pass only warned on
+        // LENGTH, never charset, so this 11-byte name registered and — with a
+        // non-empty `alt_format` — `clickable_range` happily returned
+        // `Some("a#[norange]")`, which `render_region_ranged` wrote straight
+        // into `#[range=user|...]` with no sanitization (invariant #8 only
+        // covers segment TEXT, not the range name). After T1, `range_name()`
+        // refuses to produce a `RangeName` for it, so no range markup for this
+        // widget must appear at all — while the widget itself still registers
+        // and renders (permissive registration, invariant N2).
+        let mut cfg = Config::default();
+        cfg.instances.insert(
+            "a#[norange]".into(),
+            toml::from_str("kind='datetime'\nalt_format='ALT'").unwrap(),
+        );
+        let reg = Registry::with_builtins(&cfg);
+        let theme = cfg.to_theme();
+        let out = render_named_region(
+            Direction::Left,
+            &["a#[norange]".to_string()],
+            &ctx(),
+            &reg,
+            &theme,
+            &HashMap::new(),
+        );
+        assert!(
+            !out.contains("#[range=user|a"),
+            "charset-violating name must never reach range markup: {out}"
+        );
+        assert!(
+            !out.is_empty(),
+            "the widget still registers and renders: {out}"
+        );
     }
 
     #[test]

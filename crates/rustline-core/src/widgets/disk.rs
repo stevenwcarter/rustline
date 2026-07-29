@@ -1,6 +1,6 @@
 use crate::widgets::bar;
 use crate::widgets::memory::format_bytes;
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget};
 
 /// Renders filesystem usage for a configured mount, read from
 /// `Context.disks` keyed by this instance's own `mount` (W46 — multiple
@@ -69,7 +69,7 @@ impl Widget for DiskWidget {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(base.range_name(), None);
         let mut alt = w("x", "");
         alt.alt_format = "{bar}".into();
-        assert_eq!(alt.range_name(), Some("disk"));
+        assert_eq!(alt.range_name(), Some(RangeName::parse("disk").unwrap()));
     }
 
     #[test]

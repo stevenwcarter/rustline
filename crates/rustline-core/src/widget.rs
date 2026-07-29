@@ -1,4 +1,4 @@
-use crate::{Context, Segment};
+use crate::{Context, RangeName, Segment};
 use std::collections::HashMap;
 
 /// Something that can render itself into one or more [`Segment`]s given the
@@ -8,10 +8,14 @@ pub trait Widget {
 
     /// The clickable status-line range name for this widget, if it opts into
     /// click-to-toggle. Default `None` (not clickable). A widget returns
-    /// `Some(name)` only when it has an alternate view and `name` fits tmux's
-    /// 15-byte `range=user|X` limit; the assemble layer wraps its cells in
-    /// `#[range=user|<name>]…#[norange]` when so.
-    fn range_name(&self) -> Option<&str> {
+    /// `Some(name)` only when it has an alternate view and `name` parses as a
+    /// [`RangeName`] (invariant #7's rule, enforced once at that type's
+    /// constructor); the assemble layer wraps its cells in
+    /// `#[range=user|<name>]…#[norange]` when so. Owned rather than borrowed:
+    /// a per-render allocation of at most [`crate::RANGE_NAME_MAX_BYTES`]
+    /// bytes for a clickable widget is negligible, and it avoids threading a
+    /// cached `RangeName` field through every widget struct.
+    fn range_name(&self) -> Option<RangeName> {
         None
     }
 }

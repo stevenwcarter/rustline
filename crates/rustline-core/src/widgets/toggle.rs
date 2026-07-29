@@ -1,7 +1,7 @@
 //! Shared click-toggle helpers: which format string is active given the
 //! toggle set, and whether a widget is a clickable range.
 
-use crate::{Context, RANGE_NAME_MAX_BYTES};
+use crate::{Context, RangeName};
 
 /// The active format string for a widget: its `alt` view when the widget has a
 /// non-empty `alt` AND its `name` is in `ctx.toggled`, else its normal `format`.
@@ -19,13 +19,16 @@ pub(crate) fn active_format<'a>(
 }
 
 /// A widget's clickable range name: `Some(name)` when it has a non-empty `alt`
-/// view AND `name` fits tmux's [`RANGE_NAME_MAX_BYTES`]-byte `range=user|X`
-/// limit; else `None` (the widget is not clickable and emits no range markup).
-pub(crate) fn clickable_range<'a>(name: &'a str, alt: &str) -> Option<&'a str> {
-    if !alt.is_empty() && name.len() <= RANGE_NAME_MAX_BYTES {
-        Some(name)
-    } else {
+/// view AND `name` parses as a [`RangeName`]; else `None` (the widget is not
+/// clickable and emits no range markup). A charset-violating `name` — e.g. one
+/// carrying a `#` from an unvalidated `[instances.<name>]` TOML key — now
+/// falls out here too, not just an over-length one: `RangeName::parse` is the
+/// only place this rule is checked.
+pub(crate) fn clickable_range(name: &str, alt: &str) -> Option<RangeName> {
+    if alt.is_empty() {
         None
+    } else {
+        RangeName::parse(name).ok()
     }
 }
 
@@ -82,12 +85,25 @@ mod tests {
 
     #[test]
     fn clickable_range_requires_alt_and_fits_15_bytes() {
-        assert_eq!(clickable_range("cpu", "A"), Some("cpu"));
+        assert_eq!(
+            clickable_range("cpu", "A"),
+            Some(RangeName::parse("cpu").unwrap())
+        );
         assert_eq!(clickable_range("cpu", ""), None); // no alt -> not clickable
         assert_eq!(clickable_range("this_name_is_16b", "A"), None); // 16 bytes > 15
         assert_eq!(
             clickable_range("fifteen_bytes__", "A"),
-            Some("fifteen_bytes__")
+            Some(RangeName::parse("fifteen_bytes__").unwrap())
         ); // exactly 15
+    }
+
+    #[test]
+    fn clickable_range_rejects_a_charset_violating_name_even_with_alt_and_valid_length() {
+        // Security-relevant behavior change (T1): before `RangeName` existed,
+        // this helper only checked length, so a name carrying a `#` (e.g. from
+        // an unvalidated `[instances.<name>]` TOML key) was still "clickable"
+        // and got written unescaped into `#[range=user|...]` markup at the
+        // render boundary — a forgery hole. It must be `None` now.
+        assert_eq!(clickable_range("a#[norange]", "A"), None);
     }
 }
