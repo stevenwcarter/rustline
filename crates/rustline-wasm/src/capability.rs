@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use rustline_core::PluginConfig;
 use serde::{Deserialize, Serialize};
 
-use crate::allow::AllowSet;
+use crate::allow::{AllowSet, CommandCap, ReadPathCap, UrlCap, WritePathCap};
 use crate::state;
 
 /// Sentinel for "not yet measured" in [`CapabilityCtx::state_size`]. This is
@@ -63,18 +63,18 @@ impl DenialObserver for NoopObserver {
 /// only requests a read cannot be leveraged into an overwrite.
 pub struct CapabilityCtx {
     pub name: String,
-    pub allowed_urls: AllowSet,
+    pub allowed_urls: AllowSet<UrlCap>,
     /// The **read** allowlist. Deliberately not a write grant — see
     /// `allowed_write_paths`.
-    pub allowed_paths: AllowSet,
+    pub allowed_paths: AllowSet<ReadPathCap>,
     /// The **write** allowlist, separate from the read-only `allowed_paths`.
     /// See `PluginConfig::allowed_write_paths` for the exploit this split
     /// closes.
-    pub allowed_write_paths: AllowSet,
+    pub allowed_write_paths: AllowSet<WritePathCap>,
     /// Resolve symlinks before matching a path against either allowlist
     /// above. See `PluginConfig::resolve_symlinks`.
     pub resolve_symlinks: bool,
-    pub allowed_commands: AllowSet,
+    pub allowed_commands: AllowSet<CommandCap>,
     pub state_root: PathBuf,
     pub max_state_bytes: u64,
     observer: Arc<dyn DenialObserver + Send + Sync>,
@@ -113,11 +113,11 @@ impl CapabilityCtx {
     pub fn from_config(name: &str, pc: &PluginConfig, state_root: PathBuf) -> Self {
         Self {
             name: name.to_string(),
-            allowed_urls: AllowSet::compile(&pc.allowed_urls),
-            allowed_paths: AllowSet::compile(&pc.allowed_paths),
-            allowed_write_paths: AllowSet::compile(&pc.allowed_write_paths),
+            allowed_urls: AllowSet::<UrlCap>::compile(&pc.allowed_urls),
+            allowed_paths: AllowSet::<ReadPathCap>::compile(&pc.allowed_paths),
+            allowed_write_paths: AllowSet::<WritePathCap>::compile(&pc.allowed_write_paths),
             resolve_symlinks: pc.resolve_symlinks,
-            allowed_commands: AllowSet::compile(&pc.allowed_commands),
+            allowed_commands: AllowSet::<CommandCap>::compile(&pc.allowed_commands),
             state_root,
             max_state_bytes: pc.max_state_bytes,
             observer: Arc::new(NoopObserver),
@@ -239,10 +239,13 @@ mod tests {
 
     #[test]
     fn capability_ctx_compiles_the_command_allowlist_and_denies_by_default() {
+        use crate::argv::canonical_argv;
+
         let pc = PluginConfig::default();
         let ctx = CapabilityCtx::from_config("p", &pc, std::path::PathBuf::from("/tmp"));
         assert!(
-            !ctx.allowed_commands.allows("anything"),
+            !ctx.allowed_commands
+                .allows(&canonical_argv("anything", &[])),
             "an empty allowlist matches nothing (deny by default)"
         );
 
@@ -251,9 +254,22 @@ mod tests {
             ..PluginConfig::default()
         };
         let ctx = CapabilityCtx::from_config("p", &pc, std::path::PathBuf::from("/tmp"));
-        assert!(ctx.allowed_commands.allows("playerctl metadata"));
-        assert!(ctx.allowed_commands.allows("playerctl metadata --format x"));
-        assert!(!ctx.allowed_commands.allows("playerctl play"));
+        assert!(
+            ctx.allowed_commands
+                .allows(&canonical_argv("playerctl", &["metadata".to_string()]))
+        );
+        assert!(ctx.allowed_commands.allows(&canonical_argv(
+            "playerctl",
+            &[
+                "metadata".to_string(),
+                "--format".to_string(),
+                "x".to_string()
+            ]
+        )));
+        assert!(
+            !ctx.allowed_commands
+                .allows(&canonical_argv("playerctl", &["play".to_string()]))
+        );
     }
 
     #[test]

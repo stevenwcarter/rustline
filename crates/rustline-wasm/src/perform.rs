@@ -9,12 +9,13 @@
 use crate::abi::{
     CachedExecResult, CachedHttpResult, ExecResult, HttpResult, ReadResult, WriteResult,
 };
+use crate::allow::{CapKind, CommandCap, ReadPathCap, Url, UrlCap, WritePathCap};
 use crate::argv::canonical_argv;
 use crate::cache::{
     CacheEntry, EXEC_NAMESPACE, HTTP_NAMESPACE, age_secs, cache_path, is_fresh, read_entry,
     write_entry,
 };
-use crate::capability::{CapabilityCtx, DenialKind};
+use crate::capability::CapabilityCtx;
 use crate::fetch::Fetcher;
 use crate::run::{MAX_OUTPUT_BYTES, Runner};
 use crate::state::{
@@ -22,8 +23,8 @@ use crate::state::{
 };
 
 pub fn perform_http_get(ctx: &CapabilityCtx, url: &str, fetcher: &dyn Fetcher) -> HttpResult {
-    if !ctx.allowed_urls.allows(url) {
-        ctx.observe_denial(DenialKind::Url, url);
+    if !ctx.allowed_urls.allows(&Url::new(url)) {
+        ctx.observe_denial(UrlCap::DENIAL, url);
         return HttpResult {
             ok: false,
             error: format!("url not allowed: {url}"),
@@ -57,8 +58,8 @@ pub fn perform_http_get_cached(
 ) -> CachedHttpResult {
     // 1) gate first (invariant N1): a denied url makes no network call and
     //    touches no cache file.
-    if !ctx.allowed_urls.allows(url) {
-        ctx.observe_denial(DenialKind::Url, url);
+    if !ctx.allowed_urls.allows(&Url::new(url)) {
+        ctx.observe_denial(UrlCap::DENIAL, url);
         return CachedHttpResult {
             ok: false,
             error: format!("url not allowed: {url}"),
@@ -201,7 +202,7 @@ pub fn perform_exec(
 ) -> ExecResult {
     let candidate = canonical_argv(program, args);
     if !ctx.allowed_commands.allows(&candidate) {
-        ctx.observe_denial(DenialKind::Command, &candidate);
+        ctx.observe_denial(CommandCap::DENIAL, candidate.as_str());
         return ExecResult {
             ok: false,
             status: -1,
@@ -256,7 +257,7 @@ pub fn perform_exec_cached(
 ) -> CachedExecResult {
     let candidate = canonical_argv(program, args);
     if !ctx.allowed_commands.allows(&candidate) {
-        ctx.observe_denial(DenialKind::Command, &candidate);
+        ctx.observe_denial(CommandCap::DENIAL, candidate.as_str());
         return CachedExecResult {
             ok: false,
             status: -1,
@@ -266,7 +267,7 @@ pub fn perform_exec_cached(
     }
 
     let dir = ctx.state_dir();
-    let path = cache_path(&dir, EXEC_NAMESPACE, &candidate);
+    let path = cache_path(&dir, EXEC_NAMESPACE, candidate.as_str());
     let entry = read_entry(&path);
 
     if let Some(e) = &entry
@@ -530,7 +531,7 @@ pub fn perform_file_read(ctx: &CapabilityCtx, path: &str) -> ReadResult {
         Ok(p) => p,
         Err(error) => {
             if let PathResolveError::SymlinkDenied(target) = &error {
-                ctx.observe_denial(DenialKind::Path, target);
+                ctx.observe_denial(ReadPathCap::DENIAL, target);
             }
             return ReadResult {
                 ok: false,
@@ -542,7 +543,7 @@ pub fn perform_file_read(ctx: &CapabilityCtx, path: &str) -> ReadResult {
     let allowed = match ctx.allowed_paths.check_path(resolved) {
         Ok(allowed) => allowed,
         Err(denied) => {
-            ctx.observe_denial(DenialKind::Path, denied.as_str());
+            ctx.observe_denial(ReadPathCap::DENIAL, denied.as_str());
             return ReadResult {
                 ok: false,
                 error: format!("path not allowed: {}", denied.as_str()),
@@ -586,7 +587,7 @@ pub fn perform_file_write(ctx: &CapabilityCtx, path: &str, contents: &str) -> Wr
         Ok(p) => p,
         Err(error) => {
             if let PathResolveError::SymlinkDenied(target) = &error {
-                ctx.observe_denial(DenialKind::Path, target);
+                ctx.observe_denial(WritePathCap::DENIAL, target);
             }
             return WriteResult {
                 ok: false,
@@ -597,7 +598,7 @@ pub fn perform_file_write(ctx: &CapabilityCtx, path: &str, contents: &str) -> Wr
     let allowed = match ctx.allowed_write_paths.check_path(resolved) {
         Ok(allowed) => allowed,
         Err(denied) => {
-            ctx.observe_denial(DenialKind::Path, denied.as_str());
+            ctx.observe_denial(WritePathCap::DENIAL, denied.as_str());
             return WriteResult {
                 ok: false,
                 error: format!("path not allowed: {}", denied.as_str()),
