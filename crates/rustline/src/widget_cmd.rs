@@ -24,6 +24,8 @@
 use std::io::Write;
 use std::path::Path;
 
+#[cfg(test)]
+use rustline_core::WidgetKind;
 use rustline_core::{
     Config, Layout, LayoutChange, Region, WidgetPlacement, WidgetSource, layout_disable,
     layout_enable, layout_move, widget_placements,
@@ -327,7 +329,7 @@ fn list(config_path: &Path, plugin_dir: &Path, json: bool) {
         let source = match &row.source {
             WidgetSource::Builtin => "builtin".to_string(),
             WidgetSource::Plugin => "plugin".to_string(),
-            WidgetSource::Instance { kind } => format!("instance of {kind}"),
+            WidgetSource::Instance { kind } => format!("instance of {}", kind.as_str()),
             WidgetSource::Unknown => "unknown".to_string(),
         };
         let _ = writeln!(
@@ -349,7 +351,7 @@ fn placements_json(rows: &[WidgetPlacement]) -> String {
                 "source": match &r.source {
                     WidgetSource::Builtin => "builtin".to_string(),
                     WidgetSource::Plugin => "plugin".to_string(),
-                    WidgetSource::Instance { kind } => format!("instance:{kind}"),
+                    WidgetSource::Instance { kind } => format!("instance:{}", kind.as_str()),
                     WidgetSource::Unknown => "unknown".to_string(),
                 },
                 "region": r.placement.map(|(reg, _)| reg.as_str()),
@@ -528,7 +530,7 @@ mod tests {
                 name: "clock_utc".to_string(),
                 summary: "UTC clock".to_string(),
                 source: WidgetSource::Instance {
-                    kind: "datetime".to_string(),
+                    kind: WidgetKind::DateTime,
                 },
                 placement: Some((Region::Left, 0)),
             },

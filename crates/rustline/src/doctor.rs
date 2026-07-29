@@ -36,7 +36,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use rustline_core::{Config, PluginConfig};
+use rustline_core::{Config, PluginConfig, WidgetKind};
 
 use crate::plugin_checksum::{PluginChecksumStatus, status_for};
 use crate::{daemon, daemon_client};
@@ -471,28 +471,36 @@ fn check_readers(cfg: &Config, layout: &[String]) -> Check {
 
     // (kind, is-currently-readable). Only probe what the layout actually uses,
     // so `doctor` never pays for a reader the user doesn't have configured.
+    // Exhaustive over `WidgetKind` (no `_` arm) so a future kind forces a
+    // decision here instead of silently going unprobed: `throughput` is
+    // deliberately excluded (it legitimately reads `None` on a first
+    // invocation, invariant #6, which would warn on every fresh state dir),
+    // and the remaining eight kinds carry no platform reader at all.
     let mut probed: Vec<(&str, bool)> = Vec::new();
-    if kinds.contains("git") {
-        probed.push(("git", crate::git::read_git(".").is_some()));
-    }
-    if kinds.contains("media") {
-        probed.push(("media", crate::media::read_media().is_some()));
-    }
-    if kinds.contains("battery") {
-        probed.push(("battery", crate::battery::read_battery().is_some()));
-    }
-    if kinds.contains("uptime") {
-        probed.push(("uptime", crate::uptime::read_uptime().is_some()));
-    }
-    if kinds.contains("cpu") {
-        probed.push(("cpu", crate::cpu::read_cpu().is_some()));
-    }
-    if kinds.contains("memory") {
-        probed.push(("memory", crate::memory::read_memory().is_some()));
-    }
-    if kinds.contains("disk") {
-        for mount in cfg.disk_mounts(layout) {
-            probed.push(("disk", crate::disk::read_disk(&mount).is_some()));
+    for kind in kinds {
+        match kind {
+            WidgetKind::Git => probed.push(("git", crate::git::read_git(".").is_some())),
+            WidgetKind::Media => probed.push(("media", crate::media::read_media().is_some())),
+            WidgetKind::Battery => {
+                probed.push(("battery", crate::battery::read_battery().is_some()));
+            }
+            WidgetKind::Uptime => probed.push(("uptime", crate::uptime::read_uptime().is_some())),
+            WidgetKind::Cpu => probed.push(("cpu", crate::cpu::read_cpu().is_some())),
+            WidgetKind::Memory => probed.push(("memory", crate::memory::read_memory().is_some())),
+            WidgetKind::Disk => {
+                for mount in cfg.disk_mounts(layout) {
+                    probed.push(("disk", crate::disk::read_disk(&mount).is_some()));
+                }
+            }
+            WidgetKind::Throughput
+            | WidgetKind::PaneId
+            | WidgetKind::Hostname
+            | WidgetKind::Windows
+            | WidgetKind::DateTime
+            | WidgetKind::Cwd
+            | WidgetKind::LanIp
+            | WidgetKind::TailscaleIp
+            | WidgetKind::LoadAvg => {}
         }
     }
 

@@ -1,3 +1,4 @@
+use crate::config::WidgetKind;
 use crate::{Context, RangeName, Segment};
 use std::collections::HashMap;
 
@@ -32,7 +33,7 @@ pub enum WidgetSource {
     /// Discovered as a `.wasm` plugin.
     Plugin,
     /// A named `[instances.<name>]` entry of the given built-in `kind` (W46).
-    Instance { kind: String },
+    Instance { kind: WidgetKind },
     /// Placed in `[layout]` but not a registered built-in, instance, or
     /// discovered plugin — e.g. a plugin whose `.wasm` is no longer present,
     /// or a name left over from `plugin remove`/`--plugin-dir` pointing

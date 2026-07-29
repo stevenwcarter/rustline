@@ -6,10 +6,11 @@
 //! panicking, so a bad or absent config file never takes down the status
 //! line.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use serde::de::{self, MapAccess, Visitor};
 use serde::ser::SerializeMap;
@@ -271,7 +272,7 @@ pub struct WidgetPlacement {
 /// reflects a `Registry`'s `HashMap<String, Value>` iteration over
 /// `cfg.instances`, itself unspecified). An `[instances.<name>]` entry whose
 /// name collides with a built-in is skipped — built-in always wins, the same
-/// precedence `Registry::with_builtins` and `is_builtin_widget_name` enforce.
+/// precedence `Registry::with_builtins` and `WidgetKind::parse` enforce.
 ///
 /// The fourth group, [`WidgetSource::Unknown`], is populated differently from
 /// the other three: instead of scanning a catalog and looking up its
@@ -324,7 +325,7 @@ pub fn widget_placements(
     let mut instance_entries: Vec<(&String, &Value)> = cfg.instances.iter().collect();
     instance_entries.sort_by(|a, b| a.0.cmp(b.0));
     for (name, value) in instance_entries {
-        if is_builtin_widget_name(name) {
+        if WidgetKind::parse(name).is_some() {
             continue;
         }
         let Some(kind) = Config::instance_kind(value) else {
@@ -332,10 +333,8 @@ pub fn widget_placements(
         };
         classify(
             name.clone(),
-            format!("{kind} instance"),
-            WidgetSource::Instance {
-                kind: kind.to_string(),
-            },
+            format!("{} instance", kind.as_str()),
+            WidgetSource::Instance { kind },
         );
     }
     for name in plugin_names {
@@ -1491,40 +1490,237 @@ pub struct Config {
     /// registration).
     #[serde(default)]
     pub instances: HashMap<String, Value>,
+    /// Parse-once memo for `[instances.*]` tables (T5), lazily built by
+    /// [`Config::resolved_instances`] on first call and reused by every
+    /// consumer (`color_overrides`, `click_map`, `layout_kinds`,
+    /// `disk_mounts`, `throughput_interfaces`, `spark_referenced_in_layout`,
+    /// and `Registry::with_builtins`'s registration pass) — so a table with
+    /// several consumers is parsed exactly once, not once per consumer.
+    /// Skipped by serde entirely (never round-trips): a cloned or freshly
+    /// deserialized `Config` just re-resolves lazily on next use, which is
+    /// harmless since the memo is pure derived data.
+    #[serde(skip)]
+    resolved: OnceLock<BTreeMap<String, InstanceParse>>,
 }
 
-/// The sixteen built-in widget names ([`crate::widget::Registry::with_builtins`]).
+/// The closed set of widget kinds — the sixteen built-ins
+/// ([`crate::widget::Registry::with_builtins`]) plus the type a
+/// `[instances.<name>]` table's `kind` key must name (T5).
 ///
-/// Built-in registration always wins over an `[instances.<name>]` entry with
-/// a colliding name — see `widgets::mod`'s `registry.contains(name)` check,
-/// which is the authority this list mirrors. Every place that projects
-/// `self.instances` onto a name-keyed map or set ([`Config::color_overrides`],
-/// [`Config::click_map`], [`Config::layout_kinds`]) must apply the same
-/// built-in-wins precedence, or a same-named instance silently hijacks the
-/// built-in widget's color/click binding/kind (invariant #7).
-const BUILTIN_WIDGET_NAMES: [&str; 16] = [
-    "pane_id",
-    "hostname",
-    "windows",
-    "datetime",
-    "cwd",
-    "lan_ip",
-    "tailscale_ip",
-    "battery",
-    "cpu",
-    "memory",
-    "loadavg",
-    "git",
-    "disk",
-    "uptime",
-    "media",
-    "throughput",
-];
+/// `#[serde(rename_all = "snake_case")]` covers fourteen of the sixteen
+/// variants; [`WidgetKind::DateTime`] and [`WidgetKind::LoadAvg`] each need an
+/// explicit `#[serde(rename)]` because plain snake_case would emit
+/// `date_time`/`load_avg`, which are NOT the accepted TOML spellings
+/// (`datetime`/`loadavg`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WidgetKind {
+    PaneId,
+    Hostname,
+    Windows,
+    #[serde(rename = "datetime")]
+    DateTime,
+    Cwd,
+    LanIp,
+    TailscaleIp,
+    Battery,
+    Cpu,
+    Memory,
+    #[serde(rename = "loadavg")]
+    LoadAvg,
+    Git,
+    Disk,
+    Uptime,
+    Media,
+    Throughput,
+}
 
-/// True iff `name` is one of the built-in widget names, which always takes
-/// precedence over a same-named `[instances.<name>]` entry.
-fn is_builtin_widget_name(name: &str) -> bool {
-    BUILTIN_WIDGET_NAMES.contains(&name)
+impl WidgetKind {
+    /// Every widget kind, in `Registry::with_builtins`'s registration order —
+    /// the same order `BUILTIN_WIDGET_NAMES` used to hand-maintain, now
+    /// impossible to drift out of sync with [`WidgetKind::as_str`] since both
+    /// live on the enum itself.
+    pub const ALL: [WidgetKind; 16] = [
+        WidgetKind::PaneId,
+        WidgetKind::Hostname,
+        WidgetKind::Windows,
+        WidgetKind::DateTime,
+        WidgetKind::Cwd,
+        WidgetKind::LanIp,
+        WidgetKind::TailscaleIp,
+        WidgetKind::Battery,
+        WidgetKind::Cpu,
+        WidgetKind::Memory,
+        WidgetKind::LoadAvg,
+        WidgetKind::Git,
+        WidgetKind::Disk,
+        WidgetKind::Uptime,
+        WidgetKind::Media,
+        WidgetKind::Throughput,
+    ];
+
+    /// The exact TOML/layout spelling for this kind — also the built-in
+    /// widget's own registered name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WidgetKind::PaneId => "pane_id",
+            WidgetKind::Hostname => "hostname",
+            WidgetKind::Windows => "windows",
+            WidgetKind::DateTime => "datetime",
+            WidgetKind::Cwd => "cwd",
+            WidgetKind::LanIp => "lan_ip",
+            WidgetKind::TailscaleIp => "tailscale_ip",
+            WidgetKind::Battery => "battery",
+            WidgetKind::Cpu => "cpu",
+            WidgetKind::Memory => "memory",
+            WidgetKind::LoadAvg => "loadavg",
+            WidgetKind::Git => "git",
+            WidgetKind::Disk => "disk",
+            WidgetKind::Uptime => "uptime",
+            WidgetKind::Media => "media",
+            WidgetKind::Throughput => "throughput",
+        }
+    }
+
+    /// Parse a layout/TOML kind string, if it names one of the sixteen kinds.
+    pub fn parse(s: &str) -> Option<WidgetKind> {
+        Self::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+
+    /// The twelve clickable/format-bearing kinds an `[instances.<name>]`
+    /// table may declare (`kind = "…"`); `cwd`/`hostname`/`pane_id`/`windows`
+    /// are instanceable in name only — they carry no clickable identity to
+    /// give an instance, so `Registry::with_builtins` never builds one for
+    /// them (see the Config module doc's "Multiple widget instances" note).
+    pub fn is_instanceable(self) -> bool {
+        !matches!(
+            self,
+            WidgetKind::PaneId | WidgetKind::Hostname | WidgetKind::Windows | WidgetKind::Cwd
+        )
+    }
+}
+
+/// One `[instances.<name>]` table's parsed, typed options — the twelve
+/// instanceable [`WidgetKind`]s' own `<Kind>Opts` struct, wrapped so
+/// [`Config::resolved_instances`] can hand back one typed value per instance
+/// regardless of kind.
+#[derive(Clone, Debug)]
+pub enum InstanceSpec {
+    DateTime(DateTimeOpts),
+    LanIp(LanIpOpts),
+    TailscaleIp(TailscaleIpOpts),
+    Battery(BatteryOpts),
+    Cpu(CpuOpts),
+    Memory(MemoryOpts),
+    LoadAvg(LoadAvgOpts),
+    Git(GitOpts),
+    Disk(DiskOpts),
+    Uptime(UptimeOpts),
+    Media(MediaOpts),
+    Throughput(ThroughputOpts),
+}
+
+impl InstanceSpec {
+    /// Which kind this instance was built from.
+    pub fn kind(&self) -> WidgetKind {
+        match self {
+            InstanceSpec::DateTime(_) => WidgetKind::DateTime,
+            InstanceSpec::LanIp(_) => WidgetKind::LanIp,
+            InstanceSpec::TailscaleIp(_) => WidgetKind::TailscaleIp,
+            InstanceSpec::Battery(_) => WidgetKind::Battery,
+            InstanceSpec::Cpu(_) => WidgetKind::Cpu,
+            InstanceSpec::Memory(_) => WidgetKind::Memory,
+            InstanceSpec::LoadAvg(_) => WidgetKind::LoadAvg,
+            InstanceSpec::Git(_) => WidgetKind::Git,
+            InstanceSpec::Disk(_) => WidgetKind::Disk,
+            InstanceSpec::Uptime(_) => WidgetKind::Uptime,
+            InstanceSpec::Media(_) => WidgetKind::Media,
+            InstanceSpec::Throughput(_) => WidgetKind::Throughput,
+        }
+    }
+
+    /// This instance's color override, for [`Config::color_overrides`].
+    fn color(&self) -> &ColorOverride {
+        match self {
+            InstanceSpec::DateTime(o) => &o.color,
+            InstanceSpec::LanIp(o) => &o.color,
+            InstanceSpec::TailscaleIp(o) => &o.color,
+            InstanceSpec::Battery(o) => &o.color,
+            InstanceSpec::Cpu(o) => &o.color,
+            InstanceSpec::Memory(o) => &o.color,
+            InstanceSpec::LoadAvg(o) => &o.color,
+            InstanceSpec::Git(o) => &o.color,
+            InstanceSpec::Disk(o) => &o.color,
+            InstanceSpec::Uptime(o) => &o.color,
+            InstanceSpec::Media(o) => &o.color,
+            InstanceSpec::Throughput(o) => &o.color,
+        }
+    }
+
+    /// This instance's `alt_format`, for [`Config::click_map`].
+    fn alt_format(&self) -> &str {
+        match self {
+            InstanceSpec::DateTime(o) => &o.alt_format,
+            InstanceSpec::LanIp(o) => &o.alt_format,
+            InstanceSpec::TailscaleIp(o) => &o.alt_format,
+            InstanceSpec::Battery(o) => &o.alt_format,
+            InstanceSpec::Cpu(o) => &o.alt_format,
+            InstanceSpec::Memory(o) => &o.alt_format,
+            InstanceSpec::LoadAvg(o) => &o.alt_format,
+            InstanceSpec::Git(o) => &o.alt_format,
+            InstanceSpec::Disk(o) => &o.alt_format,
+            InstanceSpec::Uptime(o) => &o.alt_format,
+            InstanceSpec::Media(o) => &o.alt_format,
+            InstanceSpec::Throughput(o) => &o.alt_format,
+        }
+    }
+
+    /// This instance's click bindings, for [`Config::click_map`].
+    fn click(&self) -> &ClickBindings {
+        match self {
+            InstanceSpec::DateTime(o) => &o.click,
+            InstanceSpec::LanIp(o) => &o.click,
+            InstanceSpec::TailscaleIp(o) => &o.click,
+            InstanceSpec::Battery(o) => &o.click,
+            InstanceSpec::Cpu(o) => &o.click,
+            InstanceSpec::Memory(o) => &o.click,
+            InstanceSpec::LoadAvg(o) => &o.click,
+            InstanceSpec::Git(o) => &o.click,
+            InstanceSpec::Disk(o) => &o.click,
+            InstanceSpec::Uptime(o) => &o.click,
+            InstanceSpec::Media(o) => &o.click,
+            InstanceSpec::Throughput(o) => &o.click,
+        }
+    }
+}
+
+/// The outcome of resolving one `[instances.<name>]` table (T5) — the
+/// degrade-per-entry counterpart to [`instance_opts`]'s degrade-per-field:
+/// one bad instance never takes any other instance, or `Config::load`, down
+/// with it (invariant #3).
+// `InstanceSpec`'s largest variant (an Opts struct with several `String`
+// fields plus `ColorOverride`/`ClickBindings`) makes `Ok` far bigger than
+// `UnknownKind`/`NoKind`, but this enum lives in a `BTreeMap` sized by a
+// user's handful of configured `[instances.*]` entries, not a hot per-render
+// path — and boxing `InstanceSpec` would defeat the direct
+// `InstanceParse::Ok(InstanceSpec::Kind(_))` match ergonomics every consumer
+// (including the pinning test) relies on.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug)]
+pub enum InstanceParse {
+    /// A resolvable, instanceable `kind` — the typed options are ready to
+    /// build a widget from.
+    Ok(InstanceSpec),
+    /// The table has no `kind` key (or it isn't a string) — nothing to gate
+    /// on, so the instance is skipped (registration warns once).
+    NoKind,
+    /// `kind` is a string, but not one of [`WidgetKind::ALL`]'s sixteen
+    /// spellings, OR it names a valid kind that isn't instanceable
+    /// (`cwd`/`hostname`/`pane_id`/`windows`) — today's registration pass
+    /// (`Registry::with_builtins`) treats both cases identically (the same
+    /// "unknown instance kind, skipping" warn), so this variant does too
+    /// rather than adding a distinction nothing currently draws.
+    UnknownKind(String),
 }
 
 /// The single home for the `{spark}` literal check: a widget references the
@@ -1626,10 +1822,10 @@ impl Config {
     /// unconfigured widget's entry is simply absent (keeping the empty-map,
     /// byte-identical case cheap and the common case). Also projects
     /// `[instances.<name>]` entries with a resolvable `kind` the same way
-    /// (via [`Config::instance_meta`], W46), so a named instance's color
-    /// override is included under its own instance name — unless that name
-    /// collides with a built-in, in which case the instance is skipped
-    /// entirely (built-in wins; see [`is_builtin_widget_name`]).
+    /// (via [`Config::resolved_instances`], W46/T5), so a named instance's
+    /// color override is included under its own instance name — unless that
+    /// name collides with a built-in, in which case the instance is skipped
+    /// entirely (built-in wins; see [`WidgetKind::parse`]).
     pub fn color_overrides(&self) -> HashMap<String, ColorOverride> {
         let candidates: [(&str, &ColorOverride); 15] = [
             ("hostname", &self.widgets.hostname.color),
@@ -1653,18 +1849,16 @@ impl Config {
             .filter(|(_, color)| color.fg.is_some() || color.bg.is_some())
             .map(|(name, color)| (name.to_string(), color.clone()))
             .collect();
-        for (name, table) in &self.instances {
-            if is_builtin_widget_name(name) {
+        for (name, parse) in self.resolved_instances() {
+            if WidgetKind::parse(name).is_some() {
                 continue;
             }
-            let Some(kind) = Config::instance_kind(table) else {
+            let InstanceParse::Ok(spec) = parse else {
                 continue;
             };
-            let Some((color, _, _)) = Config::instance_meta(name, kind, table) else {
-                continue;
-            };
+            let color = spec.color();
             if color.fg.is_some() || color.bg.is_some() {
-                overrides.insert(name.clone(), color);
+                overrides.insert(name.clone(), color.clone());
             }
         }
         overrides
@@ -1682,11 +1876,11 @@ impl Config {
     /// which it treats as toggleable to preserve the pre-W36 flip behavior
     /// (invariant #7). Mirrors [`Config::color_overrides`]'s candidate-table
     /// projector. Also projects `[instances.<name>]` entries with a
-    /// resolvable `kind` the same way (via [`Config::instance_meta`], W46),
-    /// so a named instance's toggleability/bindings are included under its
-    /// own instance name — unless that name collides with a built-in, in
-    /// which case the instance is skipped entirely (built-in wins; see
-    /// [`is_builtin_widget_name`]).
+    /// resolvable `kind` the same way (via [`Config::resolved_instances`],
+    /// W46/T5), so a named instance's toggleability/bindings are included
+    /// under its own instance name — unless that name collides with a
+    /// built-in, in which case the instance is skipped entirely (built-in
+    /// wins; see [`WidgetKind::parse`]).
     pub fn click_map(&self) -> HashMap<String, WidgetClick> {
         let candidates: [(&str, &str, &ClickBindings); 12] = [
             (
@@ -1754,125 +1948,93 @@ impl Config {
                 )
             })
             .collect();
-        for (name, table) in &self.instances {
-            if is_builtin_widget_name(name) {
+        for (name, parse) in self.resolved_instances() {
+            if WidgetKind::parse(name).is_some() {
                 continue;
             }
-            let Some(kind) = Config::instance_kind(table) else {
-                continue;
-            };
-            let Some((_, alt_format, click)) = Config::instance_meta(name, kind, table) else {
+            let InstanceParse::Ok(spec) = parse else {
                 continue;
             };
             map.insert(
                 name.clone(),
                 WidgetClick {
-                    toggleable: !alt_format.is_empty(),
-                    bindings: click,
+                    toggleable: !spec.alt_format().is_empty(),
+                    bindings: spec.click().clone(),
                 },
             );
         }
         map
     }
 
-    /// The `kind` of a `[instances.<name>]` table, if present and a string.
-    pub fn instance_kind(v: &Value) -> Option<&str> {
-        v.get("kind").and_then(Value::as_str)
+    /// The `kind` of a `[instances.<name>]` table, if present, a string, and
+    /// one of [`WidgetKind::ALL`]'s sixteen spellings.
+    pub fn instance_kind(v: &Value) -> Option<WidgetKind> {
+        v.get("kind")
+            .and_then(Value::as_str)
+            .and_then(WidgetKind::parse)
     }
 
-    /// Projects a `[instances.<name>]` table's color override, `alt_format`,
-    /// and click bindings, dispatching on `kind` the same way the instance-
-    /// registration pass in `widgets::mod` does — the shared per-kind lookup
-    /// backing both [`Config::color_overrides`] and [`Config::click_map`] so
-    /// a named instance participates in each projection exactly like a base
-    /// widget. `kind` outside the twelve clickable/format-bearing kinds
-    /// Task 5 registers instances for yields `None` (nothing to project); a
-    /// malformed `v` for its kind's Opts falls back to that kind's defaults,
-    /// matching the total, never-panicking parse the registration pass uses —
-    /// and, like that pass, reports the mismatch once via
-    /// [`instance_opts`]/`warn_once` rather than dropping it silently.
-    pub fn instance_meta(
-        name: &str,
-        kind: &str,
-        v: &Value,
-    ) -> Option<(ColorOverride, String, ClickBindings)> {
-        let t = v.clone();
-        let (color, alt_format, click) = match kind {
-            "datetime" => {
-                let o: DateTimeOpts = instance_opts(name, kind, t);
-                (o.color, o.alt_format, o.click)
-            }
-            "lan_ip" => {
-                let o: LanIpOpts = instance_opts(name, kind, t);
-                (o.color, o.alt_format, o.click)
-            }
-            "tailscale_ip" => {
-                let o: TailscaleIpOpts = instance_opts(name, kind, t);
-                (o.color, o.alt_format, o.click)
-            }
-            "battery" => {
-                let o: BatteryOpts = instance_opts(name, kind, t);
-                (o.color, o.alt_format, o.click)
-            }
-            "cpu" => {
-                let o: CpuOpts = instance_opts(name, kind, t);
-                (o.color, o.alt_format, o.click)
-            }
-            "memory" => {
-                let o: MemoryOpts = instance_opts(name, kind, t);
-                (o.color, o.alt_format, o.click)
-            }
-            "loadavg" => {
-                let o: LoadAvgOpts = instance_opts(name, kind, t);
-                (o.color, o.alt_format, o.click)
-            }
-            "git" => {
-                let o: GitOpts = instance_opts(name, kind, t);
-                (o.color, o.alt_format, o.click)
-            }
-            "disk" => {
-                let o: DiskOpts = instance_opts(name, kind, t);
-                (o.color, o.alt_format, o.click)
-            }
-            "uptime" => {
-                let o: UptimeOpts = instance_opts(name, kind, t);
-                (o.color, o.alt_format, o.click)
-            }
-            "media" => {
-                let o: MediaOpts = instance_opts(name, kind, t);
-                (o.color, o.alt_format, o.click)
-            }
-            "throughput" => {
-                let o: ThroughputOpts = instance_opts(name, kind, t);
-                (o.color, o.alt_format, o.click)
-            }
-            _ => return None,
-        };
-        Some((color, alt_format, click))
+    /// Parse every `[instances.<name>]` table exactly once, memoizing the
+    /// result for the lifetime of this `Config` (T5). Every consumer that
+    /// used to re-parse a table per call (`color_overrides`, `click_map`,
+    /// `layout_kinds`, `disk_mounts`, `throughput_interfaces`,
+    /// `spark_referenced_in_layout`, and `Registry::with_builtins`'s
+    /// registration pass) now looks up this map instead.
+    ///
+    /// Degrades per entry, never per `Config` (invariant #3): a table with no
+    /// `kind` key is [`InstanceParse::NoKind`]; a `kind` that isn't one of
+    /// [`WidgetKind::ALL`]'s sixteen spellings, OR names a valid-but-
+    /// non-instanceable kind (`cwd`/`hostname`/`pane_id`/`windows`), is
+    /// [`InstanceParse::UnknownKind`] — today's registration pass treats both
+    /// identically (see that variant's doc), so this does too; anything else
+    /// parses its kind's `<Kind>Opts` via [`instance_opts`] (itself total,
+    /// falling back to that kind's defaults and reporting the mismatch once
+    /// via `warn_once` on a type error) into [`InstanceParse::Ok`].
+    pub fn resolved_instances(&self) -> &BTreeMap<String, InstanceParse> {
+        self.resolved.get_or_init(|| {
+            self.instances
+                .iter()
+                .map(|(name, table)| {
+                    let parse = match table.get("kind").and_then(Value::as_str) {
+                        None => InstanceParse::NoKind,
+                        Some(s) => match WidgetKind::parse(s).filter(|k| k.is_instanceable()) {
+                            Some(kind) => {
+                                InstanceParse::Ok(build_instance_spec(name, kind, table.clone()))
+                            }
+                            None => InstanceParse::UnknownKind(s.to_string()),
+                        },
+                    };
+                    (name.clone(), parse)
+                })
+                .collect()
+        })
     }
 
     /// The set of widget *kinds* a `layout` (a region's name list) references —
     /// the kind-aware basis for read-gating in the binary's
     /// `build_region_context` (W46).
     ///
-    /// A built-in name (see [`BUILTIN_WIDGET_NAMES`]) always maps to itself,
-    /// even when `self.instances` has a colliding key — built-in wins,
-    /// mirroring the same precedence [`Config::color_overrides`]/
-    /// [`Config::click_map`] apply (invariant #7). For any other name: an
-    /// `[instances.<name>]` entry maps to its declared `kind` (an instance
-    /// whose table has no `kind` string is dropped, since there's nothing to
-    /// gate on); any other name maps to itself — a plugin/unknown name maps
-    /// to itself harmlessly, since it matches none of the OS-read gates.
-    pub fn layout_kinds(&self, layout: &[String]) -> BTreeSet<String> {
+    /// A built-in name always maps to its own [`WidgetKind`], even when
+    /// `self.instances` has a colliding key — built-in wins, mirroring the
+    /// same precedence [`Config::color_overrides`]/[`Config::click_map`]
+    /// apply (invariant #7). For any other name: an `[instances.<name>]`
+    /// entry maps to its resolved kind (an instance with no resolvable kind —
+    /// [`InstanceParse::NoKind`]/[`InstanceParse::UnknownKind`] — is dropped,
+    /// since there's nothing to gate on); any other name (a WASM plugin, or a
+    /// stale/unknown name) maps to nothing — a semantic tightening from the
+    /// pre-T5 "maps to itself harmlessly," safe because every caller
+    /// (`build_context.rs`, `doctor.rs`) only ever probes built-in
+    /// [`WidgetKind`] values here, never a plugin/unknown name.
+    pub fn layout_kinds(&self, layout: &[String]) -> BTreeSet<WidgetKind> {
         layout
             .iter()
             .filter_map(|name| {
-                if is_builtin_widget_name(name) {
-                    return Some(name.clone());
+                if let Some(kind) = WidgetKind::parse(name) {
+                    return Some(kind);
                 }
-                match self.instances.get(name) {
-                    Some(table) => Config::instance_kind(table).map(str::to_string),
-                    None => Some(name.clone()),
+                match self.resolved_instances().get(name) {
+                    Some(InstanceParse::Ok(spec)) => Some(spec.kind()),
+                    _ => None,
                 }
             })
             .collect()
@@ -1885,10 +2047,10 @@ impl Config {
     /// mounts each get a live reading instead of clobbering a single one.
     pub fn disk_mounts(&self, layout: &[String]) -> BTreeSet<String> {
         let mut mounts: BTreeSet<String> = self
-            .instances_of_kind(layout, "disk")
-            .map(|(name, table)| {
-                let opts: DiskOpts = instance_opts(name, "disk", table.clone());
-                opts.mount
+            .instances_of_kind(layout, WidgetKind::Disk)
+            .filter_map(|(_, spec)| match spec {
+                InstanceSpec::Disk(o) => Some(o.mount.clone()),
+                _ => None,
             })
             .collect();
         if layout.iter().any(|name| name == "disk") {
@@ -1905,10 +2067,10 @@ impl Config {
     /// `Context.throughputs`, keyed by `interface.unwrap_or_default()` (W46).
     pub fn throughput_interfaces(&self, layout: &[String]) -> BTreeSet<Option<String>> {
         let mut ifaces: BTreeSet<Option<String>> = self
-            .instances_of_kind(layout, "throughput")
-            .map(|(name, table)| {
-                let opts: ThroughputOpts = instance_opts(name, "throughput", table.clone());
-                opts.interface
+            .instances_of_kind(layout, WidgetKind::Throughput)
+            .filter_map(|(_, spec)| match spec {
+                InstanceSpec::Throughput(o) => Some(o.interface.clone()),
+                _ => None,
             })
             .collect();
         if layout.iter().any(|name| name == "throughput") {
@@ -1921,11 +2083,13 @@ impl Config {
     /// `[instances.<name>]` of that kind — reference `{spark}` in its
     /// `format`/`alt_format`? Gates the shared history read/persist so an
     /// instance-only `{spark}` still accumulates (W57). Non-cpu/memory → false.
-    pub fn spark_referenced_in_layout(&self, layout: &[String], kind: &str) -> bool {
-        let base_hit = layout.iter().any(|n| n == kind)
+    pub fn spark_referenced_in_layout(&self, layout: &[String], kind: WidgetKind) -> bool {
+        let base_hit = layout.iter().any(|n| n == kind.as_str())
             && match kind {
-                "cpu" => refs_spark(&self.widgets.cpu.format, &self.widgets.cpu.alt_format),
-                "memory" => {
+                WidgetKind::Cpu => {
+                    refs_spark(&self.widgets.cpu.format, &self.widgets.cpu.alt_format)
+                }
+                WidgetKind::Memory => {
                     refs_spark(&self.widgets.memory.format, &self.widgets.memory.alt_format)
                 }
                 _ => false,
@@ -1933,39 +2097,61 @@ impl Config {
         base_hit
             || self
                 .instances_of_kind(layout, kind)
-                .any(|(name, table)| match kind {
-                    "cpu" => {
-                        let o: CpuOpts = instance_opts(name, kind, table.clone());
-                        refs_spark(&o.format, &o.alt_format)
-                    }
-                    "memory" => {
-                        let o: MemoryOpts = instance_opts(name, kind, table.clone());
-                        refs_spark(&o.format, &o.alt_format)
-                    }
+                .any(|(_, spec)| match spec {
+                    InstanceSpec::Cpu(o) => refs_spark(&o.format, &o.alt_format),
+                    InstanceSpec::Memory(o) => refs_spark(&o.format, &o.alt_format),
                     _ => false,
                 })
     }
 
-    /// Iterate the `[instances.<name>]` tables a `layout` references that are of
-    /// a given `kind`, in layout order, paired with each instance's own name (so
-    /// callers can report a per-instance parse error via [`instance_opts`]) —
-    /// the shared spine of [`Config::disk_mounts`], [`Config::throughput_interfaces`],
-    /// and [`Config::spark_referenced_in_layout`].
+    /// Iterate the `[instances.<name>]` tables a `layout` references that
+    /// resolved (via [`Config::resolved_instances`]) to a given `kind`, in
+    /// layout order, paired with each instance's own name — the shared spine
+    /// of [`Config::disk_mounts`], [`Config::throughput_interfaces`], and
+    /// [`Config::spark_referenced_in_layout`].
     fn instances_of_kind<'a>(
         &'a self,
         layout: &'a [String],
-        kind: &'a str,
-    ) -> impl Iterator<Item = (&'a str, &'a Value)> {
+        kind: WidgetKind,
+    ) -> impl Iterator<Item = (&'a str, &'a InstanceSpec)> {
         layout.iter().filter_map(move |name| {
             // Built-in-wins precedence: a built-in name never resolves to a
             // same-named `[instances.<name>]` entry (invariant #7), matching the
             // guard `color_overrides`/`click_map`/`layout_kinds` already apply.
-            if is_builtin_widget_name(name) {
+            if WidgetKind::parse(name).is_some() {
                 return None;
             }
-            let table = self.instances.get(name)?;
-            (Config::instance_kind(table) == Some(kind)).then_some((name.as_str(), table))
+            match self.resolved_instances().get(name) {
+                Some(InstanceParse::Ok(spec)) if spec.kind() == kind => Some((name.as_str(), spec)),
+                _ => None,
+            }
         })
+    }
+}
+
+/// Parse one `[instances.<name>]` table into its kind's typed
+/// [`InstanceSpec`] variant, via [`instance_opts`] (total: a type-mismatched
+/// table falls back to that kind's defaults, reporting the mismatch once).
+/// Only called for an already-confirmed [`WidgetKind::is_instanceable`] kind —
+/// see [`Config::resolved_instances`], the sole caller.
+fn build_instance_spec(name: &str, kind: WidgetKind, table: Value) -> InstanceSpec {
+    let k = kind.as_str();
+    match kind {
+        WidgetKind::DateTime => InstanceSpec::DateTime(instance_opts(name, k, table)),
+        WidgetKind::LanIp => InstanceSpec::LanIp(instance_opts(name, k, table)),
+        WidgetKind::TailscaleIp => InstanceSpec::TailscaleIp(instance_opts(name, k, table)),
+        WidgetKind::Battery => InstanceSpec::Battery(instance_opts(name, k, table)),
+        WidgetKind::Cpu => InstanceSpec::Cpu(instance_opts(name, k, table)),
+        WidgetKind::Memory => InstanceSpec::Memory(instance_opts(name, k, table)),
+        WidgetKind::LoadAvg => InstanceSpec::LoadAvg(instance_opts(name, k, table)),
+        WidgetKind::Git => InstanceSpec::Git(instance_opts(name, k, table)),
+        WidgetKind::Disk => InstanceSpec::Disk(instance_opts(name, k, table)),
+        WidgetKind::Uptime => InstanceSpec::Uptime(instance_opts(name, k, table)),
+        WidgetKind::Media => InstanceSpec::Media(instance_opts(name, k, table)),
+        WidgetKind::Throughput => InstanceSpec::Throughput(instance_opts(name, k, table)),
+        WidgetKind::PaneId | WidgetKind::Hostname | WidgetKind::Windows | WidgetKind::Cwd => {
+            unreachable!("build_instance_spec is only called for an instanceable kind")
+        }
     }
 }
 
@@ -1974,6 +2160,52 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn widget_kind_toml_spellings_are_the_accepted_ones() {
+        // The two explicit renames are load-bearing: snake_case alone would emit
+        // date_time / load_avg, which are NOT the accepted TOML spellings.
+        for k in WidgetKind::ALL {
+            assert_eq!(WidgetKind::parse(k.as_str()), Some(k));
+        }
+        assert_eq!(WidgetKind::parse("datetime"), Some(WidgetKind::DateTime));
+        assert_eq!(WidgetKind::parse("loadavg"), Some(WidgetKind::LoadAvg));
+        assert_eq!(WidgetKind::parse("date_time"), None);
+        assert_eq!(WidgetKind::parse("load_avg"), None);
+        assert_eq!(WidgetKind::ALL.len(), 16);
+        assert_eq!(
+            WidgetKind::ALL
+                .iter()
+                .filter(|k| k.is_instanceable())
+                .count(),
+            12
+        );
+    }
+
+    #[test]
+    fn resolved_instances_parses_each_table_exactly_once_and_degrades_per_entry() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [instances.clock_utc]
+            kind = "datetime"
+            timezone = "UTC"
+            [instances.mystery]
+            kind = "not_a_kind"
+            [instances.kindless]
+            format = "x"
+        "#,
+        )
+        .unwrap();
+        let r = cfg.resolved_instances();
+        assert!(matches!(
+            r.get("clock_utc"),
+            Some(InstanceParse::Ok(InstanceSpec::DateTime(_)))
+        ));
+        assert!(
+            matches!(r.get("mystery"), Some(InstanceParse::UnknownKind(k)) if k == "not_a_kind")
+        );
+        assert!(matches!(r.get("kindless"), Some(InstanceParse::NoKind)));
+    }
 
     #[test]
     fn to_theme_resolves_builtin_base_and_inline_override_wins() {
@@ -2935,7 +3167,7 @@ mount = "/data"
         let c: Config = toml::from_str(toml).unwrap();
         assert_eq!(c.instances.len(), 2);
         let utc = &c.instances["clock_utc"];
-        assert_eq!(Config::instance_kind(utc), Some("datetime"));
+        assert_eq!(Config::instance_kind(utc), Some(WidgetKind::DateTime));
         assert_eq!(utc.get("timezone").and_then(|v| v.as_str()), Some("UTC"));
     }
 
@@ -2956,12 +3188,13 @@ mount = "/data"
         );
         // An instance name resolves to its kind; a base/built-in name to itself.
         let kinds = c.layout_kinds(&["disk_data".into(), "cpu".into()]);
-        assert!(kinds.contains("disk"));
-        assert!(kinds.contains("cpu"));
-        // An instance whose table has no `kind` is dropped (nothing to gate on).
+        assert!(kinds.contains(&WidgetKind::Disk));
+        assert!(kinds.contains(&WidgetKind::Cpu));
+        // An instance whose table has no `kind` is dropped (nothing to gate on):
+        // its name maps to nothing at all, not even to itself.
         c.instances
             .insert("bogus".into(), toml::from_str("mount = '/x'").unwrap());
-        assert!(!c.layout_kinds(&["bogus".into()]).contains("bogus"));
+        assert!(c.layout_kinds(&["bogus".into()]).is_empty());
     }
 
     #[test]
@@ -3017,7 +3250,7 @@ mount = "/data"
         // Base cpu with {spark} in format.
         let mut cfg = Config::default();
         cfg.widgets.cpu.format = "{icon} {spark} {percent}%".into();
-        assert!(cfg.spark_referenced_in_layout(&["cpu".into()], "cpu"));
+        assert!(cfg.spark_referenced_in_layout(&["cpu".into()], WidgetKind::Cpu));
 
         // Base default (no spark), but a cpu instance IN the layout has {spark}.
         let mut cfg2 = Config::default();
@@ -3026,21 +3259,21 @@ mount = "/data"
         t.insert("format".into(), "{spark}".into());
         cfg2.instances.insert("cpu2".into(), toml::Value::Table(t));
         assert!(
-            cfg2.spark_referenced_in_layout(&["cpu2".into()], "cpu"),
+            cfg2.spark_referenced_in_layout(&["cpu2".into()], WidgetKind::Cpu),
             "instance-only {{spark}} counts"
         );
         // Same instance NOT in the layout → false.
-        assert!(!cfg2.spark_referenced_in_layout(&["cpu".into()], "cpu"));
+        assert!(!cfg2.spark_referenced_in_layout(&["cpu".into()], WidgetKind::Cpu));
 
         // Neither base nor instance references spark → false; wrong kind → false.
         let cfg3 = Config::default();
-        assert!(!cfg3.spark_referenced_in_layout(&["cpu".into()], "cpu"));
-        assert!(!cfg3.spark_referenced_in_layout(&["disk".into()], "disk"));
+        assert!(!cfg3.spark_referenced_in_layout(&["cpu".into()], WidgetKind::Cpu));
+        assert!(!cfg3.spark_referenced_in_layout(&["disk".into()], WidgetKind::Disk));
 
         // Memory base widget with {spark} — the structurally-identical memory arm.
         let mut cfg_mem = Config::default();
         cfg_mem.widgets.memory.format = "{icon} {spark} {percent}%".into();
-        assert!(cfg_mem.spark_referenced_in_layout(&["memory".into()], "memory"));
+        assert!(cfg_mem.spark_referenced_in_layout(&["memory".into()], WidgetKind::Memory));
     }
 
     #[test]
@@ -3069,8 +3302,8 @@ mount = "/data"
         c.instances
             .insert("cpu".into(), toml::from_str("kind = 'disk'").unwrap());
         let kinds = c.layout_kinds(&["cpu".into()]);
-        assert!(kinds.contains("cpu"));
-        assert!(!kinds.contains("disk"));
+        assert!(kinds.contains(&WidgetKind::Cpu));
+        assert!(!kinds.contains(&WidgetKind::Disk));
     }
 
     #[test]
@@ -3084,25 +3317,10 @@ mount = "/data"
         );
         assert!(c.color_overrides().contains_key("clock_utc"));
         assert!(c.click_map().get("clock_utc").unwrap().toggleable);
-        assert!(c.layout_kinds(&["clock_utc".into()]).contains("datetime"));
-    }
-
-    #[test]
-    fn builtin_widget_names_mirror_registry_with_builtins() {
-        // `BUILTIN_WIDGET_NAMES` is a hand-maintained mirror of the built-ins
-        // `Registry::with_builtins` registers. Nothing else keeps them in sync,
-        // so a future 17th built-in added there without updating the list would
-        // silently break built-in-wins precedence (invariant #7). Pin the two.
-        use crate::widget::WidgetSource;
-        let reg = crate::Registry::with_builtins(&Config::default());
-        let from_registry: BTreeSet<&str> = reg
-            .descriptors()
-            .iter()
-            .filter(|d| d.source == WidgetSource::Builtin)
-            .map(|d| d.name.as_str())
-            .collect();
-        let mirror: BTreeSet<&str> = BUILTIN_WIDGET_NAMES.iter().copied().collect();
-        assert_eq!(from_registry, mirror);
+        assert!(
+            c.layout_kinds(&["clock_utc".into()])
+                .contains(&WidgetKind::DateTime)
+        );
     }
 
     #[test]
@@ -3330,7 +3548,7 @@ mount = "/data"
         assert_eq!(
             e.source,
             WidgetSource::Instance {
-                kind: "datetime".into()
+                kind: WidgetKind::DateTime
             }
         );
         assert_eq!(e.placement, Some((Region::Right, 0)));
@@ -3361,7 +3579,7 @@ mount = "/data"
         assert_eq!(
             e.source,
             WidgetSource::Instance {
-                kind: "datetime".into()
+                kind: WidgetKind::DateTime
             }
         );
     }

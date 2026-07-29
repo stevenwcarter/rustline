@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::env;
 
 use crate::cli::{RegionArgs, WindowArgs};
-use rustline_core::{Config, Context, NetIface, Theme, WindowCtx};
+use rustline_core::{Config, Context, NetIface, Theme, WidgetKind, WindowCtx};
 
 /// Read the 1/5/15-minute load average via `getloadavg(3)`.
 ///
@@ -81,7 +81,7 @@ pub fn build_region_context(
 ) -> Context {
     let kinds = cfg.layout_kinds(layout);
     let pane_current_path = args.pane_path.clone().unwrap_or_default();
-    let git = if kinds.contains("git") {
+    let git = if kinds.contains(&WidgetKind::Git) {
         crate::git::read_git(&pane_current_path)
     } else {
         None
@@ -115,46 +115,49 @@ pub fn build_region_context(
     let base_iface_key = cfg.widgets.throughput.interface.clone().unwrap_or_default();
     let throughput = throughputs.get(&base_iface_key).cloned();
     // Interfaces feed both IP widgets, so either kind names the read.
-    let interfaces = if kinds.contains("lan_ip") || kinds.contains("tailscale_ip") {
-        read_interfaces()
-    } else {
-        Vec::new()
-    };
-    let battery = if kinds.contains("battery") {
+    let interfaces =
+        if kinds.contains(&WidgetKind::LanIp) || kinds.contains(&WidgetKind::TailscaleIp) {
+            read_interfaces()
+        } else {
+            Vec::new()
+        };
+    let battery = if kinds.contains(&WidgetKind::Battery) {
         crate::battery::read_battery()
     } else {
         None
     };
-    let uptime = if kinds.contains("uptime") {
+    let uptime = if kinds.contains(&WidgetKind::Uptime) {
         crate::uptime::read_uptime()
     } else {
         None
     };
-    let media = if kinds.contains("media") {
+    let media = if kinds.contains(&WidgetKind::Media) {
         crate::media::read_media()
     } else {
         None
     };
-    let cpu = if kinds.contains("cpu") {
+    let cpu = if kinds.contains(&WidgetKind::Cpu) {
         crate::cpu::read_cpu()
     } else {
         None
     };
     let cpu_history = match cpu {
-        Some(c) if cfg.spark_referenced_in_layout(layout, "cpu") => crate::cpu::read_cpu_history(
-            &rustline_wasm::state_root(),
-            c.percent,
-            cfg.widgets.cpu.spark_width,
-        ),
+        Some(c) if cfg.spark_referenced_in_layout(layout, WidgetKind::Cpu) => {
+            crate::cpu::read_cpu_history(
+                &rustline_wasm::state_root(),
+                c.percent,
+                cfg.widgets.cpu.spark_width,
+            )
+        }
         _ => Vec::new(),
     };
-    let memory = if kinds.contains("memory") {
+    let memory = if kinds.contains(&WidgetKind::Memory) {
         crate::memory::read_memory()
     } else {
         None
     };
     let mem_history = match memory {
-        Some(m) if cfg.spark_referenced_in_layout(layout, "memory") => {
+        Some(m) if cfg.spark_referenced_in_layout(layout, WidgetKind::Memory) => {
             let percent = if m.total_bytes == 0 {
                 0.0
             } else {
