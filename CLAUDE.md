@@ -130,7 +130,7 @@ these shared types, not a design shortcut. Keep them serializable.
   just the *base* widget's reading (the WASM mirror; a guest never sees the
   maps),
   `os: String`, `arch:
-  String`, `toggled: BTreeSet<String>`, `colors: ThemeColors`), plus
+  String`, `toggled: BTreeSet<WidgetName>`, `colors: ThemeColors`), plus
   `Context::default()` (an empty, epoch-timestamped instance, so test/synthetic
   construction sites can use struct-update syntax instead of spelling out
   every field as the type grows), and `WindowCtx`. `NetIface`, `Battery`/
@@ -180,7 +180,10 @@ these shared types, not a design shortcut. Keep them serializable.
   blending to `bar_bg`); `render_window_pill(text, is_current, &Theme) ->
   String`, the window-list rounded-pill renderer (rounded `` / `` caps colored
   `fg=pill,bg=bar_bg` — the *opposite* of a pointed separator); `RangeGroup`
-  (a widget's segments plus its optional clickable range name) and
+  (a widget's segments plus its optional clickable range name, typed
+  `range: Option<RangeName>` — see `range_name.rs` below — so the bytes
+  interpolated into `#[range=user|…]` are safe by construction rather than
+  re-checked here) and
   `render_region_ranged(Direction, &[RangeGroup], &Theme) -> String`, which
   brackets each clickable group in `#[range=user|NAME]…#[norange]` with
   separators/edges kept outside any range — byte-identical to `render_region`
@@ -201,15 +204,30 @@ these shared types, not a design shortcut. Keep them serializable.
   is a complete `Theme` (all fields, incl. semantics), and every non-`default`
   theme is multi-accent (`palette.len() >= 4`) using truecolor (`Color::Rgb`).
   See Themes under Config for the full list and layering rules.
+- `range_name.rs` — `RangeName`/`NameError`: the one definition of invariant
+  #7's clickable-name rule (non-empty, at most `RANGE_NAME_MAX_BYTES` bytes —
+  moved here from `render.rs` — `[A-Za-z0-9_-]` only, and not the reserved
+  name `"window"`). `RangeName::parse` is the sole constructor, checking (in
+  order) empty → bad char → reserved → too long, so a name that is both
+  charset-invalid and too long always reports the charset violation, never
+  masked by the length check; `RangeName::of_widget(&WidgetName) ->
+  Option<RangeName>` bridges a widget's identity into its clickable form.
+  Holding a `RangeName` is proof its bytes are safe to interpolate into
+  `#[range=user|…]` verbatim — nothing downstream re-checks length or
+  charset. Closes the range-forging hole: a charset-violating name (e.g.
+  carrying a `#`) could previously still pass the old length-only check and
+  reach `#[range=user|…]` markup unescaped.
 - `widget.rs` — `Widget` trait and `Registry` (name → factory; `resolve` skips
   unknown widget names with a `warn!`, never errors). `resolve` now returns
-  `Vec<(String, Box<dyn Widget>)>` (W53) — each built widget paired with the
+  `Vec<(WidgetName, Box<dyn Widget>)>` (W53) — each built widget paired with the
   layout name it came from, so a caller (e.g. `render_named_region`) never
   re-filters `names` to recover which widget is which.
   `Widget::range_name(&self)
-  -> Option<&str>` defaults to `None`; a clickable widget returns `Some(name)`.
+  -> Option<RangeName>` defaults to `None`; a clickable widget returns
+  `RangeName::of_widget`'s result via `clickable_range` (see `toggle.rs`
+  below).
   `WidgetDescriptor { name, summary, configurable, source: WidgetSource }`
-  (`WidgetSource::{Builtin, Plugin, Instance { kind: String }}` — the third
+  (`WidgetSource::{Builtin, Plugin, Instance { kind: WidgetKind }}` — the third
   variant, added for the widget manager, labels a `[instances.<name>]`
   descriptor with its declared kind so `widget list`/`widget edit` can show
   "instance of cpu" rather than lumping it in with `Builtin`) describes a
@@ -220,7 +238,7 @@ these shared types, not a design shortcut. Keep them serializable.
   enumerate them in registration order (W22) — the enabling abstraction the
   widget manager's `widget_placements` (see `config.rs` below) builds on.
   The twelve clickable/format-bearing
-  widget structs (see `toggle.rs` below) each now carry a `name: String`
+  widget structs (see `toggle.rs` below) each now carry a `name: WidgetName`
   field (W46) — their range/toggle identity (invariant #7) — instead of
   hardcoding their kind name in `range_name()`/`active_format`; a base
   built-in sets `name` to its kind (byte-identical output), an
@@ -232,17 +250,20 @@ these shared types, not a design shortcut. Keep them serializable.
   `build_throughput`), reused by both base registration (passes the kind
   name) and instance registration (passes the instance name) — one factory
   body instead of two. `Registry::with_builtins(&Config)` gains a second pass
-  over `cfg.instances` (W46): for each `(name, table)`, an unknown/missing
-  `kind`, a non-clickable kind (`cwd`/`hostname`/`pane_id`/`windows` —
+  over `cfg.resolved_instances()` (W46, parse-once via T5 — see `config.rs`
+  below): a `NoKind` entry, an `UnknownKind` (unrecognized, or a
+  valid-but-non-clickable kind — `cwd`/`hostname`/`pane_id`/`windows` —
   instanceable but never clickable, so out of scope for this pass), or a name
   already registered (a built-in or an earlier instance) is `warn!`+skipped
-  (invariant #3, built-in always wins); otherwise the table is re-parsed into
-  that kind's Opts (`instance_opts` — warns once via `warn_once` and falls
-  back to `<Kind>Opts::default()` on a type error; the extra `kind` key is
-  harmlessly ignored, no Opts struct has `deny_unknown_fields`) and registered
-  under the instance name via its `build_<kind>` helper. An instance name over
-  15 bytes still registers but logs a one-time "not click-toggleable" warn
-  (mirrors a too-long plugin stem).
+  (invariant #3, built-in always wins); otherwise the already-typed
+  `InstanceSpec` (parsed once via `instance_opts`, which itself warns once via
+  `warn_once` and falls back to `<Kind>Opts::default()` on a type error) is
+  registered under the instance name via `build_instance`/its `build_<kind>`
+  helper. An instance name that fails `RangeName::parse` (too long, a
+  `[A-Za-z0-9_-]` violation, or the reserved `window`) still registers but
+  logs a one-time "not click-toggleable" warn (mirrors a too-long plugin
+  stem; registration stays permissive — invalid names register but are
+  unclickable).
 - `widgets/` — the sixteen built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
   `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`,
   `git`, `disk`, `uptime`, `media`, `throughput`, plus `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
@@ -335,10 +356,12 @@ these shared types, not a design shortcut. Keep them serializable.
   `1.2M/s`), plus `alt_format`/`down_format`; NOT threshold-aware (a rate has
   no universal ceiling) and NOT in the default layout.
   `toggle.rs` holds the shared click-toggle helpers
-  `active_format(ctx, name, format, alt) -> &str`
+  `active_format(ctx, name: &WidgetName, format, alt) -> &str`
   (picks `alt` iff it's non-empty AND `name` is in `ctx.toggled`, else
-  `format`) and `clickable_range(name, alt) -> Option<&str>` (`Some(name)` iff
-  `alt` is non-empty AND `name.len() <= 15`, tmux's `range=user|X` byte limit);
+  `format`) and `clickable_range(name: &WidgetName, alt) -> Option<RangeName>`
+  (`Some` iff `alt` is non-empty AND `name` parses as a `RangeName` —
+  invariant #7's full rule, not just the byte-length check it used to be;
+  see `range_name.rs` above);
   the twelve format-bearing widgets (`datetime`, `lan_ip`, `tailscale_ip`,
   `battery`, `cpu`, `memory`, `loadavg`, `git`, `disk`, `uptime`, `media`,
   `throughput`) each
@@ -364,7 +387,7 @@ these shared types, not a design shortcut. Keep them serializable.
   tmux integration model below), so window-select clicks keep working. Pills
   are joined with no separator (each is self-contained).
 - `config.rs` — `Config` (TOML): `layout`, `theme`, `widgets`, a top-level
-  `plugin_dir: Option<String>`, and a typed `plugins: HashMap<String,
+  `plugin_dir: Option<String>`, and a typed `plugins: HashMap<WidgetName,
   PluginConfig>` table (see Config below). `Config::load` is **total**
   (missing/invalid file → `warn!` + defaults). `ThemeConfig` is now a **full
   optional mirror of `Theme`** (every field, incl. the separators and the four
@@ -399,42 +422,53 @@ these shared types, not a design shortcut. Keep them serializable.
   `spark_width` (W45, default 8 — the `{spark}` history ring length, consulted
   when `format` **or** `alt_format` references `{spark}`, W56). `Config` also
   gains `pub
-  instances: HashMap<String, toml::Value>` (`#[serde(default)]`, W46) — one
+  instances: HashMap<WidgetName, Value>` (`#[serde(default)]`, W46) — one
   raw `[instances.<name>]` table per named widget instance; the entry's
-  `kind` key selects which built-in kind to build, and the rest of the table
-  is that kind's own Opts (re-parsed per kind via `try_into` rather than a
-  typed `WidgetInstance`, so the existing `<Kind>Opts` structs are reused
-  verbatim — see Config below for the TOML shape). Helper methods: `pub fn
-  instance_kind(v: &toml::Value) -> Option<&str>` reads the `kind` key; `pub
-  fn instance_meta(name: &str, kind: &str, v: &toml::Value) ->
-  Option<(ColorOverride, String, ClickBindings)>` dispatches on kind to parse
-  an instance's color override/`alt_format`/click bindings (one shared match
-  arm backing both projections below, mirroring `Registry`'s per-kind
-  dispatch); `pub fn
-  layout_kinds(&self, layout: &[String]) -> BTreeSet<String>` maps each
+  `kind` key names one of a closed, 16-variant `WidgetKind` enum (T5 — serde
+  `snake_case` with explicit `datetime`/`loadavg` renames, since plain
+  snake_case would emit `date_time`/`load_avg`; `WidgetKind::ALL`/`as_str`/
+  `parse`/`is_instanceable`), and the rest of the table is that kind's own
+  Opts (re-parsed per kind via `try_into` rather than a typed
+  `WidgetInstance`, so the existing `<Kind>Opts` structs are reused verbatim —
+  see Config below for the TOML shape). `pub fn instance_kind(v: &Value) ->
+  Option<WidgetKind>` reads and parses the `kind` key. `pub fn
+  resolved_instances(&self) -> &BTreeMap<WidgetName, InstanceParse>` (T5) is
+  the parse-once memo (a `OnceLock`, lazily built and reused for the
+  `Config`'s lifetime) that replaced the old per-consumer `instance_meta`
+  dispatch: `InstanceParse::{Ok(InstanceSpec), NoKind, UnknownKind(String)}`,
+  with `InstanceSpec` a 12-variant enum wrapping the existing `<Kind>Opts`
+  structs one per instanceable kind. `color_overrides`/`click_map`/
+  `layout_kinds`/`disk_mounts`/`throughput_interfaces`/
+  `spark_referenced_in_layout`/`instances_of_kind`, AND
+  `Registry::with_builtins`'s registration pass, all consume this memo, so a
+  table with several consumers deserializes exactly once per `Config`, not
+  once per consumer per render/keystroke. `pub fn
+  layout_kinds(&self, layout: &[WidgetName]) -> BTreeSet<WidgetKind>` maps each
   layout entry to its kind (a built-in name maps to itself; an instance name
   maps to its declared `kind`) for kind-aware read-gating; `pub fn
-  disk_mounts(&self, layout: &[String]) -> BTreeSet<String>` and `pub fn
-  throughput_interfaces(&self, layout: &[String]) -> BTreeSet<Option<String>>`
+  disk_mounts(&self, layout: &[WidgetName]) -> BTreeSet<String>` and `pub fn
+  throughput_interfaces(&self, layout: &[WidgetName]) -> BTreeSet<Option<String>>`
   collect the distinct mounts/interfaces the layout's `disk`/`throughput`
   entries (base + every instance) actually reference, for the per-mount/
   per-interface reads below. `pub fn spark_referenced_in_layout(&self, layout:
-  &[String], kind: &str) -> bool` (W57) is the `{spark}`-gate's own kind-aware
+  &[WidgetName], kind: WidgetKind) -> bool` (W57) is the `{spark}`-gate's own kind-aware
   scan: true iff the layout's base `cpu`/`memory` widget OR any
   `[instances.<name>]` of that `kind` in the layout has `{spark}` in its
   `format`/`alt_format` (shared private `refs_spark` helper) — `build_context.rs`
   calls this instead of checking only the base widget, so a `{spark}` that
   appears only on an instance (no base widget of that kind in the layout at
   all) still populates the shared `Context.cpu_history`/`mem_history` ring
-  (supersedes W56's base-only check). A module-level `const
-  BUILTIN_WIDGET_NAMES: [&str;
-  16]` + `fn is_builtin_widget_name(name: &str) -> bool` is the built-in-wins
-  precedence guard: `color_overrides()`/`click_map()`/`layout_kinds` all skip
+  (supersedes W56's base-only check). The built-in-wins
+  precedence guard — `color_overrides()`/`click_map()`/`layout_kinds` all skip
   a `[instances.<name>]` entry whose name collides with a built-in, mirroring
   `Registry`'s own collision skip (W46 review fix — an instance was initially
-  able to silently hijack a same-named built-in's projected color/click).
+  able to silently hijack a same-named built-in's projected color/click) — is
+  now `WidgetKind::parse(name).is_some()` (T5); the hand-maintained `const
+  BUILTIN_WIDGET_NAMES: [&str; 16]` array and its `is_builtin_widget_name`
+  helper are gone, since `WidgetKind::ALL` is the same information already.
   `color_overrides()`/`click_map()` (previously widgets-only) now also
-  project each non-colliding instance via `instance_meta`, keyed by the
+  project each non-colliding instance via `resolved_instances()`'s
+  `InstanceParse::Ok(spec)`, keyed by the
   instance name, so instance color overrides and click bindings flow through
   `render_named_region`/`resolve_click` unchanged. `PluginConfig` also gains
   `allowed_commands: Vec<String>` (the exec capability's allowlist, same
@@ -555,24 +589,47 @@ these shared types, not a design shortcut. Keep them serializable.
   `stale`/`age_secs` — same "usable result present, fresh or stale"
   convention as `CachedHttpResult`). Same struct-level `#[serde(default)]`
   forward-compatibility as the other four.
+  Also `WidgetName` (T6, `#[serde(transparent)]`, `Borrow<str>`) — the
+  identity newtype invariant #7 keys off: `Context.toggled`/
+  `WireContext.toggled: BTreeSet<WidgetName>`, `Layout`'s three region
+  `Vec<WidgetName>`s, and `Config.plugins`/`Config.instances`'s
+  `HashMap<WidgetName, _>` keys all use it; `Registry::resolve` returns
+  `Vec<(WidgetName, Box<dyn Widget>)>`; the twelve clickable widget structs
+  plus `WasmWidget` carry a `name: WidgetName` field; `rustline-core`'s
+  `RangeName::of_widget` bridges a `WidgetName` into the render/click-toggle
+  boundary's `RangeName`. Wire JSON and TOML shapes stay byte-identical.
   The WASM wire types, re-exported by `rustline-core`.
 
 `rustline-wasm`:
-- `allow.rs` — `AllowSet`/`Pattern`: each `allowed_urls`/`allowed_paths`/
-  `allowed_write_paths` entry is a glob by default or a regex when prefixed
-  `re:`; deny-by-default (empty set matches nothing); malformed patterns are
-  logged and skipped. `allowed_commands` (the exec capability's allowlist)
-  compiles through this same `AllowSet`, unchanged.
-- `argv.rs` — `canonical_argv(program, args) -> String`, the exec
+- `allow.rs` — `AllowSet<K: CapKind>`/`Pattern`: each `allowed_urls`/
+  `allowed_paths`/`allowed_write_paths` entry is a glob by default or a regex
+  when prefixed `re:`; deny-by-default (empty set matches nothing); malformed
+  patterns are logged and skipped. `AllowSet` is phantom-tagged per capability
+  family (T3): marker types `UrlCap`/`ReadPathCap`/`WritePathCap`/`CommandCap`
+  each carry a `DENIAL: DenialKind` and a typed subject (`Url<'a>`/
+  `ResolvedPath`/`CanonicalArgv`), so a URL can never be checked against a
+  path (or command) allowlist, or vice versa — compiler-enforced, not just a
+  runtime convention. `allowed_commands` (the exec capability's allowlist)
+  compiles through this same `AllowSet<CommandCap>`. `ReadPathCap`/
+  `WritePathCap` additionally implement the `PathCap`-bounded `check_path`,
+  which consumes a `ResolvedPath` and mints the `AllowedPath` token (see
+  `state.rs` below) on a match — the only way to obtain one.
+- `argv.rs` — `canonical_argv(program, args) -> CanonicalArgv`, the exec
   capability's single **matching key** an `allowed_commands` pattern is checked
   against — never executed, since the host always spawns `program` + `args`
-  directly with no shell. Quotes an argument (single-quoted, POSIX-style, with
+  directly with no shell. `CanonicalArgv` is a newtype (T3) whose sole
+  constructor is this function, so the `allowed_commands` gate can never be
+  checked against a hand-built string that bypassed it — that's type-enforced.
+  The exec cache key is only derived from a `CanonicalArgv` by convention, at
+  its single call site (`cache_path` in `cache.rs` still takes a bare `&str`
+  key) — typing that parameter is open finding T22. Quotes an argument
+  (single-quoted, POSIX-style, with
   an embedded `'` escaped as `'\''`) whenever it contains whitespace, a quote,
   or a backslash, or is empty, so two different argv vectors (e.g.
   `["log", "--author=a b"]` vs `["log", "--author=a", "b"]`) can never collapse
   onto the same canonical string and silently share a grant.
-- `state.rs` — `sanitize_relpath` (rejects absolute/`..` paths for state I/O),
-  `normalize_abs` (rejects `..` for arbitrary-file I/O), `resolve_for_allowlist`
+- `state.rs` — `sanitize_relpath -> SandboxRelPath` (rejects absolute/`..`
+  paths for state I/O), `normalize_abs`/`resolve_for_allowlist -> ResolvedPath`
   (the symlink gate for arbitrary-file I/O, consulted before either read/write
   allowlist: by default denies outright on any symlink path component; when
   the plugin's `resolve_symlinks` is set, canonicalizes first — falling back
@@ -581,6 +638,11 @@ these shared types, not a design shortcut. Keep them serializable.
   than falling through if canonicalization fails; see the Config section
   below), and `dir_size`/`check_cap` (the quota primitives — `dir_size` is no
   longer walked per write; see `capability.rs`'s `state_size` memo below).
+  `ResolvedPath`/`SandboxRelPath` are constructible only in this module (T2);
+  `AllowedPath` (also here) is minted only by an allowlist's `check_path` on a
+  match (see `allow.rs` above). The four filesystem-effect sites in
+  `perform.rs` accept only these types, so "resolve → match → act" is a
+  type-level fact rather than statement order.
 - `paths.rs` — `expand_tilde`, `data_root`, `state_root`, `default_plugin_dir`
   (all under `$XDG_DATA_HOME/rustline`, falling back to `$HOME/.local/share/rustline`),
   plus `wasmtime_cache_config_path`/`ensure_wasmtime_cache_config` (W43): lazily
@@ -621,9 +683,12 @@ these shared types, not a design shortcut. Keep them serializable.
   `<state_dir>/<namespace>/` subdirectories, both for collision-avoidance and
   so eviction in one never touches the other's entries.
 - `capability.rs` — `CapabilityCtx`: one plugin instance's allowlists —
-  `allowed_urls`, `allowed_paths` (read), `allowed_write_paths` (write,
-  separate from `allowed_paths` — see the Config section below),
-  `allowed_commands` (the exec capability's gate) — plus `resolve_symlinks`,
+  `allowed_urls: AllowSet<UrlCap>`, `allowed_paths: AllowSet<ReadPathCap>`
+  (read), `allowed_write_paths: AllowSet<WritePathCap>` (write, separate from
+  `allowed_paths` — see the Config section below), `allowed_commands:
+  AllowSet<CommandCap>` (the exec capability's gate) — each its own
+  phantom-tagged type (T3) rather than four instances of the same untyped
+  set — plus `resolve_symlinks`,
   state root, and quota, built from `PluginConfig` and held in Extism
   `UserData` so each instance only ever sees its own grants. `DenialKind`
   gains a `Command` variant alongside `Url`/`Path` (a denied write is also
@@ -669,7 +734,13 @@ these shared types, not a design shortcut. Keep them serializable.
   one refresh attempt per TTL window on a failure (see `cache.rs` above) —
   `perform_state_read/write`, `perform_file_read/write`, and
   `perform_exec`/`perform_exec_cached`); pure enough to unit-test directly,
-  incl. the denied-case tests. `perform_file_read` gates on `allowed_paths`
+  incl. the denied-case tests. Each of the eight delegates to a private
+  outcome enum (`HttpOutcome`/`CachedHttpOutcome`/`ExecOutcome`/
+  `CachedExecOutcome`/`ReadOutcome`/`WriteOutcome`, T4) with exactly one
+  `From` impl converting it to its wire struct — the single author of every
+  ok/error/stale flag combination, so a caller can't hand-assemble an
+  inconsistent wire result; the wire JSON itself is unchanged, pinned by a
+  `wire_pins` test module. `perform_file_read` gates on `allowed_paths`
   and `perform_file_write` on the separate `allowed_write_paths` — an entry in
   one never authorizes the other — both resolved through
   `state::resolve_for_allowlist` first (see `state.rs` above); `perform_exec`
@@ -712,9 +783,11 @@ these shared types, not a design shortcut. Keep them serializable.
   untouched); `CompileCache::Disabled` (`with_cache_disabled`) is the bench's
   A/B toggle that forces a full compile. And `WasmWidget` (wraps an
   `extism::Plugin`; `Widget::render` degrades to empty segments on any
-  error/timeout/malformed output; carries its own `name` and implements
-  `range_name` as `Some(name)` iff `name.len() <= 15` — the guest itself
-  decides whether to honor `context.toggled`).
+  error/timeout/malformed output; carries its own `name: WidgetName` and
+  implements `range_name` via `RangeName::parse` (rejecting a
+  charset-violating `.wasm` stem too, not just an over-length one — the same
+  forgery hole `RangeName` closes elsewhere, see `range_name.rs` above) —
+  the guest itself decides whether to honor `context.toggled`).
 - `manifest.rs` — plugin capability *manifests* (W24): `PluginManifest
   { name, version, requested_urls, requested_paths, requested_write_paths,
   requested_commands }` (D3 added `requested_write_paths`, parsed separately
@@ -1228,7 +1301,7 @@ failure path via `rl_log` (W7) rather than staying silent:
   (from `std::env::consts::OS`/`ARCH`), and `toggled` (via
   `toggles::read_toggles()`, unconditionally — cheap relative to the gated
   cpu/memory/git/disk reads). `pub fn build_region_context(args: &RegionArgs,
-  layout: &[String], theme: &Theme, cfg: &Config) -> Context` (W46 — the
+  layout: &[WidgetName], theme: &Theme, cfg: &Config) -> Context` (W46 — the
   signature dropped the old separate `disk_mount` parameter; `cfg` carries
   everything needed) is now **kind-aware**: it resolves `cfg.layout_kinds(layout)`
   once and gates every read (`git`/`battery`/`cpu`/`memory`/`uptime`/`media`/
@@ -2686,13 +2759,13 @@ misconfiguration that stays constant between renders is.
    (multiple widget instances) extends this: for a named `[instances.<name>]`
    entry, that identity chain runs on the **instance** name, not its `kind` —
    each of the twelve clickable widget structs now carries its own `name:
-   String` field precisely so `render`/`range_name`/`active_format` all key
+   WidgetName` field precisely so `render`/`range_name`/`active_format` all key
    off the instance name instead of a hardcoded kind literal. This also
    means an instance can never be allowed to shadow a built-in of the same
    name (it would silently steal that built-in's click/toggle identity) —
    `Registry::with_builtins` skips a colliding instance outright (built-in
    wins), and `Config::color_overrides()`/`click_map()`/`layout_kinds` apply
-   the same `is_builtin_widget_name` precedence guard so a colliding
+   the same `WidgetKind::parse(name).is_some()` precedence check so a colliding
    instance's config can't hijack the built-in's projected color/click
    binding either (a W46 review-caught bug — see `config.rs` above).
 8. **Segment text is never interpolated into tmux markup unsanitized.** tmux
@@ -3107,19 +3180,24 @@ branch on platform.
     Enter-through re-run rewrote a two-line bar back to one line — see
     `init.rs`/`tmux_conf.rs` above).
   - W46 — multiple widget instances: a top-level `[instances.<name>]` table
-    (`Config.instances: HashMap<String, toml::Value>`, re-parsed per `kind`
+    (`Config.instances: HashMap<String, toml::Value>` at the time — since
+    retyped `HashMap<WidgetName, Value>` with a closed `WidgetKind` `kind`,
+    see T5/T6 in `config.rs` above — re-parsed per `kind`
     into that kind's existing Opts struct) lets any of the twelve clickable
     widget kinds appear more than once in a layout with distinct options
     (dual clocks in different timezones, multiple disk mounts, per-interface
     throughput). Each of those twelve widget structs now carries a `name`
-    field so its click-toggle/range identity is the *instance* name, not the
+    field (`WidgetName` as of T6) so its click-toggle/range identity is the
+    *instance* name, not the
     kind (invariant #7); `Context.disks`/`Context.throughputs` (keyed by
     mount/interface) let the parameterized `disk`/`throughput` kinds serve
     distinct instances without clobbering each other, and per-interface
     throughput sample files (`throughput-sample-<iface>`) prevent the same
     for persisted state. An instance can never shadow a built-in name
-    (`BUILTIN_WIDGET_NAMES`/`is_builtin_widget_name`, applied uniformly across
-    registration, `color_overrides()`, `click_map()`, and `layout_kinds`).
+    (`BUILTIN_WIDGET_NAMES`/`is_builtin_widget_name` at the time, applied
+    uniformly across registration, `color_overrides()`, `click_map()`, and
+    `layout_kinds` — since deleted and superseded by T5's
+    `WidgetKind::parse(name).is_some()`).
   - W48 — optional persistent daemon: `rustline daemon run|status|stop`
     (`daemon.rs`/`daemon_client.rs`/`daemon_proto.rs`) keeps the parsed
     config, resolved theme, warm widget registry, and instantiated WASM

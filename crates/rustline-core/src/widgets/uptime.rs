@@ -1,4 +1,4 @@
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget, WidgetName};
 
 /// Renders system uptime, humanized (`3d 4h`, `1h 15m`, `12m`, `<1m`).
 ///
@@ -9,7 +9,7 @@ use crate::{Context, Segment, Widget};
 pub struct Uptime {
     /// Registry/layout name; the toggle key threaded through render + click,
     /// and this instance's range name (invariant #7).
-    pub name: String,
+    pub name: WidgetName,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
@@ -35,7 +35,7 @@ impl Widget for Uptime {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn toggled_uses_alt_format() {
         let mut c = ctx(Some(90));
-        c.toggled.insert("uptime".to_string());
+        c.toggled.insert(WidgetName::from("uptime"));
         let out = w("up {uptime}", "u:{uptime}", "").render(&c);
         assert_eq!(out[0].text, "u:1m");
         // untoggled -> normal format
@@ -146,7 +146,10 @@ mod tests {
 
     #[test]
     fn range_name_some_only_with_alt_format() {
-        assert_eq!(w("{uptime}", "u:{uptime}", "").range_name(), Some("uptime"));
+        assert_eq!(
+            w("{uptime}", "u:{uptime}", "").range_name(),
+            Some(RangeName::parse("uptime").unwrap())
+        );
         assert_eq!(w("{uptime}", "", "").range_name(), None);
     }
 }

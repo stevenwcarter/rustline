@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use rustline_abi::ABI_VERSION;
 use rustline_core::{
-    Config, PluginConfig, RANGE_NAME_MAX_BYTES, Registry, WidgetDescriptor, WidgetSource,
+    Config, PluginConfig, RangeName, Registry, WidgetDescriptor, WidgetName, WidgetSource,
 };
 
 pub use argv::canonical_argv;
@@ -95,7 +95,12 @@ pub fn discover_plugin_names(plugin_dir: &Path) -> Vec<String> {
 /// with a built-in, a checksum that fails to verify against the recorded
 /// digest, a `name()` export that disagrees with the stem, or any
 /// instantiation error is logged and skipped — never fatal.
-pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, needed: &[String]) {
+pub fn register_plugins(
+    reg: &mut Registry,
+    cfg: &Config,
+    plugin_dir: &Path,
+    needed: &[WidgetName],
+) {
     let root = state_root();
     // One resolved path, reused per plugin below: each instance gets its own
     // `FileDenialObserver` (cheap — just a `PathBuf` clone) writing to the
@@ -227,9 +232,15 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
                 continue;
             }
         }
-        if stem.len() > RANGE_NAME_MAX_BYTES {
-            rustline_core::diag::warn_once(&format!("plugin-skip:long-name:{stem}"), || {
-                tracing::warn!(plugin = %stem, "plugin name > 15 bytes; not click-toggleable");
+        // Permissive (invariant N2): a stem that fails to parse as a
+        // `RangeName` (too long, a `[A-Za-z0-9_-]` violation, or the reserved
+        // `window`) still registers below — it just never becomes clickable,
+        // since `WasmWidget::range_name` (via `host::plugin_range_name`)
+        // refuses to produce a `RangeName` for it either. Same rule, checked
+        // once.
+        if let Err(err) = RangeName::parse(stem) {
+            rustline_core::diag::warn_once(&format!("plugin-skip:unclickable:{stem}"), || {
+                tracing::warn!(plugin = %stem, %err, "not click-toggleable: {err}");
             });
         }
         let widget = host::WasmWidget::new(plugin, options, stem);
@@ -287,7 +298,7 @@ pub fn instantiate_named(
 mod tests {
     use std::sync::Arc;
 
-    use rustline_core::{Config, PluginConfig, Registry};
+    use rustline_core::{Config, PluginConfig, Registry, WidgetName};
 
     use super::{
         AbiDecision, DenialObserver, abi_decision, discover_plugin_names, instantiate_named,
@@ -421,7 +432,7 @@ mod tests {
     fn cfg_with_stub_checksum(checksum: Option<String>) -> Config {
         let mut cfg = Config::default();
         cfg.plugins.insert(
-            "stub".to_string(),
+            "stub".into(),
             PluginConfig {
                 checksum,
                 ..Default::default()
@@ -450,7 +461,7 @@ mod tests {
 
         let mut reg = Registry::new();
         let events = capture(|| {
-            register_plugins(&mut reg, &cfg, dir.path(), &["stub".to_string()]);
+            register_plugins(&mut reg, &cfg, dir.path(), &[WidgetName::from("stub")]);
         });
 
         assert!(
@@ -485,7 +496,7 @@ mod tests {
 
         let mut reg = Registry::new();
         let events = capture(|| {
-            register_plugins(&mut reg, &cfg, dir.path(), &["stub".to_string()]);
+            register_plugins(&mut reg, &cfg, dir.path(), &[WidgetName::from("stub")]);
         });
 
         assert!(

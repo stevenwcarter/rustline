@@ -1,11 +1,11 @@
-use crate::{Battery, BatteryState, Context, Segment, Widget};
+use crate::{Battery, BatteryState, Context, RangeName, Segment, Widget, WidgetName};
 
 /// Renders battery percentage, charge state, and a level-bucketed,
 /// charging-aware Nerd-Font icon. Pure — reads only `Context::battery`.
 pub struct BatteryWidget {
     /// Registry/layout name; the toggle key threaded through render + click,
     /// and this instance's range name (invariant #7).
-    pub name: String,
+    pub name: WidgetName,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
@@ -88,7 +88,7 @@ impl Widget for BatteryWidget {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn battery_toggled_uses_alt_format() {
         let mut c = ctx(bat(73, BatteryState::Discharging));
-        c.toggled.insert("battery".to_string());
+        c.toggled.insert(WidgetName::from("battery"));
         let out = BatteryWidget {
             name: "battery".into(),
             format: "{percent}%".into(),
@@ -308,7 +308,7 @@ mod tests {
                 icon: None,
             }
             .range_name(),
-            Some("battery")
+            Some(RangeName::parse("battery").unwrap())
         );
     }
 

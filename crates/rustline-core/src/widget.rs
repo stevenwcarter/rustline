@@ -1,4 +1,5 @@
-use crate::{Context, Segment};
+use crate::config::WidgetKind;
+use crate::{Context, RangeName, Segment, WidgetName};
 use std::collections::HashMap;
 
 /// Something that can render itself into one or more [`Segment`]s given the
@@ -8,10 +9,14 @@ pub trait Widget {
 
     /// The clickable status-line range name for this widget, if it opts into
     /// click-to-toggle. Default `None` (not clickable). A widget returns
-    /// `Some(name)` only when it has an alternate view and `name` fits tmux's
-    /// 15-byte `range=user|X` limit; the assemble layer wraps its cells in
-    /// `#[range=user|<name>]…#[norange]` when so.
-    fn range_name(&self) -> Option<&str> {
+    /// `Some(name)` only when it has an alternate view and `name` parses as a
+    /// [`RangeName`] (invariant #7's rule, enforced once at that type's
+    /// constructor); the assemble layer wraps its cells in
+    /// `#[range=user|<name>]…#[norange]` when so. Owned rather than borrowed:
+    /// a per-render allocation of at most [`crate::RANGE_NAME_MAX_BYTES`]
+    /// bytes for a clickable widget is negligible, and it avoids threading a
+    /// cached `RangeName` field through every widget struct.
+    fn range_name(&self) -> Option<RangeName> {
         None
     }
 }
@@ -28,7 +33,7 @@ pub enum WidgetSource {
     /// Discovered as a `.wasm` plugin.
     Plugin,
     /// A named `[instances.<name>]` entry of the given built-in `kind` (W46).
-    Instance { kind: String },
+    Instance { kind: WidgetKind },
     /// Placed in `[layout]` but not a registered built-in, instance, or
     /// discovered plugin — e.g. a plugin whose `.wasm` is no longer present,
     /// or a name left over from `plugin remove`/`--plugin-dir` pointing
@@ -63,7 +68,7 @@ pub struct WidgetDescriptor {
 /// without building an instance.
 #[derive(Default)]
 pub struct Registry {
-    factories: HashMap<String, Factory>,
+    factories: HashMap<WidgetName, Factory>,
     descriptors: Vec<WidgetDescriptor>,
 }
 
@@ -101,7 +106,8 @@ impl Registry {
         desc: WidgetDescriptor,
         factory: Box<dyn Fn() -> Box<dyn Widget> + Send + Sync>,
     ) {
-        self.factories.insert(desc.name.clone(), factory);
+        self.factories
+            .insert(WidgetName::from(desc.name.as_str()), factory);
         self.descriptors.retain(|d| d.name != desc.name);
         self.descriptors.push(desc);
     }
@@ -135,11 +141,11 @@ impl Registry {
     /// widget means a caller (e.g. `render_named_region`) never needs a
     /// second `names`-filtering pass just to recover which widget came from
     /// which name.
-    pub fn resolve(&self, names: &[String]) -> Vec<(String, Box<dyn Widget>)> {
+    pub fn resolve(&self, names: &[WidgetName]) -> Vec<(WidgetName, Box<dyn Widget>)> {
         names
             .iter()
             .filter_map(|name| {
-                let widget = self.build(name);
+                let widget = self.build(name.as_str());
                 if widget.is_none() {
                     crate::diag::warn_once(&format!("unknown-widget:{name}"), || {
                         tracing::warn!(widget = %name, "unknown widget, skipping");

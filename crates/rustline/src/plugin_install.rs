@@ -16,12 +16,12 @@ use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{Context as _, anyhow, bail};
-use rustline_core::{Config, PluginSource};
+use rustline_core::{Config, NameError, PluginSource, RANGE_NAME_MAX_BYTES, RangeName};
 use serde_json::Value;
 use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::cli::{InstallArgs, RemoveArgs, UpdateArgs};
-use crate::plugin_cmd::{MAX_PLUGIN_NAME_BYTES, RESERVED_PLUGIN_NAME};
+use crate::plugin_cmd::RESERVED_PLUGIN_NAME;
 
 /// Re-exported so `plugin_install::sha256_hex` keeps resolving for existing
 /// callers and tests. The definition lives in `rustline-wasm` beside the
@@ -131,22 +131,22 @@ fn release_api_url(owner: &str, repo: &str, tag: Option<&str>) -> String {
 /// isn't click-toggleable (`register_plugins` warns and registers it anyway),
 /// so `install` warns rather than refusing. Returns `Ok(clickable)` where
 /// `clickable` is whether the name fits the range cap.
+///
+/// Rebuilt on [`RangeName::parse`] (T1): every [`NameError`] variant maps to
+/// this command's own pre-existing message text, except `TooLong`, which
+/// warn-don't-refuses exactly as before (`Ok(false)` rather than `Err`).
 fn validate_install_name(name: &str) -> Result<bool, String> {
-    if name.is_empty() {
-        return Err("plugin name must not be empty".to_string());
-    }
-    if name == RESERVED_PLUGIN_NAME {
-        return Err(format!("plugin name {RESERVED_PLUGIN_NAME:?} is reserved"));
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err(format!(
+    match RangeName::parse(name) {
+        Ok(_) => Ok(true),
+        Err(NameError::TooLong { .. }) => Ok(false),
+        Err(NameError::Empty) => Err("plugin name must not be empty".to_string()),
+        Err(NameError::BadChar { .. }) => Err(format!(
             "plugin name {name:?} may only contain letters, digits, `_`, and `-`"
-        ));
+        )),
+        Err(NameError::Reserved) => {
+            Err(format!("plugin name {RESERVED_PLUGIN_NAME:?} is reserved"))
+        }
     }
-    Ok(name.len() <= MAX_PLUGIN_NAME_BYTES)
 }
 
 /// Resolve a release, download its `.wasm`, install it into `plugin_dir`, and
@@ -173,7 +173,7 @@ fn do_install<D: Downloader>(
         validate_install_name(&name).map_err(|e| anyhow!("invalid plugin name: {e}"))?;
     if !clickable {
         tracing::warn!(
-            "plugin name {name:?} is {} bytes (> {MAX_PLUGIN_NAME_BYTES}); it will install \
+            "plugin name {name:?} is {} bytes (> {RANGE_NAME_MAX_BYTES}); it will install \
              but won't be click-toggleable — pass --name to shorten it",
             name.len()
         );
@@ -522,6 +522,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_install_name_never_masks_a_charset_violation_with_too_long() {
+        // Regression (check-order fix): `RangeName::parse` used to check
+        // length before charset, so a name that was BOTH too long AND
+        // charset-invalid (e.g. a path-traversal-ish `--name` value) hit
+        // `TooLong` first, and this function's warn-don't-refuse mapping
+        // (`Ok(false)`) let it straight through — `do_install` would then
+        // join it into `plugin_dir.join(format!("{name}.wasm"))` and write
+        // it as a raw `[plugins.<name>]` key. Must be a hard `Err`, not
+        // `Ok(false)`.
+        let name = "../../../tmp/evil";
+        assert!(name.len() > RANGE_NAME_MAX_BYTES);
+        assert!(validate_install_name(name).is_err());
+    }
+
+    #[test]
     fn install_writes_source_tag_checksum() {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path().join("plugins");
@@ -792,6 +807,8 @@ mod tests {
     #[cfg(feature = "wasm-e2e")]
     #[test]
     fn real_weather_wasm_installed_with_a_matching_checksum_still_registers() {
+        use rustline_core::WidgetName;
+
         let wasm_src = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../plugins/weather/target/wasm32-unknown-unknown/release/weather.wasm"
@@ -816,7 +833,12 @@ mod tests {
 
         let cfg = Config::load(&config_path);
         let mut reg = rustline_core::Registry::new();
-        rustline_wasm::register_plugins(&mut reg, &cfg, &plugin_dir, &["weather".to_string()]);
+        rustline_wasm::register_plugins(
+            &mut reg,
+            &cfg,
+            &plugin_dir,
+            &[WidgetName::from("weather")],
+        );
         assert!(
             reg.contains("weather"),
             "a plugin whose install-recorded digest matches its on-disk bytes must register"

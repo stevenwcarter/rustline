@@ -9,37 +9,392 @@
 use crate::abi::{
     CachedExecResult, CachedHttpResult, ExecResult, HttpResult, ReadResult, WriteResult,
 };
-use crate::argv::canonical_argv;
+use crate::allow::{CapKind, CommandCap, ReadPathCap, Url, UrlCap, WritePathCap};
+use crate::argv::{CanonicalArgv, canonical_argv};
 use crate::cache::{
     CacheEntry, EXEC_NAMESPACE, HTTP_NAMESPACE, age_secs, cache_path, is_fresh, read_entry,
     write_entry,
 };
-use crate::capability::{CapabilityCtx, DenialKind};
+use crate::capability::CapabilityCtx;
 use crate::fetch::Fetcher;
 use crate::run::{MAX_OUTPUT_BYTES, Runner};
-use crate::state::{PathResolveError, check_cap, resolve_for_allowlist, sanitize_relpath};
+use crate::state::{
+    PathResolveError, SandboxRelPath, check_cap, resolve_for_allowlist, sanitize_relpath,
+};
+
+// ==== Outcome enums ====
+//
+// Each `pub fn perform_*` below delegates to a private `*_outcome` fn that
+// runs the exact same gate-first control flow and side effects (denial
+// observation, cache reads/writes, state-size invalidation, tracing) as
+// before, but returns one of these enums instead of building the wire
+// struct's flag combination inline. A single `From` impl per enum is then the
+// **one** place that ok/status/error/stale/etc. get assembled for a given
+// wire type — so two call sites can no longer drift into two different flag
+// combinations for what should be the same outcome. Each `From` arm is a
+// transcription of the return literal it replaces, not a redesign: the wire
+// structs (`HttpResult` & co.) are unmodified, and the `wire_pins` tests pin
+// every arm's exact JSON, before and after this refactor.
+
+enum HttpOutcome {
+    Denied { url: String },
+    Completed { status: u16, body: String },
+    TransportFailed { error: String },
+}
+
+impl From<HttpOutcome> for HttpResult {
+    fn from(o: HttpOutcome) -> HttpResult {
+        match o {
+            HttpOutcome::Denied { url } => HttpResult {
+                ok: false,
+                error: format!("url not allowed: {url}"),
+                ..Default::default()
+            },
+            HttpOutcome::Completed { status, body } => HttpResult {
+                ok: true,
+                status,
+                body,
+                error: String::new(),
+            },
+            HttpOutcome::TransportFailed { error } => HttpResult {
+                ok: false,
+                error,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+enum CachedHttpOutcome {
+    Denied {
+        url: String,
+    },
+    Fresh {
+        status: u16,
+        body: String,
+        age_secs: i64,
+    },
+    Backoff {
+        status: u16,
+        body: String,
+        age_secs: i64,
+    },
+    Refreshed {
+        status: u16,
+        body: String,
+    },
+    ServedStale {
+        status: u16,
+        body: String,
+        age_secs: i64,
+        error: String,
+    },
+    NoUsableAnswer {
+        error: String,
+    },
+}
+
+impl From<CachedHttpOutcome> for CachedHttpResult {
+    fn from(o: CachedHttpOutcome) -> CachedHttpResult {
+        match o {
+            CachedHttpOutcome::Denied { url } => CachedHttpResult {
+                ok: false,
+                error: format!("url not allowed: {url}"),
+                ..Default::default()
+            },
+            CachedHttpOutcome::Fresh {
+                status,
+                body,
+                age_secs,
+            } => CachedHttpResult {
+                ok: true,
+                status,
+                body,
+                error: String::new(),
+                stale: false,
+                age_secs,
+            },
+            CachedHttpOutcome::Backoff {
+                status,
+                body,
+                age_secs,
+            } => CachedHttpResult {
+                ok: true,
+                status,
+                body,
+                error: "refresh backoff; serving cached".to_string(),
+                stale: true,
+                age_secs,
+            },
+            CachedHttpOutcome::Refreshed { status, body } => CachedHttpResult {
+                ok: true,
+                status,
+                body,
+                error: String::new(),
+                stale: false,
+                age_secs: 0,
+            },
+            CachedHttpOutcome::ServedStale {
+                status,
+                body,
+                age_secs,
+                error,
+            } => CachedHttpResult {
+                ok: true,
+                status,
+                body,
+                error,
+                stale: true,
+                age_secs,
+            },
+            CachedHttpOutcome::NoUsableAnswer { error } => CachedHttpResult {
+                ok: false,
+                error,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+enum ExecOutcome {
+    Denied {
+        candidate: CanonicalArgv,
+    },
+    Ran {
+        status: i32,
+        stdout: String,
+        stderr: String,
+        truncated: bool,
+    },
+    CouldNotRun {
+        error: String,
+    },
+}
+
+impl From<ExecOutcome> for ExecResult {
+    fn from(o: ExecOutcome) -> ExecResult {
+        match o {
+            ExecOutcome::Denied { candidate } => ExecResult {
+                ok: false,
+                status: -1,
+                error: format!("command not allowed: {candidate}"),
+                ..Default::default()
+            },
+            ExecOutcome::Ran {
+                status,
+                stdout,
+                stderr,
+                truncated,
+            } => ExecResult {
+                ok: true,
+                status,
+                truncated,
+                stdout,
+                stderr,
+                error: String::new(),
+            },
+            ExecOutcome::CouldNotRun { error } => ExecResult {
+                ok: false,
+                status: -1,
+                error,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+/// `Fresh`/`Backoff`/`ServedStale` carry no `stderr`/`truncated` fields
+/// because a served-from-cache entry never has either — `CacheEntry`
+/// persists only `fetched_at`/`status`/`body`. Their `From` arms hardcode
+/// `stderr: String::new()`/`truncated: false` accordingly, matching
+/// [`perform_exec_cached`]'s doc comment on this round-trip limitation. Only
+/// `Ran` (a run that just happened, not served from cache) carries a real
+/// `stderr`/`truncated`.
+enum CachedExecOutcome {
+    Denied {
+        candidate: CanonicalArgv,
+    },
+    Fresh {
+        status: i32,
+        stdout: String,
+        age_secs: i64,
+    },
+    Backoff {
+        status: i32,
+        stdout: String,
+        age_secs: i64,
+    },
+    Ran {
+        status: i32,
+        stdout: String,
+        stderr: String,
+        truncated: bool,
+    },
+    ServedStale {
+        status: i32,
+        stdout: String,
+        age_secs: i64,
+        error: String,
+    },
+    NoUsableAnswer {
+        error: String,
+    },
+}
+
+impl From<CachedExecOutcome> for CachedExecResult {
+    fn from(o: CachedExecOutcome) -> CachedExecResult {
+        match o {
+            CachedExecOutcome::Denied { candidate } => CachedExecResult {
+                ok: false,
+                status: -1,
+                error: format!("command not allowed: {candidate}"),
+                ..Default::default()
+            },
+            CachedExecOutcome::Fresh {
+                status,
+                stdout,
+                age_secs,
+            } => CachedExecResult {
+                ok: true,
+                status,
+                stdout,
+                stderr: String::new(),
+                error: String::new(),
+                stale: false,
+                age_secs,
+                truncated: false,
+            },
+            CachedExecOutcome::Backoff {
+                status,
+                stdout,
+                age_secs,
+            } => CachedExecResult {
+                ok: true,
+                status,
+                stdout,
+                stderr: String::new(),
+                error: "refresh backoff; serving cached".to_string(),
+                stale: true,
+                age_secs,
+                truncated: false,
+            },
+            CachedExecOutcome::Ran {
+                status,
+                stdout,
+                stderr,
+                truncated,
+            } => CachedExecResult {
+                ok: true,
+                status,
+                truncated,
+                stdout,
+                stderr,
+                error: String::new(),
+                stale: false,
+                age_secs: 0,
+            },
+            CachedExecOutcome::ServedStale {
+                status,
+                stdout,
+                age_secs,
+                error,
+            } => CachedExecResult {
+                ok: true,
+                status,
+                stdout,
+                stderr: String::new(),
+                error,
+                stale: true,
+                age_secs,
+                truncated: false,
+            },
+            CachedExecOutcome::NoUsableAnswer { error } => CachedExecResult {
+                ok: false,
+                error,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+/// Shared by both `perform_state_read` and `perform_file_read` — both
+/// decode to the same [`ReadResult`] wire type. `Denied` is only ever
+/// produced by the file-read allowlist-miss path (state reads have no
+/// allowlist); a `bad-relpath`/resolve-error/real-I/O failure all collapse
+/// onto `Failed`, since they share the same `ok:false,error` wire shape.
+enum ReadOutcome {
+    Denied { path: String },
+    Found { contents: String },
+    Absent,
+    Failed { error: String },
+}
+
+impl From<ReadOutcome> for ReadResult {
+    fn from(o: ReadOutcome) -> ReadResult {
+        match o {
+            ReadOutcome::Denied { path } => ReadResult {
+                ok: false,
+                error: format!("path not allowed: {path}"),
+                ..Default::default()
+            },
+            ReadOutcome::Found { contents } => ReadResult {
+                ok: true,
+                exists: true,
+                contents,
+                error: String::new(),
+            },
+            ReadOutcome::Absent => ReadResult {
+                ok: true,
+                exists: false,
+                ..Default::default()
+            },
+            ReadOutcome::Failed { error } => ReadResult {
+                ok: false,
+                error,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+/// Shared by both `perform_state_write` and `perform_file_write` — see
+/// [`ReadOutcome`]'s doc for why `Denied` is file-write-only.
+enum WriteOutcome {
+    Denied { path: String },
+    Written,
+    Failed { error: String },
+}
+
+impl From<WriteOutcome> for WriteResult {
+    fn from(o: WriteOutcome) -> WriteResult {
+        match o {
+            WriteOutcome::Denied { path } => WriteResult {
+                ok: false,
+                error: format!("path not allowed: {path}"),
+            },
+            WriteOutcome::Written => WriteResult {
+                ok: true,
+                error: String::new(),
+            },
+            WriteOutcome::Failed { error } => WriteResult { ok: false, error },
+        }
+    }
+}
 
 pub fn perform_http_get(ctx: &CapabilityCtx, url: &str, fetcher: &dyn Fetcher) -> HttpResult {
-    if !ctx.allowed_urls.allows(url) {
-        ctx.observe_denial(DenialKind::Url, url);
-        return HttpResult {
-            ok: false,
-            error: format!("url not allowed: {url}"),
-            ..Default::default()
+    http_get_outcome(ctx, url, fetcher).into()
+}
+
+fn http_get_outcome(ctx: &CapabilityCtx, url: &str, fetcher: &dyn Fetcher) -> HttpOutcome {
+    if !ctx.allowed_urls.allows(&Url::new(url)) {
+        ctx.observe_denial(UrlCap::DENIAL, url);
+        return HttpOutcome::Denied {
+            url: url.to_string(),
         };
     }
     match fetcher.get(url) {
-        Ok((status, body)) => HttpResult {
-            ok: true,
-            status,
-            body,
-            error: String::new(),
-        },
-        Err(error) => HttpResult {
-            ok: false,
-            error,
-            ..Default::default()
-        },
+        Ok((status, body)) => HttpOutcome::Completed { status, body },
+        Err(error) => HttpOutcome::TransportFailed { error },
     }
 }
 
@@ -53,14 +408,22 @@ pub fn perform_http_get_cached(
     now: &str,
     fetcher: &dyn Fetcher,
 ) -> CachedHttpResult {
+    http_get_cached_outcome(ctx, url, ttl_secs, now, fetcher).into()
+}
+
+fn http_get_cached_outcome(
+    ctx: &CapabilityCtx,
+    url: &str,
+    ttl_secs: i64,
+    now: &str,
+    fetcher: &dyn Fetcher,
+) -> CachedHttpOutcome {
     // 1) gate first (invariant N1): a denied url makes no network call and
     //    touches no cache file.
-    if !ctx.allowed_urls.allows(url) {
-        ctx.observe_denial(DenialKind::Url, url);
-        return CachedHttpResult {
-            ok: false,
-            error: format!("url not allowed: {url}"),
-            ..Default::default()
+    if !ctx.allowed_urls.allows(&Url::new(url)) {
+        ctx.observe_denial(UrlCap::DENIAL, url);
+        return CachedHttpOutcome::Denied {
+            url: url.to_string(),
         };
     }
 
@@ -73,12 +436,9 @@ pub fn perform_http_get_cached(
         && let Some(age) = age_secs(now, &e.fetched_at)
         && is_fresh(age, ttl_secs)
     {
-        return CachedHttpResult {
-            ok: true,
+        return CachedHttpOutcome::Fresh {
             status: e.status,
             body: e.body.clone(),
-            error: String::new(),
-            stale: false,
             age_secs: age,
         };
     }
@@ -91,12 +451,9 @@ pub fn perform_http_get_cached(
         && let Some(since_attempt) = age_secs(now, &e.last_attempt_at)
         && is_fresh(since_attempt, ttl_secs)
     {
-        return CachedHttpResult {
-            ok: true,
+        return CachedHttpOutcome::Backoff {
             status: e.status,
             body: e.body.clone(),
-            error: "refresh backoff; serving cached".to_string(),
-            stale: true,
             age_secs: age_secs(now, &e.fetched_at).unwrap_or(0),
         };
     }
@@ -122,14 +479,7 @@ pub fn perform_http_get_cached(
                     );
                 }
             }
-            CachedHttpResult {
-                ok: true,
-                status,
-                body,
-                error: String::new(),
-                stale: false,
-                age_secs: 0,
-            }
+            CachedHttpOutcome::Refreshed { status, body }
         }
         // non-2xx or transport error → refresh failed.
         other => {
@@ -160,23 +510,17 @@ pub fn perform_http_get_cached(
                             tracing::warn!(error = %write_error, "negative-cache write failed");
                         }
                     }
-                    CachedHttpResult {
-                        ok: true,
+                    CachedHttpOutcome::ServedStale {
                         status: e.status,
                         body: e.body,
-                        error,
-                        stale: true,
                         age_secs: age,
+                        error,
                     }
                 }
                 // Nothing to negative-cache against, and writing a body-less
                 // entry would corrupt the stale-serve path — behaviour here
                 // is unchanged.
-                None => CachedHttpResult {
-                    ok: false,
-                    error,
-                    ..Default::default()
-                },
+                None => CachedHttpOutcome::NoUsableAnswer { error },
             }
         }
     }
@@ -197,31 +541,28 @@ pub fn perform_exec(
     args: &[String],
     runner: &dyn Runner,
 ) -> ExecResult {
+    exec_outcome(ctx, program, args, runner).into()
+}
+
+fn exec_outcome(
+    ctx: &CapabilityCtx,
+    program: &str,
+    args: &[String],
+    runner: &dyn Runner,
+) -> ExecOutcome {
     let candidate = canonical_argv(program, args);
     if !ctx.allowed_commands.allows(&candidate) {
-        ctx.observe_denial(DenialKind::Command, &candidate);
-        return ExecResult {
-            ok: false,
-            status: -1,
-            error: format!("command not allowed: {candidate}"),
-            ..Default::default()
-        };
+        ctx.observe_denial(CommandCap::DENIAL, candidate.as_str());
+        return ExecOutcome::Denied { candidate };
     }
     match runner.run(program, args) {
-        Ok((status, stdout, stderr)) => ExecResult {
-            ok: true,
+        Ok((status, stdout, stderr)) => ExecOutcome::Ran {
             status,
             truncated: is_truncated(&stdout, &stderr),
             stdout,
             stderr,
-            error: String::new(),
         },
-        Err(error) => ExecResult {
-            ok: false,
-            status: -1,
-            error,
-            ..Default::default()
-        },
+        Err(error) => ExecOutcome::CouldNotRun { error },
     }
 }
 
@@ -252,39 +593,39 @@ pub fn perform_exec_cached(
     now: &str,
     runner: &dyn Runner,
 ) -> CachedExecResult {
+    exec_cached_outcome(ctx, program, args, ttl_secs, now, runner).into()
+}
+
+fn exec_cached_outcome(
+    ctx: &CapabilityCtx,
+    program: &str,
+    args: &[String],
+    ttl_secs: i64,
+    now: &str,
+    runner: &dyn Runner,
+) -> CachedExecOutcome {
     let candidate = canonical_argv(program, args);
     if !ctx.allowed_commands.allows(&candidate) {
-        ctx.observe_denial(DenialKind::Command, &candidate);
-        return CachedExecResult {
-            ok: false,
-            status: -1,
-            error: format!("command not allowed: {candidate}"),
-            ..Default::default()
-        };
+        ctx.observe_denial(CommandCap::DENIAL, candidate.as_str());
+        return CachedExecOutcome::Denied { candidate };
     }
 
     let dir = ctx.state_dir();
-    let path = cache_path(&dir, EXEC_NAMESPACE, &candidate);
+    let path = cache_path(&dir, EXEC_NAMESPACE, candidate.as_str());
     let entry = read_entry(&path);
 
     if let Some(e) = &entry
         && let Some(age) = age_secs(now, &e.fetched_at)
         && is_fresh(age, ttl_secs)
     {
-        return CachedExecResult {
-            ok: true,
+        return CachedExecOutcome::Fresh {
             status: i32::from(e.status),
-            stdout: e.body.clone(),
             // `CacheEntry` doesn't persist stderr (only the successful
             // stdout body is worth caching); a served entry always reports
-            // it empty, fresh or stale.
-            stderr: String::new(),
-            error: String::new(),
-            stale: false,
+            // it empty, fresh or stale — see `CachedExecOutcome::from`'s
+            // `Fresh`/`Backoff` arms.
+            stdout: e.body.clone(),
             age_secs: age,
-            // Round-trip limitation: `CacheEntry` doesn't persist whether the
-            // original run was truncated — see this function's doc comment.
-            truncated: false,
         };
     }
 
@@ -296,15 +637,10 @@ pub fn perform_exec_cached(
         && let Some(since_attempt) = age_secs(now, &e.last_attempt_at)
         && is_fresh(since_attempt, ttl_secs)
     {
-        return CachedExecResult {
-            ok: true,
+        return CachedExecOutcome::Backoff {
             status: i32::from(e.status),
             stdout: e.body.clone(),
-            stderr: String::new(),
-            error: "refresh backoff; serving cached".to_string(),
-            stale: true,
             age_secs: age_secs(now, &e.fetched_at).unwrap_or(0),
-            truncated: false,
         };
     }
 
@@ -328,29 +664,21 @@ pub fn perform_exec_cached(
                     );
                 }
             }
-            CachedExecResult {
-                ok: true,
+            CachedExecOutcome::Ran {
                 status: 0,
                 truncated: is_truncated(&stdout, &stderr),
                 stdout,
                 stderr,
-                error: String::new(),
-                stale: false,
-                age_secs: 0,
             }
         }
         // Ran, but a non-zero exit is data, not an error: return it as-is
         // without caching it (only a successful run is worth serving stale
         // later).
-        Ok((status, stdout, stderr)) => CachedExecResult {
-            ok: true,
+        Ok((status, stdout, stderr)) => CachedExecOutcome::Ran {
             status,
             truncated: is_truncated(&stdout, &stderr),
             stdout,
             stderr,
-            error: String::new(),
-            stale: false,
-            age_secs: 0,
         },
         // Couldn't run at all (denied is already handled above; this is a
         // spawn failure or timeout): serve the last-good entry stale if one
@@ -376,26 +704,17 @@ pub fn perform_exec_cached(
                         tracing::warn!(error = %write_error, "negative-cache write failed");
                     }
                 }
-                CachedExecResult {
-                    ok: true,
+                CachedExecOutcome::ServedStale {
                     status: i32::from(e.status),
                     stdout: e.body,
-                    stderr: String::new(),
-                    error,
-                    stale: true,
                     age_secs: age,
-                    // Round-trip limitation: see this function's doc comment.
-                    truncated: false,
+                    error,
                 }
             }
             // Nothing to negative-cache against, and writing a body-less
             // entry would corrupt the stale-serve path — behaviour here is
             // unchanged.
-            None => CachedExecResult {
-                ok: false,
-                error,
-                ..Default::default()
-            },
+            None => CachedExecOutcome::NoUsableAnswer { error },
         },
     }
 }
@@ -409,44 +728,35 @@ fn is_truncated(stdout: &str, stderr: &str) -> bool {
 }
 
 pub fn perform_state_read(ctx: &CapabilityCtx, relpath: &str) -> ReadResult {
-    let rel = match sanitize_relpath(relpath) {
+    state_read_outcome(ctx, relpath).into()
+}
+
+fn state_read_outcome(ctx: &CapabilityCtx, relpath: &str) -> ReadOutcome {
+    let rel: SandboxRelPath = match sanitize_relpath(relpath) {
         Ok(r) => r,
-        Err(error) => {
-            return ReadResult {
-                ok: false,
-                error,
-                ..Default::default()
-            };
-        }
+        Err(error) => return ReadOutcome::Failed { error },
     };
-    let full = ctx.state_dir().join(rel);
+    let full = ctx.state_dir().join(&rel);
     match std::fs::read_to_string(&full) {
-        Ok(contents) => ReadResult {
-            ok: true,
-            exists: true,
-            contents,
-            error: String::new(),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ReadResult {
-            ok: true,
-            exists: false,
-            ..Default::default()
-        },
-        Err(e) => ReadResult {
-            ok: false,
+        Ok(contents) => ReadOutcome::Found { contents },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ReadOutcome::Absent,
+        Err(e) => ReadOutcome::Failed {
             error: e.to_string(),
-            ..Default::default()
         },
     }
 }
 
 pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -> WriteResult {
-    let rel = match sanitize_relpath(relpath) {
+    state_write_outcome(ctx, relpath, contents).into()
+}
+
+fn state_write_outcome(ctx: &CapabilityCtx, relpath: &str, contents: &str) -> WriteOutcome {
+    let rel: SandboxRelPath = match sanitize_relpath(relpath) {
         Ok(r) => r,
-        Err(error) => return WriteResult { ok: false, error },
+        Err(error) => return WriteOutcome::Failed { error },
     };
     let dir = ctx.state_dir();
-    let full = dir.join(rel);
+    let full = dir.join(&rel);
     let new_len = contents.len() as u64;
     if check_cap(ctx.state_size(), &full, new_len, ctx.max_state_bytes).is_err() {
         // The refusal may be the memo's own fault: it can go stale-high
@@ -461,7 +771,7 @@ pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -
         // looser (invariant N3).
         ctx.invalidate_state_size();
         if let Err(error) = check_cap(ctx.state_size(), &full, new_len, ctx.max_state_bytes) {
-            return WriteResult { ok: false, error };
+            return WriteOutcome::Failed { error };
         }
     }
     // Captured once now that the check above has passed: nothing between
@@ -471,8 +781,7 @@ pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -
     if let Some(parent) = full.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
-        return WriteResult {
-            ok: false,
+        return WriteOutcome::Failed {
             error: e.to_string(),
         };
     }
@@ -487,10 +796,7 @@ pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -
                     .saturating_sub(replaced)
                     .saturating_add(new_len),
             );
-            WriteResult {
-                ok: true,
-                error: String::new(),
-            }
+            WriteOutcome::Written
         }
         Err(e) => {
             // A failed write should leave the memo untouched in the common
@@ -499,8 +805,7 @@ pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -
             // detail. Invalidating costs one extra walk on the next write and
             // is always correct — when in doubt, invalidate (invariant N3).
             ctx.invalidate_state_size();
-            WriteResult {
-                ok: false,
+            WriteOutcome::Failed {
                 error: e.to_string(),
             }
         }
@@ -524,43 +829,35 @@ pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -
 /// traversal) do not: they reject the same input for every plugin regardless
 /// of config, so there is no policy decision to log.
 pub fn perform_file_read(ctx: &CapabilityCtx, path: &str) -> ReadResult {
-    let norm = match resolve_for_allowlist(path, ctx.resolve_symlinks) {
+    file_read_outcome(ctx, path).into()
+}
+
+fn file_read_outcome(ctx: &CapabilityCtx, path: &str) -> ReadOutcome {
+    let resolved = match resolve_for_allowlist(path, ctx.resolve_symlinks) {
         Ok(p) => p,
         Err(error) => {
             if let PathResolveError::SymlinkDenied(target) = &error {
-                ctx.observe_denial(DenialKind::Path, target);
+                ctx.observe_denial(ReadPathCap::DENIAL, target);
             }
-            return ReadResult {
-                ok: false,
+            return ReadOutcome::Failed {
                 error: error.to_string(),
-                ..Default::default()
             };
         }
     };
-    if !ctx.allowed_paths.allows(&norm) {
-        ctx.observe_denial(DenialKind::Path, &norm);
-        return ReadResult {
-            ok: false,
-            error: format!("path not allowed: {norm}"),
-            ..Default::default()
-        };
-    }
-    match std::fs::read_to_string(&norm) {
-        Ok(contents) => ReadResult {
-            ok: true,
-            exists: true,
-            contents,
-            error: String::new(),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ReadResult {
-            ok: true,
-            exists: false,
-            ..Default::default()
-        },
-        Err(e) => ReadResult {
-            ok: false,
+    let allowed = match ctx.allowed_paths.check_path(resolved) {
+        Ok(allowed) => allowed,
+        Err(denied) => {
+            ctx.observe_denial(ReadPathCap::DENIAL, denied.as_str());
+            return ReadOutcome::Denied {
+                path: denied.as_str().to_string(),
+            };
+        }
+    };
+    match std::fs::read_to_string(&allowed) {
+        Ok(contents) => ReadOutcome::Found { contents },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ReadOutcome::Absent,
+        Err(e) => ReadOutcome::Failed {
             error: e.to_string(),
-            ..Default::default()
         },
     }
 }
@@ -577,37 +874,38 @@ pub fn perform_file_read(ctx: &CapabilityCtx, path: &str) -> ReadResult {
 /// `perform_file_read`'s doc — the same ordering, and the same
 /// symlink-denial-must-observe reasoning, applies here.
 pub fn perform_file_write(ctx: &CapabilityCtx, path: &str, contents: &str) -> WriteResult {
-    let norm = match resolve_for_allowlist(path, ctx.resolve_symlinks) {
+    file_write_outcome(ctx, path, contents).into()
+}
+
+fn file_write_outcome(ctx: &CapabilityCtx, path: &str, contents: &str) -> WriteOutcome {
+    let resolved = match resolve_for_allowlist(path, ctx.resolve_symlinks) {
         Ok(p) => p,
         Err(error) => {
             if let PathResolveError::SymlinkDenied(target) = &error {
-                ctx.observe_denial(DenialKind::Path, target);
+                ctx.observe_denial(WritePathCap::DENIAL, target);
             }
-            return WriteResult {
-                ok: false,
+            return WriteOutcome::Failed {
                 error: error.to_string(),
             };
         }
     };
-    if !ctx.allowed_write_paths.allows(&norm) {
-        ctx.observe_denial(DenialKind::Path, &norm);
-        return WriteResult {
-            ok: false,
-            error: format!("path not allowed: {norm}"),
-        };
-    }
+    let allowed = match ctx.allowed_write_paths.check_path(resolved) {
+        Ok(allowed) => allowed,
+        Err(denied) => {
+            ctx.observe_denial(WritePathCap::DENIAL, denied.as_str());
+            return WriteOutcome::Denied {
+                path: denied.as_str().to_string(),
+            };
+        }
+    };
     // Deliberately not `write_atomic`: `path` is an arbitrary allowlisted
     // absolute path a plugin asked to write, not a temp/cache/state file this
     // module owns. Rename-replace would change the target's inode and
     // permissions and break existing hard links — not what a plugin writing
     // to a user-designated path should do.
-    match std::fs::write(&norm, contents.as_bytes()) {
-        Ok(()) => WriteResult {
-            ok: true,
-            error: String::new(),
-        },
-        Err(e) => WriteResult {
-            ok: false,
+    match std::fs::write(&allowed, contents.as_bytes()) {
+        Ok(()) => WriteOutcome::Written,
+        Err(e) => WriteOutcome::Failed {
             error: e.to_string(),
         },
     }
@@ -1743,6 +2041,471 @@ mod tests {
         let http = crate::cache::cache_path(dir.path(), HTTP_NAMESPACE, "same-key");
         let exec = crate::cache::cache_path(dir.path(), EXEC_NAMESPACE, "same-key");
         assert_ne!(http, exec);
+    }
+
+    /// Characterization tests pinning today's guest-visible wire JSON for
+    /// every `perform_*` outcome path, written BEFORE the [T4] typecheck
+    /// refactor that moves each function's flag-combination construction
+    /// behind a private outcome enum + `From` impl. These must keep passing,
+    /// byte-for-byte, straight through that refactor — that is what proves
+    /// the enums are a transcription of the existing literals, not a
+    /// redesign. Nested here (rather than a sibling module) so it can reuse
+    /// this module's fakes/ctx helpers via `super::*` without duplicating or
+    /// widening their visibility.
+    mod wire_pins {
+        use super::*;
+
+        // ---- http {denied, 2xx, transport-error} ----
+
+        #[test]
+        fn wire_pin_http_denied() {
+            let ctx = ctx_with(&[], std::env::temp_dir());
+            let r = perform_http_get(&ctx, "https://x.example/", &DeadFetcher);
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"status":0,"body":"","error":"url not allowed: https://x.example/"}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_http_ok() {
+            let ctx = ctx_with(&["https://wttr.in/*"], std::env::temp_dir());
+            let r = perform_http_get(&ctx, "https://wttr.in/48183", &FakeFetcher(200, "sunny"));
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"status":200,"body":"sunny","error":""}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_http_transport_error() {
+            let ctx = ctx_with(&["https://wttr.in/*"], std::env::temp_dir());
+            let r = perform_http_get(&ctx, "https://wttr.in/48183", &DeadFetcher);
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"status":0,"body":"","error":"connection refused"}"#
+            );
+        }
+
+        // ---- cached-http {denied, fresh-hit, refresh, served-stale, never-succeeded} ----
+
+        #[test]
+        fn wire_pin_cached_http_denied() {
+            let ctx = ctx_with(&[], std::env::temp_dir());
+            let r = perform_http_get_cached(
+                &ctx,
+                "https://x.example/",
+                1800,
+                "2026-07-20T12:00:00-04:00",
+                &DeadFetcher,
+            );
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"status":0,"body":"","error":"url not allowed: https://x.example/","stale":false,"age_secs":0}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_http_fresh_hit() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with_cap(&["https://wttr.in/*"], root.path().to_path_buf(), 1_000_000);
+            let url = "https://wttr.in/48183";
+            let f = CountingFetcher {
+                calls: std::sync::Arc::new(AtomicUsize::new(0)),
+                status: 200,
+                body: "sunny-72",
+            };
+            perform_http_get_cached(&ctx, url, 1800, "2026-07-20T12:00:00-04:00", &f);
+            let r2 = perform_http_get_cached(&ctx, url, 1800, "2026-07-20T12:10:00-04:00", &f);
+            assert_eq!(
+                serde_json::to_string(&r2).unwrap(),
+                r#"{"ok":true,"status":200,"body":"sunny-72","error":"","stale":false,"age_secs":600}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_http_refresh() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with_cap(&["https://wttr.in/*"], root.path().to_path_buf(), 1_000_000);
+            let url = "https://wttr.in/48183";
+            perform_http_get_cached(
+                &ctx,
+                url,
+                60,
+                "2026-07-20T12:00:00-04:00",
+                &FakeFetcher(200, "a"),
+            );
+            let r = perform_http_get_cached(
+                &ctx,
+                url,
+                60,
+                "2026-07-20T14:00:00-04:00",
+                &FakeFetcher(200, "b"),
+            );
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"status":200,"body":"b","error":"","stale":false,"age_secs":0}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_http_served_stale() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with_cap(&["https://wttr.in/*"], root.path().to_path_buf(), 1_000_000);
+            let url = "https://wttr.in/48183";
+            perform_http_get_cached(
+                &ctx,
+                url,
+                1800,
+                "2026-07-20T09:00:00-04:00",
+                &FakeFetcher(200, "good-55"),
+            );
+            let r =
+                perform_http_get_cached(&ctx, url, 1800, "2026-07-20T15:00:00-04:00", &DeadFetcher);
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"status":200,"body":"good-55","error":"connection refused","stale":true,"age_secs":21600}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_http_never_succeeded() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with_cap(&["https://x/*"], root.path().to_path_buf(), 1_000_000);
+            let down = ScriptedFetcher::err("connection refused");
+            let r = perform_http_get_cached(&ctx, "https://x/y", 60, "2026-07-26T12:00:00Z", &down);
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"status":0,"body":"","error":"connection refused","stale":false,"age_secs":0}"#
+            );
+        }
+
+        // ---- exec {denied, ran-zero, ran-nonzero, could-not-run} ----
+
+        #[test]
+        fn wire_pin_exec_denied() {
+            let (ctx, _o) = ctx_with_commands(&[]);
+            let runner = RecordingRunner::ok(0, "should not happen");
+            let out = perform_exec(&ctx, "playerctl", &argv(&["metadata"]), &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":false,"status":-1,"stdout":"","stderr":"","error":"command not allowed: playerctl metadata","truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_exec_ran_zero() {
+            let (ctx, _o) = ctx_with_commands(&["echo*"]);
+            let runner = RecordingRunner::ok(0, "hello\n");
+            let out = perform_exec(&ctx, "echo", &argv(&["hello"]), &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":0,"stdout":"hello\n","stderr":"","error":"","truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_exec_ran_nonzero() {
+            let (ctx, _o) = ctx_with_commands(&["false*"]);
+            let runner = RecordingRunner::ok(1, "");
+            let out = perform_exec(&ctx, "false", &[], &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":1,"stdout":"","stderr":"","error":"","truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_exec_could_not_run() {
+            let (ctx, _o) = ctx_with_commands(&["missing*"]);
+            let runner = RecordingRunner::failing("no such file");
+            let out = perform_exec(&ctx, "missing", &[], &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":false,"status":-1,"stdout":"","stderr":"","error":"no such file","truncated":false}"#
+            );
+        }
+
+        // ---- cached-exec {denied, fresh-hit, zero-exit-cached, nonzero-fresh, stale-fallback} ----
+
+        #[test]
+        fn wire_pin_cached_exec_denied() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&[], dir.path());
+            let runner = RecordingRunner::ok(0, "x");
+            let out = perform_exec_cached(&ctx, "date", &[], 60, NOW, &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":false,"status":-1,"stdout":"","stderr":"","error":"command not allowed: date","stale":false,"age_secs":0,"truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_exec_fresh_hit() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&["date*"], dir.path());
+            perform_exec_cached(
+                &ctx,
+                "date",
+                &[],
+                3600,
+                NOW,
+                &RecordingRunner::ok(0, "first"),
+            );
+            let out = perform_exec_cached(
+                &ctx,
+                "date",
+                &[],
+                3600,
+                NOW,
+                &RecordingRunner::ok(0, "second"),
+            );
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":0,"stdout":"first","stderr":"","error":"","stale":false,"age_secs":0,"truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_exec_zero_exit_cached() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&["date*"], dir.path());
+            let out = perform_exec_cached(
+                &ctx,
+                "date",
+                &[],
+                3600,
+                NOW,
+                &RecordingRunner::ok(0, "first run"),
+            );
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":0,"stdout":"first run","stderr":"","error":"","stale":false,"age_secs":0,"truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_exec_nonzero_fresh() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&["flaky*"], dir.path());
+            let out = perform_exec_cached(
+                &ctx,
+                "flaky",
+                &[],
+                3600,
+                NOW,
+                &RecordingRunner::ok(3, "bad"),
+            );
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":3,"stdout":"bad","stderr":"","error":"","stale":false,"age_secs":0,"truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_exec_stale_fallback() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&["date*"], dir.path());
+            perform_exec_cached(&ctx, "date", &[], 60, NOW, &RecordingRunner::ok(0, "good"));
+            let out = perform_exec_cached(
+                &ctx,
+                "date",
+                &[],
+                60,
+                LATER,
+                &RecordingRunner::failing("boom"),
+            );
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":0,"stdout":"good","stderr":"","error":"boom","stale":true,"age_secs":7200,"truncated":false}"#
+            );
+        }
+
+        // ---- state-read {found, absent, failed, bad-relpath} ----
+
+        #[test]
+        fn wire_pin_state_read_found() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            perform_state_write(&ctx, "weather.json", "0123456789");
+            let r = perform_state_read(&ctx, "weather.json");
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"exists":true,"contents":"0123456789","error":""}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_state_read_absent() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            let r = perform_state_read(&ctx, "nope.json");
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"exists":false,"contents":"","error":""}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_state_read_bad_relpath() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            let r = perform_state_read(&ctx, "../escape");
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"exists":false,"contents":"","error":"path traversal not allowed"}"#
+            );
+        }
+
+        /// A relpath that resolves to a directory rather than a file, so
+        /// `std::fs::read_to_string` fails with something other than
+        /// `NotFound` — the "real I/O failure" outcome path, distinct from
+        /// both `Absent` and the `bad-relpath` validation failure above.
+        #[test]
+        fn wire_pin_state_read_failed() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            std::fs::create_dir_all(ctx.state_dir().join("adir")).unwrap();
+            let r = perform_state_read(&ctx, "adir");
+            // `std::io::Error`'s Display text for reading a directory is
+            // platform-specific; pinned to this Linux dev/CI box's actual
+            // wording (verified with a throwaway probe), not guessed. If this
+            // suite ever runs on macOS/Windows, this text needs re-pinning to
+            // that platform's wording; CI's `macos-check` job is check-only
+            // (`cargo check`, never `cargo test`), so CI itself is unaffected.
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"exists":false,"contents":"","error":"Is a directory (os error 21)"}"#
+            );
+        }
+
+        // ---- state-write {written, quota-refused, bad-relpath} ----
+
+        #[test]
+        fn wire_pin_state_write_written() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            let w = perform_state_write(&ctx, "weather.json", "0123456789");
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":true,"error":""}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_state_write_bad_relpath() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            let w = perform_state_write(&ctx, "../escape", "x");
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":false,"error":"path traversal not allowed"}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_state_write_quota_refused() {
+            let root = tempfile::tempdir().unwrap();
+            let cap = 10;
+            let ctx = ctx_with_cap(&[], root.path().to_path_buf(), cap);
+            std::fs::create_dir_all(ctx.state_dir()).unwrap();
+            std::fs::write(ctx.state_dir().join("existing.json"), "z".repeat(9)).unwrap();
+            let w = perform_state_write(&ctx, "a.json", "0123456789"); // 9 + 10 > cap 10
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":false,"error":"state quota exceeded"}"#
+            );
+        }
+
+        // ---- file-read {denied, found, failed} ----
+
+        #[test]
+        fn wire_pin_file_read_denied() {
+            let ctx = ctx_with(&[], std::env::temp_dir());
+            let r = perform_file_read(&ctx, "/etc/hostname");
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"exists":false,"contents":"","error":"path not allowed: /etc/hostname"}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_file_read_found() {
+            let dir = tempfile::tempdir().unwrap();
+            let f = dir.path().join("notes.txt");
+            std::fs::write(&f, "hi").unwrap();
+            let ctx = test_ctx_paths(&dir, &[&format!("{}/*", dir.path().display())], &[], false);
+            let r = perform_file_read(&ctx, f.to_str().unwrap());
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"exists":true,"contents":"hi","error":""}"#
+            );
+        }
+
+        /// A path that resolves and is allowlisted but is a directory, so the
+        /// eventual `std::fs::read_to_string` fails with something other than
+        /// `NotFound` — the "real I/O failure" path, distinct from both
+        /// `denied` and a plain missing file.
+        #[test]
+        fn wire_pin_file_read_failed() {
+            let dir = tempfile::tempdir().unwrap();
+            let sub = dir.path().join("subdir");
+            std::fs::create_dir_all(&sub).unwrap();
+            let ctx = test_ctx_paths(&dir, &[&format!("{}/*", dir.path().display())], &[], false);
+            let r = perform_file_read(&ctx, sub.to_str().unwrap());
+            // Same platform-specific `io::Error` text as `wire_pin_state_read_failed`
+            // (see the comment there): needs re-pinning on macOS/Windows; CI's
+            // `macos-check` job is check-only, so CI is unaffected.
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"exists":false,"contents":"","error":"Is a directory (os error 21)"}"#
+            );
+        }
+
+        // ---- file-write {denied, written, failed} ----
+
+        #[test]
+        fn wire_pin_file_write_denied() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("should_not_be_written.txt");
+            let ctx = ctx_with(&[], std::env::temp_dir());
+            let w = perform_file_write(&ctx, target.to_str().unwrap(), "secret");
+            let expected = format!(
+                r#"{{"ok":false,"error":"path not allowed: {}"}}"#,
+                target.to_str().unwrap()
+            );
+            assert_eq!(serde_json::to_string(&w).unwrap(), expected);
+        }
+
+        #[test]
+        fn wire_pin_file_write_written() {
+            let dir = tempfile::tempdir().unwrap();
+            let f = dir.path().join("notes.txt");
+            let ctx = test_ctx_paths(&dir, &[], &[&format!("{}/*", dir.path().display())], false);
+            let w = perform_file_write(&ctx, f.to_str().unwrap(), "written");
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":true,"error":""}"#
+            );
+        }
+
+        /// A write target that IS an existing directory, so `std::fs::write`
+        /// fails — the "real I/O failure" path, distinct from `denied`.
+        #[test]
+        fn wire_pin_file_write_failed() {
+            let dir = tempfile::tempdir().unwrap();
+            let sub = dir.path().join("subdir");
+            std::fs::create_dir_all(&sub).unwrap();
+            let ctx = test_ctx_paths(&dir, &[], &[&format!("{}/*", dir.path().display())], false);
+            let w = perform_file_write(&ctx, sub.to_str().unwrap(), "x");
+            // Same platform-specific `io::Error` text as the read-failure pins above
+            // (see `wire_pin_state_read_failed`): needs re-pinning on macOS/Windows;
+            // CI's `macos-check` job is check-only, so CI is unaffected.
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":false,"error":"Is a directory (os error 21)"}"#
+            );
+        }
     }
 }
 

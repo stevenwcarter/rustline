@@ -45,11 +45,11 @@ pub use windows::Windows;
 pub(crate) use alert::{AlertKind, alert_over, alert_style, alert_under};
 
 use crate::config::{
-    BatteryOpts, CpuOpts, DateTimeOpts, DiskOpts, GitOpts, LanIpOpts, LoadAvgOpts, MediaOpts,
-    MemoryOpts, TailscaleIpOpts, ThroughputOpts, UptimeOpts, instance_opts,
+    BatteryOpts, CpuOpts, DateTimeOpts, DiskOpts, GitOpts, InstanceParse, InstanceSpec, LanIpOpts,
+    LoadAvgOpts, MediaOpts, MemoryOpts, TailscaleIpOpts, ThroughputOpts, UptimeOpts, WidgetKind,
 };
 use crate::widget::{Registry, WidgetDescriptor, WidgetSource};
-use crate::{Config, RANGE_NAME_MAX_BYTES, Widget};
+use crate::{Config, RangeName, Widget, WidgetName};
 
 /// Build a minimal-boilerplate `WidgetDescriptor` for a built-in widget.
 fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDescriptor {
@@ -69,14 +69,33 @@ fn builtin_descriptor(name: &str, summary: &str, configurable: bool) -> WidgetDe
 /// instance-registration pass below is what makes `registry.descriptors()`
 /// truthful for every consumer (a prior bug reused `builtin_descriptor`
 /// there, hardcoding every instance's `source` to `Builtin`).
-fn instance_descriptor(name: &str, summary: &str, kind: &str) -> WidgetDescriptor {
+fn instance_descriptor(name: &str, summary: &str, kind: WidgetKind) -> WidgetDescriptor {
     WidgetDescriptor {
         name: name.to_string(),
         summary: summary.to_string(),
         configurable: true,
-        source: WidgetSource::Instance {
-            kind: kind.to_string(),
-        },
+        source: WidgetSource::Instance { kind },
+    }
+}
+
+/// Build a `Box<dyn Widget>` from an already-parsed [`InstanceSpec`] under
+/// `name` (its range/toggle identity, invariant #7) — the typed counterpart
+/// of the twelve `build_<kind>` factories below, dispatching on the spec's
+/// own kind rather than re-parsing a string.
+fn build_instance(name: &str, spec: &InstanceSpec) -> Box<dyn Widget> {
+    match spec {
+        InstanceSpec::DateTime(o) => build_datetime(name, o),
+        InstanceSpec::LanIp(o) => build_lan_ip(name, o),
+        InstanceSpec::TailscaleIp(o) => build_tailscale_ip(name, o),
+        InstanceSpec::Battery(o) => build_battery(name, o),
+        InstanceSpec::Cpu(o) => build_cpu(name, o),
+        InstanceSpec::Memory(o) => build_memory(name, o),
+        InstanceSpec::LoadAvg(o) => build_loadavg(name, o),
+        InstanceSpec::Git(o) => build_git(name, o),
+        InstanceSpec::Disk(o) => build_disk(name, o),
+        InstanceSpec::Uptime(o) => build_uptime(name, o),
+        InstanceSpec::Media(o) => build_media(name, o),
+        InstanceSpec::Throughput(o) => build_throughput(name, o),
     }
 }
 
@@ -90,7 +109,7 @@ fn instance_descriptor(name: &str, summary: &str, kind: &str) -> WidgetDescripto
 
 pub(crate) fn build_loadavg(name: &str, o: &LoadAvgOpts) -> Box<dyn Widget> {
     Box::new(LoadAvg {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -101,7 +120,7 @@ pub(crate) fn build_loadavg(name: &str, o: &LoadAvgOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_datetime(name: &str, o: &DateTimeOpts) -> Box<dyn Widget> {
     Box::new(DateTime {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         timezone: o.timezone.clone(),
@@ -110,7 +129,7 @@ pub(crate) fn build_datetime(name: &str, o: &DateTimeOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_lan_ip(name: &str, o: &LanIpOpts) -> Box<dyn Widget> {
     Box::new(LanIp {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -120,7 +139,7 @@ pub(crate) fn build_lan_ip(name: &str, o: &LanIpOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_tailscale_ip(name: &str, o: &TailscaleIpOpts) -> Box<dyn Widget> {
     Box::new(TailscaleIp {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -129,7 +148,7 @@ pub(crate) fn build_tailscale_ip(name: &str, o: &TailscaleIpOpts) -> Box<dyn Wid
 
 pub(crate) fn build_battery(name: &str, o: &BatteryOpts) -> Box<dyn Widget> {
     Box::new(BatteryWidget {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -141,7 +160,7 @@ pub(crate) fn build_battery(name: &str, o: &BatteryOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_cpu(name: &str, o: &CpuOpts) -> Box<dyn Widget> {
     Box::new(CpuWidget {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -154,7 +173,7 @@ pub(crate) fn build_cpu(name: &str, o: &CpuOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_memory(name: &str, o: &MemoryOpts) -> Box<dyn Widget> {
     Box::new(MemoryWidget {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -167,7 +186,7 @@ pub(crate) fn build_memory(name: &str, o: &MemoryOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_git(name: &str, o: &GitOpts) -> Box<dyn Widget> {
     Box::new(GitWidget {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -177,7 +196,7 @@ pub(crate) fn build_git(name: &str, o: &GitOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_disk(name: &str, o: &DiskOpts) -> Box<dyn Widget> {
     Box::new(DiskWidget {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -190,7 +209,7 @@ pub(crate) fn build_disk(name: &str, o: &DiskOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_uptime(name: &str, o: &UptimeOpts) -> Box<dyn Widget> {
     Box::new(Uptime {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -199,7 +218,7 @@ pub(crate) fn build_uptime(name: &str, o: &UptimeOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_media(name: &str, o: &MediaOpts) -> Box<dyn Widget> {
     Box::new(Media {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -208,7 +227,7 @@ pub(crate) fn build_media(name: &str, o: &MediaOpts) -> Box<dyn Widget> {
 
 pub(crate) fn build_throughput(name: &str, o: &ThroughputOpts) -> Box<dyn Widget> {
     Box::new(ThroughputWidget {
-        name: name.to_string(),
+        name: WidgetName::from(name),
         format: o.format.clone(),
         alt_format: o.alt_format.clone(),
         down_format: o.down_format.clone(),
@@ -368,23 +387,25 @@ impl Registry {
         );
 
         // Second pass: `[instances.<name>]` (W46) registers additional named
-        // instances of the twelve clickable/format-bearing kinds — the ones
-        // with a `build_<kind>` helper above. Multi-instancing `cwd`/
-        // `hostname`/`pane_id`/`windows` has no use case (YAGNI), so any
-        // other `kind` (including those four) is simply an unsupported kind:
-        // warn and skip, never registered. Each arm below records its
-        // descriptor via `instance_descriptor`, not `builtin_descriptor` —
-        // its `source` must be `WidgetSource::Instance { kind }`, since
-        // `widget_placements` (crate::config) trusts `registry.descriptors()`
-        // to say where a widget actually came from.
-        for (name, table) in &cfg.instances {
-            let Some(kind) = Config::instance_kind(table) else {
+        // instances of the twelve clickable/format-bearing kinds, consuming
+        // `cfg.resolved_instances()` (T5) instead of re-dispatching on a raw
+        // string per instance. Multi-instancing `cwd`/`hostname`/`pane_id`/
+        // `windows` has no use case (YAGNI), so a table that resolved to a
+        // non-instanceable or unrecognized kind is simply skipped (see
+        // `InstanceParse::UnknownKind`'s doc: today's warn treats both cases
+        // identically). Each registered arm records its descriptor via
+        // `instance_descriptor`, not `builtin_descriptor` — its `source` must
+        // be `WidgetSource::Instance { kind }`, since `widget_placements`
+        // (crate::config) trusts `registry.descriptors()` to say where a
+        // widget actually came from.
+        for (name, parse) in cfg.resolved_instances() {
+            if let InstanceParse::NoKind = parse {
                 crate::diag::warn_once(&format!("instance-no-kind:{name}"), || {
                     tracing::warn!(instance = %name, "instance missing `kind`, skipping");
                 });
                 continue;
-            };
-            if registry.contains(name) {
+            }
+            if registry.contains(name.as_str()) {
                 crate::diag::warn_once(&format!("instance-collide:{name}"), || {
                     tracing::warn!(
                         instance = %name,
@@ -393,115 +414,33 @@ impl Registry {
                 });
                 continue;
             }
-            if name.len() > RANGE_NAME_MAX_BYTES {
-                crate::diag::warn_once(&format!("instance-long-name:{name}"), || {
-                    tracing::warn!(instance = %name, "instance name > 15 bytes; not click-toggleable");
+            // Permissive (invariant N2): a name that fails to parse as a
+            // `RangeName` (too long, a `[A-Za-z0-9_-]` violation, or the
+            // reserved `window`) still registers below and still renders —
+            // it just never becomes clickable, since `clickable_range` (via
+            // each widget's `range_name()`) refuses to produce a `RangeName`
+            // for it either. This is the same rule, checked once.
+            if let Err(err) = RangeName::parse(name.as_str()) {
+                crate::diag::warn_once(&format!("instance-unclickable:{name}"), || {
+                    tracing::warn!(instance = %name, %err, "not click-toggleable: {err}");
                 });
             }
-            let t = table.clone();
-            let summary = format!("{kind} instance");
-            match kind {
-                "datetime" => {
-                    let o: DateTimeOpts = instance_opts(name, kind, t);
-                    let n = name.clone();
-                    registry.register_described(
-                        instance_descriptor(name, &summary, kind),
-                        Box::new(move || build_datetime(&n, &o)),
-                    );
-                }
-                "lan_ip" => {
-                    let o: LanIpOpts = instance_opts(name, kind, t);
-                    let n = name.clone();
-                    registry.register_described(
-                        instance_descriptor(name, &summary, kind),
-                        Box::new(move || build_lan_ip(&n, &o)),
-                    );
-                }
-                "tailscale_ip" => {
-                    let o: TailscaleIpOpts = instance_opts(name, kind, t);
-                    let n = name.clone();
-                    registry.register_described(
-                        instance_descriptor(name, &summary, kind),
-                        Box::new(move || build_tailscale_ip(&n, &o)),
-                    );
-                }
-                "battery" => {
-                    let o: BatteryOpts = instance_opts(name, kind, t);
-                    let n = name.clone();
-                    registry.register_described(
-                        instance_descriptor(name, &summary, kind),
-                        Box::new(move || build_battery(&n, &o)),
-                    );
-                }
-                "cpu" => {
-                    let o: CpuOpts = instance_opts(name, kind, t);
-                    let n = name.clone();
-                    registry.register_described(
-                        instance_descriptor(name, &summary, kind),
-                        Box::new(move || build_cpu(&n, &o)),
-                    );
-                }
-                "memory" => {
-                    let o: MemoryOpts = instance_opts(name, kind, t);
-                    let n = name.clone();
-                    registry.register_described(
-                        instance_descriptor(name, &summary, kind),
-                        Box::new(move || build_memory(&n, &o)),
-                    );
-                }
-                "loadavg" => {
-                    let o: LoadAvgOpts = instance_opts(name, kind, t);
-                    let n = name.clone();
-                    registry.register_described(
-                        instance_descriptor(name, &summary, kind),
-                        Box::new(move || build_loadavg(&n, &o)),
-                    );
-                }
-                "git" => {
-                    let o: GitOpts = instance_opts(name, kind, t);
-                    let n = name.clone();
-                    registry.register_described(
-                        instance_descriptor(name, &summary, kind),
-                        Box::new(move || build_git(&n, &o)),
-                    );
-                }
-                "disk" => {
-                    let o: DiskOpts = instance_opts(name, kind, t);
-                    let n = name.clone();
-                    registry.register_described(
-                        instance_descriptor(name, &summary, kind),
-                        Box::new(move || build_disk(&n, &o)),
-                    );
-                }
-                "uptime" => {
-                    let o: UptimeOpts = instance_opts(name, kind, t);
-                    let n = name.clone();
-                    registry.register_described(
-                        instance_descriptor(name, &summary, kind),
-                        Box::new(move || build_uptime(&n, &o)),
-                    );
-                }
-                "media" => {
-                    let o: MediaOpts = instance_opts(name, kind, t);
-                    let n = name.clone();
-                    registry.register_described(
-                        instance_descriptor(name, &summary, kind),
-                        Box::new(move || build_media(&n, &o)),
-                    );
-                }
-                "throughput" => {
-                    let o: ThroughputOpts = instance_opts(name, kind, t);
-                    let n = name.clone();
-                    registry.register_described(
-                        instance_descriptor(name, &summary, kind),
-                        Box::new(move || build_throughput(&n, &o)),
-                    );
-                }
-                other => {
-                    crate::diag::warn_once(&format!("instance-kind:{name}:{other}"), || {
-                        tracing::warn!(instance = %name, kind = %other, "unknown instance kind, skipping");
+            match parse {
+                InstanceParse::UnknownKind(kind) => {
+                    crate::diag::warn_once(&format!("instance-kind:{name}:{kind}"), || {
+                        tracing::warn!(instance = %name, kind = %kind, "unknown instance kind, skipping");
                     });
                 }
+                InstanceParse::Ok(spec) => {
+                    let summary = format!("{} instance", spec.kind().as_str());
+                    let n = name.clone();
+                    let spec = spec.clone();
+                    registry.register_described(
+                        instance_descriptor(name.as_str(), &summary, spec.kind()),
+                        Box::new(move || build_instance(n.as_str(), &spec)),
+                    );
+                }
+                InstanceParse::NoKind => unreachable!("handled by the early `continue` above"),
             }
         }
 
@@ -514,7 +453,8 @@ mod tests {
     use std::fmt;
     use std::sync::{Arc, Mutex};
 
-    use super::{CpuOpts, instance_opts};
+    use super::CpuOpts;
+    use crate::config::instance_opts;
     use crate::widget::Registry;
     use crate::{Config, Context, NetIface};
     use chrono::{Local, TimeZone};
@@ -908,7 +848,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(w.range_name(), Some("clock_utc"));
+        assert_eq!(
+            w.range_name(),
+            Some(crate::RangeName::parse("clock_utc").unwrap())
+        );
     }
 
     #[test]
@@ -951,6 +894,7 @@ mod tests {
         // directly on the registry's own descriptors (independent of
         // `widget_placements`) so any future consumer of `descriptors()` is
         // covered too.
+        use crate::config::WidgetKind;
         use crate::widget::WidgetSource;
 
         let mut cfg = Config::default();
@@ -967,7 +911,7 @@ mod tests {
         assert_eq!(
             desc.source,
             WidgetSource::Instance {
-                kind: "datetime".into()
+                kind: WidgetKind::DateTime
             }
         );
     }
@@ -996,7 +940,10 @@ mod tests {
         );
         let reg = Registry::with_builtins(&cfg);
         let w = reg.build("clk").unwrap();
-        assert_eq!(w.range_name(), Some("clk"));
+        assert_eq!(
+            w.range_name(),
+            Some(crate::RangeName::parse("clk").unwrap())
+        );
     }
 
     #[test]

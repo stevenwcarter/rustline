@@ -12,10 +12,74 @@
 //! `ReadResult`, `WriteResult`, `ExecResult`, `CachedExecResult`) a host
 //! function's response decodes into — previously duplicated between
 //! `rustline-wasm` and `rustline-plugin-sdk`.
+use std::borrow::Borrow;
 use std::collections::BTreeSet;
+use std::fmt;
 use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
+
+/// The widget identity that invariant #7 requires to be ONE string end-to-end:
+/// registry key = layout entry = tmux range name = toggle key = click/override
+/// map key. `#[serde(transparent)]` keeps every wire and TOML shape it appears
+/// in byte-identical to a plain string.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WidgetName(String);
+
+impl WidgetName {
+    /// Wrap any owned-or-borrowed string as a widget identity.
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// The identity, borrowed.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for WidgetName {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<String> for WidgetName {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl Borrow<str> for WidgetName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for WidgetName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for WidgetName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl PartialEq<str> for WidgetName {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for WidgetName {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
 
 /// The wire-format ABI version. Bump this only when `WireContext`/
 /// `GuestRender`'s shape changes in a way that breaks an existing guest
@@ -284,7 +348,7 @@ pub struct WireContext {
     pub media: Option<MediaInfo>,
     pub os: String,
     pub arch: String,
-    pub toggled: BTreeSet<String>,
+    pub toggled: BTreeSet<WidgetName>,
     pub colors: ThemeColors,
 }
 
@@ -395,6 +459,19 @@ pub struct WriteResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T6 pinning test (written first): `WidgetName` must be wire-transparent
+    /// (a bare JSON string, not `{"0": "cpu"}`) and support an allocation-free
+    /// `Borrow<str>` lookup into a `BTreeSet<WidgetName>` — the property that
+    /// keeps most call sites one-line fixes.
+    #[test]
+    fn widget_name_is_wire_transparent() {
+        let n = WidgetName::from("cpu");
+        assert_eq!(serde_json::to_string(&n).unwrap(), r#""cpu""#);
+        let set: std::collections::BTreeSet<WidgetName> =
+            serde_json::from_str(r#"["cpu","weather"]"#).unwrap();
+        assert!(set.contains("cpu")); // Borrow<str> lookup, no alloc
+    }
 
     #[test]
     fn battery_state_serializes_snake_case() {

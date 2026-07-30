@@ -1,4 +1,4 @@
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget, WidgetName};
 
 /// Renders the current git branch (or short SHA when `HEAD` is detached) plus
 /// a dirty marker and ahead/behind/staged/unstaged counts for the pane's
@@ -12,7 +12,7 @@ use crate::{Context, Segment, Widget};
 pub struct GitWidget {
     /// Registry/layout name; the toggle key threaded through render + click,
     /// and this instance's range name (invariant #7).
-    pub name: String,
+    pub name: WidgetName,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
@@ -60,7 +60,7 @@ impl Widget for GitWidget {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn toggled_uses_alt_format() {
         let mut c = ctx(info("main", 0, 0, 1, 0));
-        c.toggled.insert("git".to_string());
+        c.toggled.insert(WidgetName::from("git"));
         let out = w("{branch}", "{branch}{dirty}", "").render(&c);
         assert_eq!(out[0].text, "main*");
         // untoggled -> normal format
@@ -180,7 +180,7 @@ mod tests {
     fn range_name_some_only_with_alt_format() {
         assert_eq!(
             w("{branch}", "{branch}{dirty}", "").range_name(),
-            Some("git")
+            Some(RangeName::parse("git").unwrap())
         );
         assert_eq!(w("{branch}", "", "").range_name(), None);
     }

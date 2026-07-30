@@ -806,7 +806,7 @@ fn ask(question: &str, default: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustline_core::Config;
+    use rustline_core::{Config, WidgetName};
 
     fn base_answers() -> InitAnswers {
         InitAnswers {
@@ -860,9 +860,9 @@ mod tests {
         a.tailscale = true;
         a.lan_ip = false;
         let cfg: Config = toml::from_str(&starter_config_toml(&a)).unwrap();
-        assert!(cfg.layout.right.contains(&"battery".to_string()));
-        assert!(cfg.layout.left.contains(&"tailscale_ip".to_string()));
-        assert!(!cfg.layout.left.contains(&"lan_ip".to_string()));
+        assert!(cfg.layout.right.contains(&WidgetName::from("battery")));
+        assert!(cfg.layout.left.contains(&WidgetName::from("tailscale_ip")));
+        assert!(!cfg.layout.left.contains(&WidgetName::from("lan_ip")));
         // required widgets always present, in order
         assert_eq!(
             cfg.layout.right,

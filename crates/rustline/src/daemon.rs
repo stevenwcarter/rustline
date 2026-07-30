@@ -32,7 +32,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use rustline_core::{Config, Direction, Registry, Theme, render_named_region, render_window};
+use rustline_core::{
+    Config, Direction, Registry, Theme, WidgetName, render_named_region, render_window,
+};
 
 use crate::build_context::{build_region_context, build_window_context};
 use crate::cli::{RegionArgs, WindowArgs};
@@ -125,7 +127,12 @@ impl DaemonState {
     /// context, and call `render_named_region` with the warm registry/theme
     /// plus the config's color overrides — the same sequence `main`'s
     /// `Render::Left`/`Right` arms run.
-    fn render_region(&self, dir: Direction, layout: &[String], args: &RenderArgsWire) -> String {
+    fn render_region(
+        &self,
+        dir: Direction,
+        layout: &[WidgetName],
+        args: &RenderArgsWire,
+    ) -> String {
         let region_args = RegionArgs {
             session: args.session.clone(),
             window: args.window.clone(),
@@ -142,7 +149,7 @@ impl DaemonState {
 /// The distinct plugin/widget names referenced by either region's layout
 /// (`layout.left ∪ layout.right`) — what `register_plugins` needs so both
 /// regions' plugins are instantiated once at build time.
-fn plugin_union(config: &Config) -> Vec<String> {
+fn plugin_union(config: &Config) -> Vec<WidgetName> {
     let mut names = config.layout.left.clone();
     for name in &config.layout.right {
         if !names.contains(name) {
@@ -390,7 +397,7 @@ mod tests {
             "advanced mtime must trigger a reload"
         );
         // The rebuilt state reflects the new config.
-        assert_eq!(st.config.layout.right, vec!["datetime".to_string()]);
+        assert_eq!(st.config.layout.right, vec![WidgetName::from("datetime")]);
         // ...and a follow-up call with no further change reloads no more.
         assert!(!st.reload_if_changed(&cfg));
     }
