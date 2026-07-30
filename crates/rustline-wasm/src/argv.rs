@@ -27,9 +27,12 @@ fn quote(s: &str) -> String {
 }
 
 /// The canonical rendering of one argv. Holding one is proof it came from
-/// [`canonical_argv`] — the gate and the exec cache key both require it, so
-/// checking the bare program name (bypassing the whole-argv gate) no longer
-/// compiles.
+/// [`canonical_argv`] — the `allowed_commands` gate requires it at the type
+/// level, so checking the bare program name (bypassing the whole-argv gate)
+/// no longer compiles. The exec cache key is derived from a `CanonicalArgv`
+/// at its single call site by convention, not by the type system: `cache_path`
+/// (in `cache.rs`) still takes its `key` as a bare `&str`. Typing that
+/// parameter is open finding T22.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalArgv(String);
 

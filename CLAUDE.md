@@ -618,8 +618,11 @@ these shared types, not a design shortcut. Keep them serializable.
   capability's single **matching key** an `allowed_commands` pattern is checked
   against — never executed, since the host always spawns `program` + `args`
   directly with no shell. `CanonicalArgv` is a newtype (T3) whose sole
-  constructor is this function, so the gate and the exec cache key can never
-  be checked against a hand-built string that bypassed it. Quotes an argument
+  constructor is this function, so the `allowed_commands` gate can never be
+  checked against a hand-built string that bypassed it — that's type-enforced.
+  The exec cache key is only derived from a `CanonicalArgv` by convention, at
+  its single call site (`cache_path` in `cache.rs` still takes a bare `&str`
+  key) — typing that parameter is open finding T22. Quotes an argument
   (single-quoted, POSIX-style, with
   an embedded `'` escaped as `'\''`) whenever it contains whitespace, a quote,
   or a backslash, or is empty, so two different argv vectors (e.g.

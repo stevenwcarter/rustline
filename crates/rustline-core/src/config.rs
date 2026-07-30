@@ -1491,6 +1491,15 @@ pub struct Config {
     /// is the raw `[instances.<name>]` table; `kind` selects the widget type
     /// and the remaining keys are that kind's options (re-parsed per kind at
     /// registration).
+    ///
+    /// This field is `pub`, but [`Config::resolved_instances`] memoizes its
+    /// parse into `resolved` below on first call and never invalidates that
+    /// memo. Mutating `instances` after `resolved_instances()` has already
+    /// run on this `Config` serves stale specs to every later caller —
+    /// production never mutates a `Config` post-construction, so this is
+    /// theoretical there, but a test or future caller that edits `instances`
+    /// in place and then calls a memo-backed method (`color_overrides`,
+    /// `click_map`, `layout_kinds`, etc.) will observe the pre-edit data.
     #[serde(default)]
     pub instances: HashMap<WidgetName, Value>,
     /// Parse-once memo for `[instances.*]` tables (T5), lazily built by

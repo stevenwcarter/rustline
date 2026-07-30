@@ -16,12 +16,12 @@ use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{Context as _, anyhow, bail};
-use rustline_core::{Config, NameError, PluginSource, RangeName};
+use rustline_core::{Config, NameError, PluginSource, RANGE_NAME_MAX_BYTES, RangeName};
 use serde_json::Value;
 use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::cli::{InstallArgs, RemoveArgs, UpdateArgs};
-use crate::plugin_cmd::{MAX_PLUGIN_NAME_BYTES, RESERVED_PLUGIN_NAME};
+use crate::plugin_cmd::RESERVED_PLUGIN_NAME;
 
 /// Re-exported so `plugin_install::sha256_hex` keeps resolving for existing
 /// callers and tests. The definition lives in `rustline-wasm` beside the
@@ -173,7 +173,7 @@ fn do_install<D: Downloader>(
         validate_install_name(&name).map_err(|e| anyhow!("invalid plugin name: {e}"))?;
     if !clickable {
         tracing::warn!(
-            "plugin name {name:?} is {} bytes (> {MAX_PLUGIN_NAME_BYTES}); it will install \
+            "plugin name {name:?} is {} bytes (> {RANGE_NAME_MAX_BYTES}); it will install \
              but won't be click-toggleable — pass --name to shorten it",
             name.len()
         );
@@ -532,7 +532,7 @@ mod tests {
         // it as a raw `[plugins.<name>]` key. Must be a hard `Err`, not
         // `Ok(false)`.
         let name = "../../../tmp/evil";
-        assert!(name.len() > MAX_PLUGIN_NAME_BYTES);
+        assert!(name.len() > RANGE_NAME_MAX_BYTES);
         assert!(validate_install_name(name).is_err());
     }
 

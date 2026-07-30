@@ -2369,7 +2369,10 @@ mod tests {
             let r = perform_state_read(&ctx, "adir");
             // `std::io::Error`'s Display text for reading a directory is
             // platform-specific; pinned to this Linux dev/CI box's actual
-            // wording (verified with a throwaway probe), not guessed.
+            // wording (verified with a throwaway probe), not guessed. If this
+            // suite ever runs on macOS/Windows, this text needs re-pinning to
+            // that platform's wording; CI's `macos-check` job is check-only
+            // (`cargo check`, never `cargo test`), so CI itself is unaffected.
             assert_eq!(
                 serde_json::to_string(&r).unwrap(),
                 r#"{"ok":false,"exists":false,"contents":"","error":"Is a directory (os error 21)"}"#
@@ -2450,7 +2453,9 @@ mod tests {
             std::fs::create_dir_all(&sub).unwrap();
             let ctx = test_ctx_paths(&dir, &[&format!("{}/*", dir.path().display())], &[], false);
             let r = perform_file_read(&ctx, sub.to_str().unwrap());
-            // Same platform-specific `io::Error` text as `wire_pin_state_read_failed`.
+            // Same platform-specific `io::Error` text as `wire_pin_state_read_failed`
+            // (see the comment there): needs re-pinning on macOS/Windows; CI's
+            // `macos-check` job is check-only, so CI is unaffected.
             assert_eq!(
                 serde_json::to_string(&r).unwrap(),
                 r#"{"ok":false,"exists":false,"contents":"","error":"Is a directory (os error 21)"}"#
@@ -2493,7 +2498,9 @@ mod tests {
             std::fs::create_dir_all(&sub).unwrap();
             let ctx = test_ctx_paths(&dir, &[], &[&format!("{}/*", dir.path().display())], false);
             let w = perform_file_write(&ctx, sub.to_str().unwrap(), "x");
-            // Same platform-specific `io::Error` text as the read-failure pins above.
+            // Same platform-specific `io::Error` text as the read-failure pins above
+            // (see `wire_pin_state_read_failed`): needs re-pinning on macOS/Windows;
+            // CI's `macos-check` job is check-only, so CI is unaffected.
             assert_eq!(
                 serde_json::to_string(&w).unwrap(),
                 r#"{"ok":false,"error":"Is a directory (os error 21)"}"#

@@ -9,7 +9,9 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
-use rustline_core::{Config, Context as CoreContext, NameError, RangeName, Segment, Widget};
+use rustline_core::{
+    Config, Context as CoreContext, NameError, RANGE_NAME_MAX_BYTES, RangeName, Segment, Widget,
+};
 use rustline_wasm::{DenialKind, DenialObserver, PluginManifest, resolve_manifest};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
@@ -18,10 +20,6 @@ use crate::cli::{ApproveArgs, BuildArgs, NewPluginArgs, PatternCmd, PluginCmd, R
 /// The reserved widget name that a plugin must never claim (it names the
 /// built-in window-list renderer, which isn't a plugin-resolvable slot).
 pub(crate) const RESERVED_PLUGIN_NAME: &str = "window";
-
-/// `tmux`'s `range=user|X` status-range argument is byte-capped; a plugin
-/// name longer than this can never be click-toggleable (invariant #7).
-pub(crate) const MAX_PLUGIN_NAME_BYTES: usize = 15;
 
 /// The embedded `Cargo.toml`/`src/lib.rs` templates `plugin new` scaffolds,
 /// mirroring how `init.rs` embeds its starter config template.
@@ -690,7 +688,7 @@ fn validate_plugin_name(name: &str) -> Result<(), String> {
         Ok(_) => Ok(()),
         Err(NameError::Empty) => Err("plugin name must not be empty".to_string()),
         Err(NameError::TooLong { len }) => Err(format!(
-            "plugin name {name:?} is {len} bytes; must be at most {MAX_PLUGIN_NAME_BYTES} \
+            "plugin name {name:?} is {len} bytes; must be at most {RANGE_NAME_MAX_BYTES} \
              (tmux's range=user|X limit)"
         )),
         Err(NameError::BadChar { .. }) => Err(format!(
