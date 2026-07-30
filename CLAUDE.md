@@ -130,7 +130,7 @@ these shared types, not a design shortcut. Keep them serializable.
   just the *base* widget's reading (the WASM mirror; a guest never sees the
   maps),
   `os: String`, `arch:
-  String`, `toggled: BTreeSet<String>`, `colors: ThemeColors`), plus
+  String`, `toggled: BTreeSet<WidgetName>`, `colors: ThemeColors`), plus
   `Context::default()` (an empty, epoch-timestamped instance, so test/synthetic
   construction sites can use struct-update syntax instead of spelling out
   every field as the type grows), and `WindowCtx`. `NetIface`, `Battery`/
@@ -180,7 +180,10 @@ these shared types, not a design shortcut. Keep them serializable.
   blending to `bar_bg`); `render_window_pill(text, is_current, &Theme) ->
   String`, the window-list rounded-pill renderer (rounded `` / `` caps colored
   `fg=pill,bg=bar_bg` — the *opposite* of a pointed separator); `RangeGroup`
-  (a widget's segments plus its optional clickable range name) and
+  (a widget's segments plus its optional clickable range name, typed
+  `range: Option<RangeName>` — see `range_name.rs` below — so the bytes
+  interpolated into `#[range=user|…]` are safe by construction rather than
+  re-checked here) and
   `render_region_ranged(Direction, &[RangeGroup], &Theme) -> String`, which
   brackets each clickable group in `#[range=user|NAME]…#[norange]` with
   separators/edges kept outside any range — byte-identical to `render_region`
@@ -201,15 +204,30 @@ these shared types, not a design shortcut. Keep them serializable.
   is a complete `Theme` (all fields, incl. semantics), and every non-`default`
   theme is multi-accent (`palette.len() >= 4`) using truecolor (`Color::Rgb`).
   See Themes under Config for the full list and layering rules.
+- `range_name.rs` — `RangeName`/`NameError`: the one definition of invariant
+  #7's clickable-name rule (non-empty, at most `RANGE_NAME_MAX_BYTES` bytes —
+  moved here from `render.rs` — `[A-Za-z0-9_-]` only, and not the reserved
+  name `"window"`). `RangeName::parse` is the sole constructor, checking (in
+  order) empty → bad char → reserved → too long, so a name that is both
+  charset-invalid and too long always reports the charset violation, never
+  masked by the length check; `RangeName::of_widget(&WidgetName) ->
+  Option<RangeName>` bridges a widget's identity into its clickable form.
+  Holding a `RangeName` is proof its bytes are safe to interpolate into
+  `#[range=user|…]` verbatim — nothing downstream re-checks length or
+  charset. Closes the range-forging hole: a charset-violating name (e.g.
+  carrying a `#`) could previously still pass the old length-only check and
+  reach `#[range=user|…]` markup unescaped.
 - `widget.rs` — `Widget` trait and `Registry` (name → factory; `resolve` skips
   unknown widget names with a `warn!`, never errors). `resolve` now returns
-  `Vec<(String, Box<dyn Widget>)>` (W53) — each built widget paired with the
+  `Vec<(WidgetName, Box<dyn Widget>)>` (W53) — each built widget paired with the
   layout name it came from, so a caller (e.g. `render_named_region`) never
   re-filters `names` to recover which widget is which.
   `Widget::range_name(&self)
-  -> Option<&str>` defaults to `None`; a clickable widget returns `Some(name)`.
+  -> Option<RangeName>` defaults to `None`; a clickable widget returns
+  `RangeName::of_widget`'s result via `clickable_range` (see `toggle.rs`
+  below).
   `WidgetDescriptor { name, summary, configurable, source: WidgetSource }`
-  (`WidgetSource::{Builtin, Plugin, Instance { kind: String }}` — the third
+  (`WidgetSource::{Builtin, Plugin, Instance { kind: WidgetKind }}` — the third
   variant, added for the widget manager, labels a `[instances.<name>]`
   descriptor with its declared kind so `widget list`/`widget edit` can show
   "instance of cpu" rather than lumping it in with `Builtin`) describes a
@@ -220,7 +238,7 @@ these shared types, not a design shortcut. Keep them serializable.
   enumerate them in registration order (W22) — the enabling abstraction the
   widget manager's `widget_placements` (see `config.rs` below) builds on.
   The twelve clickable/format-bearing
-  widget structs (see `toggle.rs` below) each now carry a `name: String`
+  widget structs (see `toggle.rs` below) each now carry a `name: WidgetName`
   field (W46) — their range/toggle identity (invariant #7) — instead of
   hardcoding their kind name in `range_name()`/`active_format`; a base
   built-in sets `name` to its kind (byte-identical output), an
@@ -232,16 +250,20 @@ these shared types, not a design shortcut. Keep them serializable.
   `build_throughput`), reused by both base registration (passes the kind
   name) and instance registration (passes the instance name) — one factory
   body instead of two. `Registry::with_builtins(&Config)` gains a second pass
-  over `cfg.instances` (W46): for each `(name, table)`, an unknown/missing
-  `kind`, a non-clickable kind (`cwd`/`hostname`/`pane_id`/`windows` —
+  over `cfg.resolved_instances()` (W46, parse-once via T5 — see `config.rs`
+  below): a `NoKind` entry, an `UnknownKind` (unrecognized, or a
+  valid-but-non-clickable kind — `cwd`/`hostname`/`pane_id`/`windows` —
   instanceable but never clickable, so out of scope for this pass), or a name
   already registered (a built-in or an earlier instance) is `warn!`+skipped
-  (invariant #3, built-in always wins); otherwise the table is re-parsed into
-  that kind's Opts (`try_into().unwrap_or_default()` — the extra `kind` key is
-  harmlessly ignored, no Opts struct has `deny_unknown_fields`) and registered
-  under the instance name via its `build_<kind>` helper. An instance name over
-  15 bytes still registers but logs a one-time "not click-toggleable" warn
-  (mirrors a too-long plugin stem).
+  (invariant #3, built-in always wins); otherwise the already-typed
+  `InstanceSpec` (parsed once via `instance_opts`, which itself warns once via
+  `warn_once` and falls back to `<Kind>Opts::default()` on a type error) is
+  registered under the instance name via `build_instance`/its `build_<kind>`
+  helper. An instance name that fails `RangeName::parse` (too long, a
+  `[A-Za-z0-9_-]` violation, or the reserved `window`) still registers but
+  logs a one-time "not click-toggleable" warn (mirrors a too-long plugin
+  stem; registration stays permissive — invalid names register but are
+  unclickable).
 - `widgets/` — the sixteen built-ins: `pane_id`, `hostname`, `windows`, `cwd`,
   `loadavg`, `datetime`, `lan_ip`, `tailscale_ip`, `battery`, `cpu`, `memory`,
   `git`, `disk`, `uptime`, `media`, `throughput`, plus `Registry::with_builtins(&Config)` in `mod.rs`. `net.rs` is the pure
@@ -334,10 +356,12 @@ these shared types, not a design shortcut. Keep them serializable.
   `1.2M/s`), plus `alt_format`/`down_format`; NOT threshold-aware (a rate has
   no universal ceiling) and NOT in the default layout.
   `toggle.rs` holds the shared click-toggle helpers
-  `active_format(ctx, name, format, alt) -> &str`
+  `active_format(ctx, name: &WidgetName, format, alt) -> &str`
   (picks `alt` iff it's non-empty AND `name` is in `ctx.toggled`, else
-  `format`) and `clickable_range(name, alt) -> Option<&str>` (`Some(name)` iff
-  `alt` is non-empty AND `name.len() <= 15`, tmux's `range=user|X` byte limit);
+  `format`) and `clickable_range(name: &WidgetName, alt) -> Option<RangeName>`
+  (`Some` iff `alt` is non-empty AND `name` parses as a `RangeName` —
+  invariant #7's full rule, not just the byte-length check it used to be;
+  see `range_name.rs` above);
   the twelve format-bearing widgets (`datetime`, `lan_ip`, `tailscale_ip`,
   `battery`, `cpu`, `memory`, `loadavg`, `git`, `disk`, `uptime`, `media`,
   `throughput`) each
@@ -363,7 +387,7 @@ these shared types, not a design shortcut. Keep them serializable.
   tmux integration model below), so window-select clicks keep working. Pills
   are joined with no separator (each is self-contained).
 - `config.rs` — `Config` (TOML): `layout`, `theme`, `widgets`, a top-level
-  `plugin_dir: Option<String>`, and a typed `plugins: HashMap<String,
+  `plugin_dir: Option<String>`, and a typed `plugins: HashMap<WidgetName,
   PluginConfig>` table (see Config below). `Config::load` is **total**
   (missing/invalid file → `warn!` + defaults). `ThemeConfig` is now a **full
   optional mirror of `Theme`** (every field, incl. the separators and the four
@@ -398,41 +422,53 @@ these shared types, not a design shortcut. Keep them serializable.
   `spark_width` (W45, default 8 — the `{spark}` history ring length, consulted
   when `format` **or** `alt_format` references `{spark}`, W56). `Config` also
   gains `pub
-  instances: HashMap<String, toml::Value>` (`#[serde(default)]`, W46) — one
+  instances: HashMap<WidgetName, Value>` (`#[serde(default)]`, W46) — one
   raw `[instances.<name>]` table per named widget instance; the entry's
-  `kind` key selects which built-in kind to build, and the rest of the table
-  is that kind's own Opts (re-parsed per kind via `try_into` rather than a
-  typed `WidgetInstance`, so the existing `<Kind>Opts` structs are reused
-  verbatim — see Config below for the TOML shape). Helper methods: `pub fn
-  instance_kind(v: &toml::Value) -> Option<&str>` reads the `kind` key; `pub
-  fn instance_meta(kind: &str, v: &toml::Value) -> Option<(ColorOverride,
-  String, ClickBindings)>` dispatches on kind to parse an instance's color
-  override/`alt_format`/click bindings (one shared match arm backing both
-  projections below, mirroring `Registry`'s per-kind dispatch); `pub fn
-  layout_kinds(&self, layout: &[String]) -> BTreeSet<String>` maps each
+  `kind` key names one of a closed, 16-variant `WidgetKind` enum (T5 — serde
+  `snake_case` with explicit `datetime`/`loadavg` renames, since plain
+  snake_case would emit `date_time`/`load_avg`; `WidgetKind::ALL`/`as_str`/
+  `parse`/`is_instanceable`), and the rest of the table is that kind's own
+  Opts (re-parsed per kind via `try_into` rather than a typed
+  `WidgetInstance`, so the existing `<Kind>Opts` structs are reused verbatim —
+  see Config below for the TOML shape). `pub fn instance_kind(v: &Value) ->
+  Option<WidgetKind>` reads and parses the `kind` key. `pub fn
+  resolved_instances(&self) -> &BTreeMap<WidgetName, InstanceParse>` (T5) is
+  the parse-once memo (a `OnceLock`, lazily built and reused for the
+  `Config`'s lifetime) that replaced the old per-consumer `instance_meta`
+  dispatch: `InstanceParse::{Ok(InstanceSpec), NoKind, UnknownKind(String)}`,
+  with `InstanceSpec` a 12-variant enum wrapping the existing `<Kind>Opts`
+  structs one per instanceable kind. `color_overrides`/`click_map`/
+  `layout_kinds`/`disk_mounts`/`throughput_interfaces`/
+  `spark_referenced_in_layout`/`instances_of_kind`, AND
+  `Registry::with_builtins`'s registration pass, all consume this memo, so a
+  table with several consumers deserializes exactly once per `Config`, not
+  once per consumer per render/keystroke. `pub fn
+  layout_kinds(&self, layout: &[WidgetName]) -> BTreeSet<WidgetKind>` maps each
   layout entry to its kind (a built-in name maps to itself; an instance name
   maps to its declared `kind`) for kind-aware read-gating; `pub fn
-  disk_mounts(&self, layout: &[String]) -> BTreeSet<String>` and `pub fn
-  throughput_interfaces(&self, layout: &[String]) -> BTreeSet<Option<String>>`
+  disk_mounts(&self, layout: &[WidgetName]) -> BTreeSet<String>` and `pub fn
+  throughput_interfaces(&self, layout: &[WidgetName]) -> BTreeSet<Option<String>>`
   collect the distinct mounts/interfaces the layout's `disk`/`throughput`
   entries (base + every instance) actually reference, for the per-mount/
   per-interface reads below. `pub fn spark_referenced_in_layout(&self, layout:
-  &[String], kind: &str) -> bool` (W57) is the `{spark}`-gate's own kind-aware
+  &[WidgetName], kind: WidgetKind) -> bool` (W57) is the `{spark}`-gate's own kind-aware
   scan: true iff the layout's base `cpu`/`memory` widget OR any
   `[instances.<name>]` of that `kind` in the layout has `{spark}` in its
   `format`/`alt_format` (shared private `refs_spark` helper) — `build_context.rs`
   calls this instead of checking only the base widget, so a `{spark}` that
   appears only on an instance (no base widget of that kind in the layout at
   all) still populates the shared `Context.cpu_history`/`mem_history` ring
-  (supersedes W56's base-only check). A module-level `const
-  BUILTIN_WIDGET_NAMES: [&str;
-  16]` + `fn is_builtin_widget_name(name: &str) -> bool` is the built-in-wins
-  precedence guard: `color_overrides()`/`click_map()`/`layout_kinds` all skip
+  (supersedes W56's base-only check). The built-in-wins
+  precedence guard — `color_overrides()`/`click_map()`/`layout_kinds` all skip
   a `[instances.<name>]` entry whose name collides with a built-in, mirroring
   `Registry`'s own collision skip (W46 review fix — an instance was initially
-  able to silently hijack a same-named built-in's projected color/click).
+  able to silently hijack a same-named built-in's projected color/click) — is
+  now `WidgetKind::parse(name).is_some()` (T5); the hand-maintained `const
+  BUILTIN_WIDGET_NAMES: [&str; 16]` array and its `is_builtin_widget_name`
+  helper are gone, since `WidgetKind::ALL` is the same information already.
   `color_overrides()`/`click_map()` (previously widgets-only) now also
-  project each non-colliding instance via `instance_meta`, keyed by the
+  project each non-colliding instance via `resolved_instances()`'s
+  `InstanceParse::Ok(spec)`, keyed by the
   instance name, so instance color overrides and click bindings flow through
   `render_named_region`/`resolve_click` unchanged. `PluginConfig` also gains
   `allowed_commands: Vec<String>` (the exec capability's allowlist, same
@@ -471,6 +507,40 @@ these shared types, not a design shortcut. Keep them serializable.
   `fg=default`/`bg=default` reset that channel to `None` ("the terminal's own
   default", not black). Both share a private `scan` so where a directive
   starts/ends — and what an unterminated `#[` means — has one definition.
+- `atomic_write.rs` — `write_atomic(path, contents: &[u8]) -> io::Result<()>`,
+  the workspace's **one** atomic-write primitive (B15+B17): stage into a
+  per-writer, per-call temp file in the same directory
+  (`<path>.<pid>.<nanos>.<counter>.tmp`) and `rename` onto the target, so a
+  concurrent reader always sees either the old contents or the new ones,
+  never a torn write — and, being uniquely named per call rather than a
+  shared `<name>.tmp`, two rustline processes (tmux spawns `render left`/
+  `render right` as separate processes every tick) staging the same target
+  can no longer truncate each other's temp file. Every persistence site in
+  the workspace goes through this: `sample_store.rs`, `toggles.rs`, `cpu.rs`
+  (below), and `rustline-wasm`'s `perform::perform_state_write`, `paths.rs`,
+  and `cache.rs`. Trade-offs accepted and documented on the module: a
+  crash-orphaned staging file is swept inside the WASM cache namespaces
+  (`evict_namespace`) but not under a plugin's state-dir root or
+  `~/.local/state/rustline/` (open finding); the ~33-char staging suffix can
+  push an already-long target name over the filesystem's name limit (only
+  reachable via a plugin's state relpath, which has no length bound); and the
+  brief on-disk overlap of the old file and the staging file can transiently
+  over-count against a plugin's state-dir quota.
+- `diag.rs` — the `warn_once` seam: `warn_once(key: &str, emit: impl Fn())`
+  calls `emit()` unless a process-wide hook, installed once via
+  `set_warn_once_hook`, has already seen `key`. **Fails open**: with no hook
+  installed (every unit test, `rustline-core` used standalone) it always
+  emits, so a dedup layer can never be the reason a diagnostic goes missing.
+  The hook itself lives in the `rustline` bin crate's `warn_once.rs` (below) —
+  the only thing that ever calls `set_warn_once_hook`. Every `warn!`/`info!`
+  site here and in `rustline-wasm` that describes a *static misconfiguration*
+  (one that would otherwise re-fire once per render, forever, at up to
+  ~86,400 lines/day) routes through this function instead of calling
+  `tracing::warn!`/`info!` directly; a genuine per-occurrence runtime failure
+  (a plugin render failing, a cache write failing, a denial) never does. `key`
+  must identify both the site and its varying payload (e.g.
+  `"unknown-widget:memroy"`) so two distinct misconfigurations each warn once
+  rather than one suppressing the other.
 
 `rustline-abi`:
 - `lib.rs` — `Segment { text, style }`, `Style { fg, bg, bold }`,
@@ -519,25 +589,60 @@ these shared types, not a design shortcut. Keep them serializable.
   `stale`/`age_secs` — same "usable result present, fresh or stale"
   convention as `CachedHttpResult`). Same struct-level `#[serde(default)]`
   forward-compatibility as the other four.
+  Also `WidgetName` (T6, `#[serde(transparent)]`, `Borrow<str>`) — the
+  identity newtype invariant #7 keys off: `Context.toggled`/
+  `WireContext.toggled: BTreeSet<WidgetName>`, `Layout`'s three region
+  `Vec<WidgetName>`s, and `Config.plugins`/`Config.instances`'s
+  `HashMap<WidgetName, _>` keys all use it; `Registry::resolve` returns
+  `Vec<(WidgetName, Box<dyn Widget>)>`; the twelve clickable widget structs
+  plus `WasmWidget` carry a `name: WidgetName` field; `rustline-core`'s
+  `RangeName::of_widget` bridges a `WidgetName` into the render/click-toggle
+  boundary's `RangeName`. Wire JSON and TOML shapes stay byte-identical.
   The WASM wire types, re-exported by `rustline-core`.
 
 `rustline-wasm`:
-- `allow.rs` — `AllowSet`/`Pattern`: each `allowed_urls`/`allowed_paths` entry
-  is a glob by default or a regex when prefixed `re:`; deny-by-default (empty
-  set matches nothing); malformed patterns are logged and skipped.
-  `allowed_commands` (the exec capability's allowlist) compiles through this
-  same `AllowSet`, unchanged.
-- `argv.rs` — `canonical_argv(program, args) -> String`, the exec
+- `allow.rs` — `AllowSet<K: CapKind>`/`Pattern`: each `allowed_urls`/
+  `allowed_paths`/`allowed_write_paths` entry is a glob by default or a regex
+  when prefixed `re:`; deny-by-default (empty set matches nothing); malformed
+  patterns are logged and skipped. `AllowSet` is phantom-tagged per capability
+  family (T3): marker types `UrlCap`/`ReadPathCap`/`WritePathCap`/`CommandCap`
+  each carry a `DENIAL: DenialKind` and a typed subject (`Url<'a>`/
+  `ResolvedPath`/`CanonicalArgv`), so a URL can never be checked against a
+  path (or command) allowlist, or vice versa — compiler-enforced, not just a
+  runtime convention. `allowed_commands` (the exec capability's allowlist)
+  compiles through this same `AllowSet<CommandCap>`. `ReadPathCap`/
+  `WritePathCap` additionally implement the `PathCap`-bounded `check_path`,
+  which consumes a `ResolvedPath` and mints the `AllowedPath` token (see
+  `state.rs` below) on a match — the only way to obtain one.
+- `argv.rs` — `canonical_argv(program, args) -> CanonicalArgv`, the exec
   capability's single **matching key** an `allowed_commands` pattern is checked
   against — never executed, since the host always spawns `program` + `args`
-  directly with no shell. Quotes an argument (single-quoted, POSIX-style, with
+  directly with no shell. `CanonicalArgv` is a newtype (T3) whose sole
+  constructor is this function, so the `allowed_commands` gate can never be
+  checked against a hand-built string that bypassed it — that's type-enforced.
+  The exec cache key is only derived from a `CanonicalArgv` by convention, at
+  its single call site (`cache_path` in `cache.rs` still takes a bare `&str`
+  key) — typing that parameter is open finding T22. Quotes an argument
+  (single-quoted, POSIX-style, with
   an embedded `'` escaped as `'\''`) whenever it contains whitespace, a quote,
   or a backslash, or is empty, so two different argv vectors (e.g.
   `["log", "--author=a b"]` vs `["log", "--author=a", "b"]`) can never collapse
   onto the same canonical string and silently share a grant.
-- `state.rs` — `sanitize_relpath` (rejects absolute/`..` paths for state I/O),
-  `normalize_abs` (rejects `..` for arbitrary-file I/O), `dir_size`/`check_cap`
-  (state-dir quota accounting via `walkdir`).
+- `state.rs` — `sanitize_relpath -> SandboxRelPath` (rejects absolute/`..`
+  paths for state I/O), `normalize_abs`/`resolve_for_allowlist -> ResolvedPath`
+  (the symlink gate for arbitrary-file I/O, consulted before either read/write
+  allowlist: by default denies outright on any symlink path component; when
+  the plugin's `resolve_symlinks` is set, canonicalizes first — falling back
+  to canonicalizing the parent for a not-yet-existing write target — and
+  matches the allowlist against the *resolved* location, hard-denying rather
+  than falling through if canonicalization fails; see the Config section
+  below), and `dir_size`/`check_cap` (the quota primitives — `dir_size` is no
+  longer walked per write; see `capability.rs`'s `state_size` memo below).
+  `ResolvedPath`/`SandboxRelPath` are constructible only in this module (T2);
+  `AllowedPath` (also here) is minted only by an allowlist's `check_path` on a
+  match (see `allow.rs` above). The four filesystem-effect sites in
+  `perform.rs` accept only these types, so "resolve → match → act" is a
+  type-level fact rather than statement order.
 - `paths.rs` — `expand_tilde`, `data_root`, `state_root`, `default_plugin_dir`
   (all under `$XDG_DATA_HOME/rustline`, falling back to `$HOME/.local/share/rustline`),
   plus `wasmtime_cache_config_path`/`ensure_wasmtime_cache_config` (W43): lazily
@@ -556,19 +661,47 @@ these shared types, not a design shortcut. Keep them serializable.
   `rl_exec_cached`) and are re-exported here, so existing `crate::abi::HttpResult`
   paths keep resolving (the same precedent as `rustline_core::segment`'s
   `Segment` re-export).
-- `cache.rs` — pure HTTP-response-cache helpers: FNV-1a URL→path, RFC3339
-  freshness (`age_secs`/`is_fresh`), quota-bounded `read_entry`/`write_entry`.
-  `cache_path(state_dir, namespace, key)` now takes a `namespace` argument —
+- `cache.rs` — pure helpers shared by both TTL caches: FNV-1a URL/argv→path,
+  RFC3339 freshness (`age_secs`/`is_fresh`), quota-bounded `read_entry`/
+  `write_entry`. `CacheEntry` carries `last_attempt_at` (when a refresh was
+  last *tried*, success or not) alongside `fetched_at` (when one last
+  *succeeded*). `is_fresh` itself is unchanged; the backoff is a second check
+  in `perform.rs`'s cached-fetch paths (`perform_http_get_cached:90-102`,
+  `perform_exec_cached:295-307`) that reuses `is_fresh` against
+  `last_attempt_at` — when a last-good entry exists, a failing endpoint is
+  retried at most once per TTL instead of every render. An endpoint that has
+  *never* succeeded has no entry to back off against, so it is still fetched
+  on every render — deliberately unchanged (see `perform.rs:172-175`).
+  `write_entry` no longer wedges once its namespace hits quota:
+  `evict_namespace` deletes entries oldest-`fetched_at`-
+  first (a file that fails to parse sorts as oldest) until the namespace fits,
+  and `write_entry` calls it only after `check_cap` first refuses the write —
+  so a full state dir self-heals instead of failing every write from then on.
+  `cache_path(state_dir, namespace, key)` takes a `namespace` argument —
   `HTTP_NAMESPACE`/`EXEC_NAMESPACE` — so the HTTP-response cache and the exec
   capability's own TTL cache (see `perform.rs` below) live in separate
-  `<state_dir>/<namespace>/` subdirectories and can never collide even if a
-  URL and a command line happen to hash to the same digest.
-- `capability.rs` — `CapabilityCtx`: one plugin instance's allowlists (now
-  incl. `allowed_commands: AllowSet`, the exec capability's gate), state
-  root, and quota, built from `PluginConfig` and held in Extism `UserData` so
-  each instance only ever sees its own grants. `DenialKind` gains a `Command`
-  variant alongside `Url`/`Path`, so a denied exec call is recorded and
-  reported (`rustline plugin denials`) the same way as a denied URL/path.
+  `<state_dir>/<namespace>/` subdirectories, both for collision-avoidance and
+  so eviction in one never touches the other's entries.
+- `capability.rs` — `CapabilityCtx`: one plugin instance's allowlists —
+  `allowed_urls: AllowSet<UrlCap>`, `allowed_paths: AllowSet<ReadPathCap>`
+  (read), `allowed_write_paths: AllowSet<WritePathCap>` (write, separate from
+  `allowed_paths` — see the Config section below), `allowed_commands:
+  AllowSet<CommandCap>` (the exec capability's gate) — each its own
+  phantom-tagged type (T3) rather than four instances of the same untyped
+  set — plus `resolve_symlinks`,
+  state root, and quota, built from `PluginConfig` and held in Extism
+  `UserData` so each instance only ever sees its own grants. `DenialKind`
+  gains a `Command` variant alongside `Url`/`Path` (a denied write is also
+  recorded as `Path`), so a denied exec call is recorded and reported
+  (`rustline plugin denials`) the same way as a denied URL/path. `state_size`
+  is an `AtomicU64` memo of the state dir's size: seeded by one `dir_size`
+  walk on first use, then updated from each write's own return value rather
+  than re-walked — `set_state_size`/`invalidate_state_size` (the latter
+  called on any write path that fails, so a failed write can't leave the
+  memo believing an eviction happened that didn't) keep it honest. `log_calls`
+  is an `AtomicU32` counting `rl_log` calls toward `perform::
+  MAX_GUEST_LOG_CALLS` — see `perform.rs`'s `perform_log` below for what
+  "per process" means for a long-lived daemon instance.
 - `fetch.rs` — `Fetcher` trait + `UreqFetcher` (the real rustls blocking HTTP
   client); the trait seam makes `perform_http_get`'s gating logic testable
   without a network.
@@ -597,9 +730,20 @@ these shared types, not a design shortcut. Keep them serializable.
   transitively, the daemon's shared render lock).
 - `perform.rs` — the eight capability-checked effect functions
   (`perform_http_get`, `perform_http_get_cached` — the TTL-cached GET:
-  gate-first, 2xx-only caching, serve-stale — `perform_state_read/write`,
-  `perform_file_read/write`, and `perform_exec`/`perform_exec_cached`); pure
-  enough to unit-test directly, incl. the denied-case tests. `perform_exec`
+  gate-first, 2xx-only caching, serve-stale, and now backing off to at most
+  one refresh attempt per TTL window on a failure (see `cache.rs` above) —
+  `perform_state_read/write`, `perform_file_read/write`, and
+  `perform_exec`/`perform_exec_cached`); pure enough to unit-test directly,
+  incl. the denied-case tests. Each of the eight delegates to a private
+  outcome enum (`HttpOutcome`/`CachedHttpOutcome`/`ExecOutcome`/
+  `CachedExecOutcome`/`ReadOutcome`/`WriteOutcome`, T4) with exactly one
+  `From` impl converting it to its wire struct — the single author of every
+  ok/error/stale flag combination, so a caller can't hand-assemble an
+  inconsistent wire result; the wire JSON itself is unchanged, pinned by a
+  `wire_pins` test module. `perform_file_read` gates on `allowed_paths`
+  and `perform_file_write` on the separate `allowed_write_paths` — an entry in
+  one never authorizes the other — both resolved through
+  `state::resolve_for_allowlist` first (see `state.rs` above); `perform_exec`
   gates on `canonical_argv(program, args)` — the **whole** command line, not
   just `program` — against `allowed_commands` before ever touching `runner`
   (gate-first, invariant N1); a non-zero exit is `ok: true` (the process ran;
@@ -614,7 +758,18 @@ these shared types, not a design shortcut. Keep them serializable.
   the host's `tracing` subscriber, so unlike the eight above it has no
   `CapabilityCtx` allowlist to check and no denied-case test; an unrecognized
   `level` string degrades to `info` (keeping the original as a field) rather
-  than dropping the message or panicking.
+  than dropping the message or panicking. Capability-free does not mean
+  unbounded, though: a guest message is truncated to `MAX_GUEST_LOG_BYTES` (2
+  KiB, the truncation marker budgeted inside that cap, not added on top), and
+  calls are capped at `MAX_GUEST_LOG_CALLS` (256) per plugin instance per
+  process — neither is a capability gate (nothing is denied, no
+  `observe_denial` fires), just a size/rate bound so a buggy or hostile guest
+  can't fill the user's disk. "Per process" means per render on the CLI path,
+  but per **daemon lifetime** once a plugin instance is warm there (see
+  `capability.rs`'s `log_calls` above), so a well-behaved plugin logging once
+  a render goes quiet after `MAX_GUEST_LOG_CALLS` renders until the daemon
+  restarts or reloads — a one-shot `warn!` at the boundary leaves a breadcrumb
+  explaining the silence.
 - `host.rs` — the `host_fn!` wrappers binding `perform_*` (incl.
   `rl_http_get_cached`, `rl_exec`/`rl_exec_cached`, and, W7, `rl_log`) to each
   plugin's `CapabilityCtx`, `build_plugin` (Extism instantiation: wasi off,
@@ -628,12 +783,16 @@ these shared types, not a design shortcut. Keep them serializable.
   untouched); `CompileCache::Disabled` (`with_cache_disabled`) is the bench's
   A/B toggle that forces a full compile. And `WasmWidget` (wraps an
   `extism::Plugin`; `Widget::render` degrades to empty segments on any
-  error/timeout/malformed output; carries its own `name` and implements
-  `range_name` as `Some(name)` iff `name.len() <= 15` — the guest itself
-  decides whether to honor `context.toggled`).
+  error/timeout/malformed output; carries its own `name: WidgetName` and
+  implements `range_name` via `RangeName::parse` (rejecting a
+  charset-violating `.wasm` stem too, not just an over-length one — the same
+  forgery hole `RangeName` closes elsewhere, see `range_name.rs` above) —
+  the guest itself decides whether to honor `context.toggled`).
 - `manifest.rs` — plugin capability *manifests* (W24): `PluginManifest
-  { name, version, requested_urls, requested_paths, requested_commands }` and
-  `resolve_manifest(plugin_dir, name) -> Option<PluginManifest>`, which
+  { name, version, requested_urls, requested_paths, requested_write_paths,
+  requested_commands }` (D3 added `requested_write_paths`, parsed separately
+  from the read-only `requested_paths`) and `resolve_manifest(plugin_dir,
+  name) -> Option<PluginManifest>`, which
   resolves a sidecar `<plugin_dir>/<name>.toml` first (primary; supersedes
   unconditionally, even if malformed) or else an embedded `rustline-manifest`
   wasm custom section (fallback, via a hand-rolled `find_custom_section`
@@ -643,12 +802,17 @@ these shared types, not a design shortcut. Keep them serializable.
   and treated as absent, never breaking discovery (N2).
 - `denials.rs` — `FileDenialObserver` (W28), the production `DenialObserver`
   wired as the default in `register_plugins`: it dedupes `(plugin, kind,
-  target)` and appends each newly-seen capability denial as a JSON line to
+  target)` and, for each newly-seen triple, both appends a JSON line to
   `<data_root>/denials.jsonl` (best-effort — a write failure `warn!`s, never
-  panics, per N2). `denials_path()`/`read_denials_at`/`read_denials` back
-  `rustline plugin denials <name>`. NOTE: the record has no quota/rotation yet
-  — a guest that varies its `target` defeats the dedup and grows the file
-  unbounded (a follow-up; see WHATS-NEXT).
+  panics, per N2) **and** logs a `tracing::warn!` ("capability denied; see
+  `rustline plugin denials <plugin>`") — the JSONL file is no longer the only
+  place a denial surfaces, so one shows up in the log the first time it
+  happens instead of only on a manual `plugin denials` lookup; the log line
+  reuses the same dedup as the record, so a repeated denial still logs once.
+  `denials_path()`/`read_denials_at`/`read_denials` back `rustline plugin
+  denials <name>`. NOTE: the record has no quota/rotation yet — a guest that
+  varies its `target` defeats the dedup and grows the file unbounded (a
+  follow-up; see WHATS-NEXT).
 - `integrity.rs` — plugin binary integrity (W19): `sha256_hex(bytes: &[u8]) ->
   String`, the single definition of the digest both `plugin_install.rs` (at
   install time) and `register_plugins` (at load time) now share — the prior
@@ -824,7 +988,8 @@ failure path via `rl_log` (W7) rather than staying silent:
   backward clock) does it fall back to the classic two-sample read
   (`parse_proc_stat` + `busy_percent`, sampling `CPU_SAMPLE_WINDOW` ~120 ms
   apart). Either way the current reading is persisted afterward
-  (`store_snapshot`, a best-effort atomic temp-file + rename) so the *next*
+  (`store_snapshot`, via the shared `write_atomic` primitive — see
+  `rustline-core`'s `atomic_write.rs` above) so the *next*
   call can take the fast path — this is no longer a stateless delta. **macOS now
   shares this exact snapshot-delta path**: `read_cpu_macos_in` reads cumulative
   CPU ticks from the mach kernel via `read_mach_cpu_ticks`
@@ -941,8 +1106,9 @@ failure path via `rl_log` (W7) rather than staying silent:
   not routed through `build_context.rs`).
 - `sample_store.rs` — shared best-effort atomic per-widget state persistence
   (W52): `read_sample`/`write_sample` read/write a small text file under a state
-  dir via temp-file + rename, `warn!`ing (never panicking) on I/O failure. A
-  generalization of `cpu.rs`'s pre-existing `cpu-sample` dance, reused by
+  dir via `write_atomic` (`rustline-core`'s `atomic_write.rs`), `warn!`ing
+  (never panicking) on I/O failure. A generalization of `cpu.rs`'s
+  pre-existing `cpu-sample` dance, reused by
   `throughput.rs` and the `{spark}` history reads; each caller keeps its own
   sample serialization/parsing.
 - `history.rs` — pure sparkline-history ring helpers (W45): `parse_history`/
@@ -1006,7 +1172,17 @@ failure path via `rl_log` (W7) rather than staying silent:
   *any* other outcome (connect/timeout/decode error, or a `Pong`/
   `ShuttingDown` reply), so the caller always has a safe in-process render to
   fall back to (invariant N2 extended to the daemon path — "never break the
-  bar").
+  bar"). It also now reports *why* it fell back: a missing socket stays
+  silent (not installed is not a problem), but every failure past that
+  `stat` — a timeout setter, the write, the read, an unexpected response —
+  logs at `debug` (cheap, per-tick, `-vvv` detail), except a socket that
+  *exists but refuses the connection* (a dead daemon left it behind), which is
+  `warn_once`'d instead (`"daemon-stale-socket:<path>"`) since that case is
+  actionable and persists across ticks rather than being a one-off, unlike a
+  per-tick `debug!`. `daemon.rs`'s `reload_if_changed` gets a matching
+  `info!` — one line per config edit (it only runs when the mtime actually
+  changed, so no dedup is needed), the only confirmation a user gets that a
+  warm daemon picked up their edit.
 - `daemon.rs` — the daemon server (W48): `DaemonState { config, theme,
   plugin_dir, registry, config_mtime }` holds everything warm across
   requests — parsed `Config`, resolved `Theme`, a built `Registry` (built
@@ -1125,7 +1301,7 @@ failure path via `rl_log` (W7) rather than staying silent:
   (from `std::env::consts::OS`/`ARCH`), and `toggled` (via
   `toggles::read_toggles()`, unconditionally — cheap relative to the gated
   cpu/memory/git/disk reads). `pub fn build_region_context(args: &RegionArgs,
-  layout: &[String], theme: &Theme, cfg: &Config) -> Context` (W46 — the
+  layout: &[WidgetName], theme: &Theme, cfg: &Config) -> Context` (W46 — the
   signature dropped the old separate `disk_mount` parameter; `cfg` carries
   everything needed) is now **kind-aware**: it resolves `cfg.layout_kinds(layout)`
   once and gates every read (`git`/`battery`/`cpu`/`memory`/`uptime`/`media`/
@@ -1152,18 +1328,23 @@ failure path via `rl_log` (W7) rather than staying silent:
   `rustline_wasm::data_root()`), `parse_toggles`/`serialize_toggles`
   (newline-delimited, total over blanks/whitespace), `apply_toggle` (flips
   membership), `read_toggles` (missing/unreadable file → empty set), and
-  `write_toggles` (best-effort atomic temp-file + rename; a write failure
-  `warn!`s and never panics — a broken toggle must never break the bar).
+  `write_toggles` (best-effort atomic write via `write_atomic`; a write
+  failure `warn!`s and never panics — a broken toggle must never break the
+  bar).
 - `plugin_cmd.rs` — `rustline plugin …`: `list` reads the effective `Config`;
-  `list`/`url|path|cmd list`/`denials` each take a `--json` flag (W40,
-  `plugin_list_json`/`pattern_list_json`/`denials_json`) emitting a
+  `list`/`url|path|write-path|cmd list`/`denials` each take a `--json` flag
+  (W40, `plugin_list_json`/`pattern_list_json`/`denials_json`) emitting a
   `serde_json`-pretty array instead of the human text, human output
   unchanged when the flag is absent — `list --json`'s per-plugin object now
-  also carries `allowed_commands`, alongside the existing `allowed_urls`/
-  `allowed_paths`. `url|path|cmd add/remove` all share one `pattern_cmd`
-  dispatch keyed by a private `Kind { Url, Path, Command }` (`Kind::key()` ->
-  `"allowed_urls"`/`"allowed_paths"`/`"allowed_commands"`) that mutates the
-  config file in place via `toml_edit`
+  also carries `allowed_write_paths` and `resolve_symlinks` (D3, so a plugin
+  holding a write grant can't render as read-only in machine-readable
+  output), alongside the existing `allowed_urls`/`allowed_paths`/
+  `allowed_commands`; the human `list` output prints `resolve_symlinks` too,
+  so the doc comment's "same fields the human list prints" claim stays true.
+  `url|path|write-path|cmd add/remove` all share one `pattern_cmd` dispatch
+  keyed by a private `Kind { Url, Path, WritePath, Command }` (`Kind::key()`
+  -> `"allowed_urls"`/`"allowed_paths"`/`"allowed_write_paths"`/
+  `"allowed_commands"`) that mutates the config file in place via `toml_edit`
   (preserving comments/formatting), creating `[plugins.<name>]` if absent;
   `new <name> [--path] [--force]` scaffolds a ready-to-build WASM guest
   plugin crate from embedded templates (`assets/plugin-cargo.toml.tmpl`/
@@ -1176,15 +1357,20 @@ failure path via `rl_log` (W7) rather than staying silent:
   `cargo build --target wasm32-unknown-unknown` + install step and a
   starter `[plugins.<name>]` config snippet afterward. `approve <name>
   [--yes]` (W24) resolves the plugin's manifest via `resolve_manifest`,
-  prints what it requests via `manifest_report` — which, when
-  `requested_commands` is non-empty, appends an explicit warning that
+  prints what it requests via `manifest_report` — labeling the read line
+  `allowed_paths (read-only)` and, when `requested_write_paths` is
+  non-empty, appending its own overwrite-danger banner ("lets this plugin
+  overwrite these files with any content"), mirroring the existing warning
+  that fires when `requested_commands` is non-empty (that
   `allowed_commands` runs real programs with the user's own environment and
-  permissions, and to approve only patterns they understand — and, after an
+  permissions) — approve only patterns you understand — and, after an
   interactive y/N confirmation (or unconditionally with `--yes`), writes
-  **exactly** those requested URL/path/command patterns into
-  `[plugins.<name>]`'s allowlists (idempotent append, never a wider grant).
-  The warning is part of `manifest_report`'s printed text, not the
-  confirmation prompt, so it still shows up under `--yes` and in captured
+  **exactly** those requested URL/read-path/write-path/command patterns into
+  `[plugins.<name>]`'s allowlists (idempotent append, never a wider grant);
+  the "nothing to approve" guard checks all four requested lists, so a
+  manifest requesting only `requested_write_paths` is still approvable.
+  Both warnings are part of `manifest_report`'s printed text, not the
+  confirmation prompt, so they still show up under `--yes` and in captured
   output/logs, not just an interactive session. `list` also now shows a `run
   \`plugin approve <name>\`` hint when a manifest resolves for that plugin.
   Also handles `build` (W31, any
@@ -1379,10 +1565,37 @@ failure path via `rl_log` (W7) rather than staying silent:
   curated layout it seeds live only here, **not** in any widget's code
   `Default` (those stay `""`/unchanged; see Config below).
 - `logging.rs` — `init(&LogConfig, verbose)`: installs the two-sink `tracing`
-  subscriber (rotated file + stderr), plus the pure helpers `verbosity_to_level`,
-  `parse_level`, `resolve_file_level`/`resolve_stderr_level`, `should_rotate`,
-  `open_log`, `log_path`. Best-effort: a file that can't be opened degrades to
-  stderr-only; never writes stdout.
+  subscriber (a daily-rotated file, via `tracing_appender`'s
+  `RollingFileAppender`, plus stderr), and the pure helpers
+  `verbosity_to_level`, `parse_level`, `resolve_file_level`/
+  `resolve_stderr_level`, `log_dir`/`log_file_prefix`/`log_file_suffix`
+  (decompose `[log].file` into the directory + filename prefix/suffix the
+  appender needs to name each day's generation
+  `<prefix>.<YYYY-MM-DD>.<suffix>`), `current_log_path` (today's file, in
+  UTC — the appender rotates on a UTC day boundary, so this must not use
+  local time, or `doctor`'s reported path would disagree with what the
+  appender actually writes for anyone off UTC+0), and `build_appender` (the
+  one builder chain both production `init` and the test suite call, so they
+  can't drift). `open_log`/`log_path`/`should_rotate` from the old
+  size-capped, single-generation rotator no longer exist. Best-effort: a log
+  dir that can't be created or opened degrades to stderr-only; never writes
+  stdout.
+- `warn_once.rs` — the real cross-process dedup layer behind
+  `rustline-core`'s `diag::warn_once` seam (above). `install(config_path)`,
+  called once from `main` immediately after `logging::init`, installs a hook
+  that claims a marker file per distinct `warn_once` key under
+  `<data_root>/.warn-markers/` (a sibling of `state/`, deliberately not a
+  descendant of it — see the module doc for the collision an unvalidated
+  plugin stem like `.warn-markers` could otherwise cause) via
+  `OpenOptions::create_new(true)`, atomic on every filesystem this project
+  supports, so concurrent renderers racing the same key still produce exactly
+  one winner with no lock. The whole marker directory is cleared whenever the
+  config file's mtime changes (`reset_if_generation_changed`), so each
+  misconfiguration is logged once per config edit rather than once per render
+  tick. **Fails open, all the way down**: a marker I/O failure is treated as
+  "emit", and a marker dir that exists but is wedged (present, non-empty,
+  unwritable) makes `install` skip installing the hook at all for that run —
+  degrading to no dedup rather than to permanent silence.
 - `main.rs` — dispatch + the `emit(markup, preview)` helper (raw markup vs
   ANSI) + `resolve_plugin_dir` (`--plugin-dir` flag › config `plugin_dir` ›
   `rustline_wasm::default_plugin_dir()`). Only `render left`/`render right`
@@ -1573,9 +1786,13 @@ config-file path for every subcommand that reads or writes it (default:
 - `rustline plugin list [--json]` — discovered/configured plugins with their
   source, allowlists, state quota, and checksum status; `--json` emits a JSON
   array of `{name, source, tag, allowed_urls, allowed_paths,
-  allowed_commands, max_state_bytes, has_manifest, checksum_status}` instead
-  of human text (the human path prints the same value as a `checksum: `
-  line per plugin). `checksum_status` is one of `"verified"`/`"unpinned"`/
+  allowed_write_paths, resolve_symlinks, allowed_commands, max_state_bytes,
+  has_manifest, checksum_status}` instead of human text (the human path
+  prints the same values, incl. `resolve_symlinks`, as `checksum: `/other
+  lines per plugin). `allowed_paths` is **read-only**; `allowed_write_paths`
+  (globs, empty = deny) is the separate write allowlist — see the Config
+  section's filesystem-capability paragraph above. `checksum_status` is one
+  of `"verified"`/`"unpinned"`/
   `"mismatch"`/`"malformed"`/`"missing"` (`plugin_checksum::
   PluginChecksumStatus`, the same read-and-verify helper backing `doctor`'s
   "plugin checksums" row above) — read-only and purely informational: it
@@ -1596,14 +1813,17 @@ config-file path for every subcommand that reads or writes it (default:
   `rustline plugin install <owner/repo>` for an installable one. `--json`
   follows the repo's existing convention (a pretty-printed array). Strictly
   read-only — writes neither config nor the toggles file.
-- `rustline plugin url|path|cmd list [--json]|add|remove <plugin> [pattern]`
-  — read or edit a plugin's `allowed_urls`/`allowed_paths`/`allowed_commands`
-  (`add`/`remove` rewrite the config file in place via `toml_edit`, preserving
+- `rustline plugin url|path|write-path|cmd list [--json]|add|remove <plugin>
+  [pattern]` — read or edit a plugin's `allowed_urls`/`allowed_paths`
+  (read)/`allowed_write_paths` (write)/`allowed_commands` (`add`/`remove`
+  rewrite the config file in place via `toml_edit`, preserving
   comments/formatting); `list --json` emits the patterns as a JSON array of
-  strings (`[]` for an absent/empty plugin) instead of one per line. `cmd` is
-  the exec capability's counterpart to `url`/`path`: its patterns are matched
-  against the whole canonical argv (`rustline_wasm::canonical_argv`), not
-  just the program name.
+  strings (`[]` for an absent/empty plugin) instead of one per line.
+  `write-path` is `path`'s write-only counterpart — a grant in one never
+  authorizes the other (see the Config section's filesystem-capability
+  paragraph above). `cmd` is the exec capability's counterpart to
+  `url`/`path`: its patterns are matched against the whole canonical argv
+  (`rustline_wasm::canonical_argv`), not just the program name.
 - `rustline plugin new <name> [--path <dir>] [--force]` — scaffold a
   ready-to-build WASM guest plugin crate at `<dir or cwd>/<name>/`
   (`Cargo.toml` with an empty `[workspace]` table + edition 2024 + cdylib,
@@ -1614,15 +1834,18 @@ config-file path for every subcommand that reads or writes it (default:
   existing `<name>/` directory without `--force`.
 - `rustline plugin approve <name> [--yes]` — resolve `<name>`'s declared
   capability manifest (a sidecar `<name>.toml` in the plugin dir, or an
-  embedded `rustline-manifest` wasm custom section), print what it requests
-  — including, when the manifest asks for `requested_commands`, an explicit
-  warning that granting `allowed_commands` runs real programs with the
-  user's own environment and permissions (part of the printed report, so it
-  shows up under `--yes` too, not just an interactive prompt) — and, after
-  an interactive y/N confirmation (or unconditionally with `--yes`), write
-  exactly those requested URL/path/command patterns into
+  embedded `rustline-manifest` wasm custom section), print what it requests —
+  labeling the read line `allowed_paths (read-only)`, and including, when the
+  manifest asks for `requested_write_paths`, an explicit overwrite-danger
+  warning, and when it asks for `requested_commands`, an explicit warning
+  that granting `allowed_commands` runs real programs with the user's own
+  environment and permissions (both part of the printed report, so they show
+  up under `--yes` too, not just an interactive prompt) — and, after an
+  interactive y/N confirmation (or unconditionally with `--yes`), write
+  exactly those requested URL/read-path/write-path/command patterns into
   `[plugins.<name>]`'s allowlists; declines (writing nothing) without
-  confirmation, and does nothing if the plugin has no manifest.
+  confirmation, and does nothing if the plugin has no manifest or if it
+  requests no capabilities at all.
 - `rustline plugin build <dir> [--release] [--plugin-dir <d>] [--yes]` —
   build any WASM guest plugin crate (any `cdylib`-for-`wasm32-unknown-unknown`
   crate, not just this repo's `plugins/*`) and install the resulting `.wasm`
@@ -2282,7 +2505,9 @@ plugin_index_url = "https://example.com/my-index.json"   # optional; overrides t
 [plugins.weather]
 source = "steve/rustline-weather"          # owner/repo; consumed by `plugin update`
 allowed_urls = ["https://wttr.in/*"]        # glob, or "re:<pattern>" for regex
-allowed_paths = []
+allowed_paths = []                          # READ-only; see the filesystem-capability paragraph below
+allowed_write_paths = []                    # WRITE-only, globs; empty = deny by default
+resolve_symlinks = false                    # default; see below for what `true` trades away
 allowed_commands = []                       # glob/"re:", matched against the WHOLE argv (see below)
 max_state_bytes = 52428800                  # default: 50 MB
 # tag = "v1.2.0"                            # recorded by `plugin install/update`
@@ -2302,14 +2527,42 @@ prefixed `re:` — regex entries are **anchored to a full-string match** (unifor
 with globs); to match a prefix/substring, include `.*` in the pattern (e.g.
 `re:https://wttr\.in/.*`).
 
+**Filesystem capability (`allowed_paths` / `allowed_write_paths` /
+`resolve_symlinks`):** `rl_file_read`/`perform_file_read` is gated by
+`allowed_paths`, which is **read-only**, and `rl_file_write`/
+`perform_file_write` by the separate `allowed_write_paths`, which is
+**write-only** — an entry in one never authorizes the other. Both are empty
+(deny-by-default) unless populated, same glob-or-`re:` shape as the other
+allowlists. **This is a change from before this batch**, when one
+`allowed_paths` list authorized both directions: an existing `allowed_paths`
+entry now grants read only, and a plugin that was writing through it fails
+closed — a denial record plus a log line — rather than silently. Every
+read/write request is resolved through `resolve_for_allowlist`
+(`rustline-wasm`'s `state.rs`, see above) before either list is consulted,
+which also closes a symlink escape: a grant is otherwise a grant over
+**names**, and a symlink planted under a granted prefix (an extracted
+archive, a synced directory, another tool) would silently redirect the
+effect to wherever it points — past the subtree the user thought they'd
+granted. By default (`resolve_symlinks = false`) a path with any symlink
+component is denied outright, closing that name-vs-subtree gap for good;
+setting `resolve_symlinks = true` on a plugin trades that closure away — the
+path is canonicalized first (falling back to canonicalizing the parent for a
+not-yet-existing write target, so a first write to a granted directory still
+works) and the allowlist is matched against the **resolved** location, so a
+grant then legitimately follows symlinks out of the directory the user
+thought they were granting. Canonicalization failing is a hard denial, never
+a silent fall-through to the raw path.
+
 A plugin may also declare a capability **manifest** — a sidecar
 `<plugin_dir>/<name>.toml` (or an embedded `rustline-manifest` wasm custom
-section) listing `requested_urls`/`requested_paths`/`requested_commands` —
-which `rustline plugin approve <name>` turns into exactly those allowlist
-entries above, after confirmation (see CLI above). A manifest alone grants
-nothing; only `approve` (or hand-editing the config) ever widens an
-allowlist. `plugin approve` prints an explicit warning when a manifest
-requests commands — see the exec-capability paragraph below.
+section) listing `requested_urls`/`requested_paths`/`requested_write_paths`/
+`requested_commands` — which `rustline plugin approve <name>` turns into
+exactly those allowlist entries above, after confirmation (see CLI above). A
+manifest alone grants nothing; only `approve` (or hand-editing the config)
+ever widens an allowlist. `plugin approve` prints an explicit
+overwrite-danger warning when a manifest requests write paths, and a
+separate explicit warning when it requests commands — see the exec-capability
+paragraph below.
 
 `source` is a typed `PluginSource` that still accepts a bare `owner/repo`
 string; `rustline plugin install <owner/repo>` (W38) downloads the plugin's
@@ -2433,17 +2686,40 @@ spawn failure, or timeout) falls back to the last-good cached entry with
 `stale: true`.
 
 **Logging:** a `[log]` table controls the two sinks. `rustline` logs to a
-rotated file (`$XDG_DATA_HOME/rustline/rustline.log`, default level `info`) and
-to stderr (default level `error`). `RUST_LOG` is **not** consulted. Raise the
-*file* level with repeated `-v` (`-v`=warn, `-vv`=info, `-vvv`=debug,
-`-vvvv`=trace); `-v` never affects stderr. The file rotates to `rustline.log.1`
-once it passes 5 MiB (one generation kept). Any level value is `off|error|warn|
-info|debug|trace` and is parsed leniently (a typo falls back to the default).
+**daily-rotated** file (default dir `$XDG_DATA_HOME/rustline`, default level
+`info`) and to stderr (default level `error`). `RUST_LOG` is **not**
+consulted. Raise the *file* level with repeated `-v` (`-v`=warn, `-vv`=info,
+`-vvv`=debug, `-vvvv`=trace); `-v` never affects stderr. Today's file is
+`<dir>/rustline.<YYYY-MM-DD>.log` (e.g. `rustline.2026-07-27.log`) — **not**
+`rustline.log.<date>` — computed in **UTC**, matching the boundary
+`tracing-appender`'s `RollingFileAppender` itself rotates on; **7** daily
+generations are kept (`MAX_LOG_FILES`), each pruned as the eighth appears.
+This replaced the old size-capped rotator: there is no 5 MiB cap and no
+single `.1` backup anymore — `[log].file`, if set, no longer names one fixed
+path. Instead it's decomposed into a directory (its parent), a filename
+prefix (its stem), and a filename suffix (its extension), which the daily
+appender recombines as `<prefix>.<date>.<suffix>` each day. Any level value
+is `off|error|warn|info|debug|trace` and is parsed leniently (a typo falls
+back to the default).
 
     [log]
     file_level   = "info"
     stderr_level = "error"
-    file         = "~/.local/share/rustline/rustline.log"   # optional override
+    file         = "~/.local/share/rustline/rustline.log"   # optional override; decomposed into dir/prefix/suffix — see above
+
+**Warn dedup:** a `warn!`/`info!` that describes a *static misconfiguration*
+(an unparseable theme file, an unknown widget name, a plugin with no
+`abi_version` export, …) — one that would otherwise re-fire on every render
+tick, forever — is logged at most once per config generation via
+`rustline_core::diag::warn_once` (see `diag.rs`/`warn_once.rs` in the module
+map above). The dedup state lives at `<data_root>/.warn-markers/`
+(`~/.local/share/rustline/.warn-markers`), a sibling of `denials.jsonl`,
+`toggles`, `plugin-index.json`, and the log directory under the same
+`data_root()`; it is cleared whenever `config.toml`'s mtime changes, so
+editing the config re-arms every warning for one more render. A genuine
+per-occurrence runtime failure (a plugin render failing, a cache write
+failing, a denial) is deliberately NOT routed through this — only a
+misconfiguration that stays constant between renders is.
 
 ## Invariants (load-bearing — re-check when touching these)
 
@@ -2483,13 +2759,13 @@ info|debug|trace` and is parsed leniently (a typo falls back to the default).
    (multiple widget instances) extends this: for a named `[instances.<name>]`
    entry, that identity chain runs on the **instance** name, not its `kind` —
    each of the twelve clickable widget structs now carries its own `name:
-   String` field precisely so `render`/`range_name`/`active_format` all key
+   WidgetName` field precisely so `render`/`range_name`/`active_format` all key
    off the instance name instead of a hardcoded kind literal. This also
    means an instance can never be allowed to shadow a built-in of the same
    name (it would silently steal that built-in's click/toggle identity) —
    `Registry::with_builtins` skips a colliding instance outright (built-in
    wins), and `Config::color_overrides()`/`click_map()`/`layout_kinds` apply
-   the same `is_builtin_widget_name` precedence guard so a colliding
+   the same `WidgetKind::parse(name).is_some()` precedence check so a colliding
    instance's config can't hijack the built-in's projected color/click
    binding either (a W46 review-caught bug — see `config.rs` above).
 8. **Segment text is never interpolated into tmux markup unsanitized.** tmux
@@ -2555,9 +2831,14 @@ branch on platform.
    tests proving a denied argv never reaches a spawn (and, for the cached
    variant, never touches its own cache file either). Every deny site also
    calls `observe_denial` (before returning `ok:false`) so the default
-   `FileDenialObserver` records the `(kind, target)` for `rustline plugin
-   denials` (W28) — recording is best-effort and never changes the gate
-   outcome.
+   `FileDenialObserver` both records the `(kind, target)` for `rustline
+   plugin denials` (W28) and logs a deduped `warn!` pointing at that command
+   — recording (and now logging) is best-effort and never changes the gate
+   outcome. `perform_file_read`/`perform_file_write` are the filesystem
+   capability's instance of this pattern: they gate on the separate
+   `allowed_paths` (read) / `allowed_write_paths` (write) allowlists, after
+   first resolving the path through `resolve_for_allowlist`'s symlink gate —
+   see the Config section's filesystem-capability paragraph.
 10. **N2. A plugin never breaks the bar.** Any instantiation error, render
    error, timeout, or malformed output degrades to empty segments
    (`WasmWidget::render`), bounded by fuel + wall-clock timeout + memory caps.
@@ -2899,19 +3180,24 @@ branch on platform.
     Enter-through re-run rewrote a two-line bar back to one line — see
     `init.rs`/`tmux_conf.rs` above).
   - W46 — multiple widget instances: a top-level `[instances.<name>]` table
-    (`Config.instances: HashMap<String, toml::Value>`, re-parsed per `kind`
+    (`Config.instances: HashMap<String, toml::Value>` at the time — since
+    retyped `HashMap<WidgetName, Value>` with a closed `WidgetKind` `kind`,
+    see T5/T6 in `config.rs` above — re-parsed per `kind`
     into that kind's existing Opts struct) lets any of the twelve clickable
     widget kinds appear more than once in a layout with distinct options
     (dual clocks in different timezones, multiple disk mounts, per-interface
     throughput). Each of those twelve widget structs now carries a `name`
-    field so its click-toggle/range identity is the *instance* name, not the
+    field (`WidgetName` as of T6) so its click-toggle/range identity is the
+    *instance* name, not the
     kind (invariant #7); `Context.disks`/`Context.throughputs` (keyed by
     mount/interface) let the parameterized `disk`/`throughput` kinds serve
     distinct instances without clobbering each other, and per-interface
     throughput sample files (`throughput-sample-<iface>`) prevent the same
     for persisted state. An instance can never shadow a built-in name
-    (`BUILTIN_WIDGET_NAMES`/`is_builtin_widget_name`, applied uniformly across
-    registration, `color_overrides()`, `click_map()`, and `layout_kinds`).
+    (`BUILTIN_WIDGET_NAMES`/`is_builtin_widget_name` at the time, applied
+    uniformly across registration, `color_overrides()`, `click_map()`, and
+    `layout_kinds` — since deleted and superseded by T5's
+    `WidgetKind::parse(name).is_some()`).
   - W48 — optional persistent daemon: `rustline daemon run|status|stop`
     (`daemon.rs`/`daemon_client.rs`/`daemon_proto.rs`) keeps the parsed
     config, resolved theme, warm widget registry, and instantiated WASM

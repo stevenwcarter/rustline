@@ -1,7 +1,8 @@
 //! File + stderr logging setup for the `rustline` binary.
 //!
 //! Two independently-filtered `tracing` sinks:
-//! - a size-rotated append-mode file at `$XDG_DATA_HOME/rustline/rustline.log`
+//! - a daily-rotated append-mode file at
+//!   `$XDG_DATA_HOME/rustline/rustline.<date>.log`, keeping 7 generations
 //!   (default level INFO; raised only by `-v`), and
 //! - stderr (default level ERROR; config-overridable).
 //!
@@ -10,18 +11,14 @@
 //! best-effort: a file that can't be opened degrades to stderr-only, never a
 //! crash — stdout is the tmux status line and is never written here.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use rustline_core::LogConfig;
+use tracing_appender::rolling::{Builder, InitError, RollingFileAppender, Rotation};
 use tracing_subscriber::filter::LevelFilter;
-use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::prelude::*;
-
-/// Rotate the log file once it exceeds this many bytes.
-const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024; // 5 MiB
 
 /// Map a `-v` repetition count to a file-sink level. `0` means "no override"
 /// (use the config/default level). ERROR-based scale, clamped at TRACE.
@@ -78,61 +75,101 @@ fn resolve_stderr_level(cfg_level: &str) -> (LevelFilter, Option<String>) {
     }
 }
 
-/// The effective log-file path: config override (`~/` expanded) or
-/// `$XDG_DATA_HOME/rustline/rustline.log`. `pub(crate)` so `doctor.rs` can
-/// report it without duplicating the resolution logic.
-pub(crate) fn log_path(cfg: &LogConfig) -> PathBuf {
+/// How many daily generations to keep.
+const MAX_LOG_FILES: usize = 7;
+/// Filename suffix used when `[log].file` is unset or has no extension.
+const DEFAULT_LOG_SUFFIX: &str = "log";
+/// Filename stem used when `[log].file` is unset.
+const DEFAULT_LOG_PREFIX: &str = "rustline";
+
+/// The directory the log files live in: the parent of a configured
+/// `[log].file`, else `$XDG_DATA_HOME/rustline`.
+pub(crate) fn log_dir(cfg: &LogConfig) -> PathBuf {
     match &cfg.file {
-        Some(p) => rustline_wasm::expand_tilde(p),
-        None => rustline_wasm::data_root().join("rustline.log"),
+        Some(p) => rustline_wasm::expand_tilde(p)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(rustline_wasm::data_root),
+        None => rustline_wasm::data_root(),
     }
 }
 
-fn should_rotate(size: u64, cap: u64) -> bool {
-    size > cap
+/// The filename stem: a configured `[log].file`'s stem, else `rustline`.
+pub(crate) fn log_file_prefix(cfg: &LogConfig) -> String {
+    cfg.file
+        .as_ref()
+        .map(|p| rustline_wasm::expand_tilde(p))
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_LOG_PREFIX.to_string())
 }
 
-/// Ensure the parent dir exists, rotate the file to `<path>.1` if it exceeds
-/// `cap`, then open it in append mode.
-fn open_log(path: &Path, cap: u64) -> io::Result<File> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if let Ok(meta) = fs::metadata(path)
-        && should_rotate(meta.len(), cap)
-    {
-        let mut rotated = path.as_os_str().to_owned();
-        rotated.push(".1");
-        let _ = fs::rename(path, PathBuf::from(rotated)); // best-effort
-    }
-    OpenOptions::new().create(true).append(true).open(path)
+/// The filename extension: a configured `[log].file`'s extension, else `log`.
+pub(crate) fn log_file_suffix(cfg: &LogConfig) -> String {
+    cfg.file
+        .as_ref()
+        .map(|p| rustline_wasm::expand_tilde(p))
+        .and_then(|p| p.extension().map(|s| s.to_string_lossy().into_owned()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_LOG_SUFFIX.to_string())
 }
 
-/// A `MakeWriter` over a shared append-mode file handle. Lock-free: the
-/// kernel's `O_APPEND` gives atomic end-of-file writes and `&File: Write`
-/// lets threads share one fd.
-struct FileWriter(Arc<File>);
-
-impl<'a> MakeWriter<'a> for FileWriter {
-    type Writer = &'a File;
-    fn make_writer(&'a self) -> Self::Writer {
-        &self.0
-    }
+/// Today's log file: `<log_dir>/<prefix>.<YYYY-MM-DD>.<suffix>`. Reported by
+/// `doctor`; the appender derives the same name internally.
+///
+/// The date is computed in UTC, not local time: `RollingFileAppender`
+/// unconditionally rotates on a UTC day boundary, so using local time here
+/// would let this reported path disagree with the file the appender is
+/// actually writing to for any user not at UTC+0. Do not "fix" this to
+/// `chrono::Local::now()` again.
+pub(crate) fn current_log_path(cfg: &LogConfig) -> PathBuf {
+    let date = chrono::Utc::now().format("%Y-%m-%d");
+    log_dir(cfg).join(format!(
+        "{}.{date}.{}",
+        log_file_prefix(cfg),
+        log_file_suffix(cfg)
+    ))
 }
 
-/// Install the two-sink subscriber. Best-effort and infallible: a file that
-/// can't be opened degrades to stderr-only. Emits any deferred warnings
-/// (unparseable levels, file-open failure) after the subscriber is live.
+/// Build the daily-rotating appender. Blocking (no `WorkerGuard` to keep
+/// alive), and it re-evaluates its target on every write — which is what lets
+/// the long-lived daemon follow a rotation instead of pinning a dead inode.
+///
+/// The single builder chain for both production and tests: `init` calls this
+/// directly, so a drift here can't leave the test seam pinned to a stale copy
+/// of what production actually builds.
+fn build_appender(
+    dir: &Path,
+    prefix: &str,
+    suffix: &str,
+) -> Result<RollingFileAppender, InitError> {
+    Builder::new()
+        .rotation(Rotation::DAILY)
+        .filename_prefix(prefix)
+        .filename_suffix(suffix)
+        .max_log_files(MAX_LOG_FILES)
+        .build(dir)
+}
+
+/// Install the two-sink subscriber. Best-effort and infallible: a log
+/// directory that can't be created or opened degrades to stderr-only. Emits
+/// any deferred warnings (unparseable levels, open failure) after the
+/// subscriber is live.
 pub fn init(cfg: &LogConfig, verbose: u8) {
     let (file_level, file_warn) = resolve_file_level(verbose, &cfg.file_level);
     let (stderr_level, stderr_warn) = resolve_stderr_level(&cfg.stderr_level);
-    let path = log_path(cfg);
+    let dir = log_dir(cfg);
 
-    let (file, open_warn) = match open_log(&path, MAX_LOG_BYTES) {
-        Ok(f) => (Some(Arc::new(f)), None),
+    let (appender, open_warn) = match fs::create_dir_all(&dir)
+        .map_err(|e| e.to_string())
+        .and_then(|()| {
+            build_appender(&dir, &log_file_prefix(cfg), &log_file_suffix(cfg))
+                .map_err(|e| e.to_string())
+        }) {
+        Ok(a) => (Some(a), None),
         Err(e) => (
             None,
-            Some(format!("cannot open log file {}: {e}", path.display())),
+            Some(format!("cannot open log dir {}: {e}", dir.display())),
         ),
     };
 
@@ -140,15 +177,15 @@ pub fn init(cfg: &LogConfig, verbose: u8) {
         .with_writer(io::stderr)
         .with_filter(stderr_level);
 
-    let file_layer = file.map(|f| {
+    let file_layer = appender.map(|a| {
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
-            .with_writer(FileWriter(f))
+            .with_writer(a)
             .with_filter(file_level)
     });
 
-    // `Option<L: Layer>` is itself a `Layer` (None = no-op), so a missing file
-    // simply contributes nothing.
+    // `Option<L: Layer>` is itself a `Layer` (None = no-op), so a missing
+    // appender simply contributes nothing.
     tracing_subscriber::registry()
         .with(stderr_layer)
         .with(file_layer)
@@ -168,7 +205,6 @@ pub fn init(cfg: &LogConfig, verbose: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use tempfile::tempdir;
 
     #[test]
@@ -213,50 +249,107 @@ mod tests {
     }
 
     #[test]
-    fn should_rotate_is_strict_greater_than() {
-        assert!(!should_rotate(10, 10));
-        assert!(should_rotate(11, 10));
+    fn log_path_parts_default_to_data_root_rustline_log() {
+        let cfg = LogConfig::default();
+        assert_eq!(log_file_prefix(&cfg), "rustline");
+        assert_eq!(log_file_suffix(&cfg), "log");
+        assert!(log_dir(&cfg).ends_with("rustline"));
     }
 
     #[test]
-    fn open_log_rotates_when_oversized() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("sub").join("rustline.log"); // nested: dir is created
-        // First open (dir absent) creates dir + file.
-        {
-            let f = open_log(&path, 100).unwrap();
-            let mut f = &f; // &File: Write
-            f.write_all(&[b'x'; 200]).unwrap(); // exceed cap
-        }
-        assert!(path.exists());
-        // Second open sees >100 bytes and rotates.
-        {
-            let _f = open_log(&path, 100).unwrap();
-        }
-        let rotated = {
-            let mut p = path.as_os_str().to_owned();
-            p.push(".1");
-            PathBuf::from(p)
+    fn configured_file_decomposes_into_dir_prefix_and_suffix() {
+        let cfg = LogConfig {
+            file: Some("/var/tmp/rl/app.txt".to_string()),
+            ..LogConfig::default()
         };
-        assert!(rotated.exists(), "rotated file exists");
-        assert_eq!(fs::metadata(&path).unwrap().len(), 0, "fresh log is empty");
+        assert_eq!(log_dir(&cfg), PathBuf::from("/var/tmp/rl"));
+        assert_eq!(log_file_prefix(&cfg), "app");
+        assert_eq!(log_file_suffix(&cfg), "txt");
     }
 
     #[test]
-    fn open_log_keeps_small_file() {
+    fn configured_file_without_extension_uses_the_default_suffix() {
+        let cfg = LogConfig {
+            file: Some("/var/tmp/rl/app".to_string()),
+            ..LogConfig::default()
+        };
+        assert_eq!(log_file_prefix(&cfg), "app");
+        assert_eq!(log_file_suffix(&cfg), "log");
+    }
+
+    #[test]
+    fn current_log_path_sits_in_the_log_dir_with_the_prefix() {
+        let cfg = LogConfig {
+            file: Some("/var/tmp/rl/app.txt".to_string()),
+            ..LogConfig::default()
+        };
+        let p = current_log_path(&cfg);
+        assert!(p.starts_with("/var/tmp/rl"));
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("app."), "got {name}");
+        assert!(name.ends_with(".txt"), "got {name}");
+    }
+
+    #[test]
+    fn appender_writes_into_the_configured_dir() {
+        use std::io::Write as _;
         let dir = tempdir().unwrap();
-        let path = dir.path().join("rustline.log");
-        {
-            let f = open_log(&path, 100).unwrap();
-            let mut f = &f;
-            f.write_all(b"tiny").unwrap();
-        }
-        {
-            let _f = open_log(&path, 100).unwrap();
-        }
-        let mut rotated = path.as_os_str().to_owned();
-        rotated.push(".1");
-        assert!(!PathBuf::from(rotated).exists(), "small file not rotated");
-        assert_eq!(fs::metadata(&path).unwrap().len(), 4, "content preserved");
+        let mut appender = build_appender(dir.path(), "rustline", "log").unwrap();
+        appender.write_all(b"hello\n").unwrap();
+        appender.flush().unwrap();
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries.len(), 1, "one log file: {entries:?}");
+        assert!(entries[0].starts_with("rustline."), "got {entries:?}");
+        assert!(entries[0].ends_with(".log"), "got {entries:?}");
+    }
+
+    /// Round-trips `current_log_path` against the file the appender actually
+    /// creates, pinning that the two agree on the whole filename shape
+    /// (dir/prefix/date/suffix) for a single write under the test process's
+    /// own clock.
+    ///
+    /// This does *not* by itself prove the date component is
+    /// timezone-invariant: both `current_log_path` and the appender read the
+    /// same process clock here, so a shared bug (e.g. both computing the
+    /// date in local time instead of UTC) would still pass this test,
+    /// especially on a UTC-hosted CI box where local time and UTC never
+    /// disagree. That gap is closed separately by
+    /// `doctor_log_path_is_timezone_invariant` in `tests/smoke.rs`, which
+    /// spawns `rustline doctor` under two widely-separated `TZ` values and
+    /// asserts the reported filename doesn't change.
+    #[test]
+    fn current_log_path_matches_the_file_the_appender_actually_creates() {
+        use std::io::Write as _;
+        let dir = tempdir().unwrap();
+        let cfg = LogConfig {
+            file: Some(
+                dir.path()
+                    .join("rustline.log")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ..LogConfig::default()
+        };
+
+        let mut appender =
+            build_appender(dir.path(), &log_file_prefix(&cfg), &log_file_suffix(&cfg)).unwrap();
+        appender.write_all(b"hello\n").unwrap();
+        appender.flush().unwrap();
+
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(entries.len(), 1, "one log file: {entries:?}");
+
+        assert_eq!(
+            current_log_path(&cfg).file_name(),
+            entries[0].path().file_name(),
+            "doctor's reported path must name the file the appender wrote"
+        );
     }
 }

@@ -206,21 +206,19 @@ fn load_snapshot(state_dir: &Path) -> Option<CpuSnapshot> {
     parse_snapshot(&std::fs::read_to_string(snapshot_path(state_dir)).ok()?)
 }
 
-/// Best-effort atomic persist (temp file + rename); logs a warning on failure
-/// and never panics — a broken cache must never break the bar.
+/// Best-effort atomic persist (via `rustline_core::atomic_write::write_atomic`);
+/// logs a warning on failure and never panics — a broken cache must never
+/// break the bar.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn store_snapshot(state_dir: &Path, snap: &CpuSnapshot) {
     let path = snapshot_path(state_dir);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let tmp = path.with_extension("tmp");
-    if let Err(error) = std::fs::write(&tmp, serialize_snapshot(snap)) {
-        tracing::warn!(%error, "failed to write cpu-sample temp file");
-        return;
-    }
-    if let Err(error) = std::fs::rename(&tmp, &path) {
-        tracing::warn!(%error, "failed to rename cpu-sample file");
+    if let Err(error) =
+        rustline_core::atomic_write::write_atomic(&path, serialize_snapshot(snap).as_bytes())
+    {
+        tracing::warn!(%error, "failed to write cpu-sample file");
     }
 }
 
@@ -599,5 +597,26 @@ mod tests {
         }
         // Only the most recent 2 readings survive the ring.
         assert_eq!(read_cpu_history(dir.path(), 5.0, 2), vec![4.0, 5.0]);
+    }
+
+    // Pins that `store_snapshot` actually goes through `write_atomic` rather
+    // than truncating the target in place: `fs::write` reuses the target
+    // file's inode, `write_atomic` replaces it via `rename`. Nothing else
+    // here would notice a regression to a bare `fs::write` — the round-trip
+    // tests above read back the same values either way.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn store_snapshot_replaces_the_file_rather_than_truncating_it_in_place() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        store_snapshot(dir.path(), &snap(1000, 800, 1));
+        let first_ino = std::fs::metadata(snapshot_path(dir.path())).unwrap().ino();
+        store_snapshot(dir.path(), &snap(2000, 1600, 2));
+        let second_ino = std::fs::metadata(snapshot_path(dir.path())).unwrap().ino();
+        assert_ne!(
+            first_ino, second_ino,
+            "store_snapshot must replace the file, not truncate it in place"
+        );
     }
 }

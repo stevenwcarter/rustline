@@ -34,8 +34,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use rustline_core::{
-    Color, Config, Layout, Region, Registry, Style, Theme, WidgetPlacement, WidgetSource,
-    layout_disable, layout_enable, layout_move, layout_nudge, parse_markup, render_named_region,
+    Color, Config, Layout, Region, Registry, Style, Theme, WidgetName, WidgetPlacement,
+    WidgetSource, layout_disable, layout_enable, layout_move, layout_nudge, parse_markup,
+    render_named_region,
 };
 use toml_edit::DocumentMut;
 use unicode_width::UnicodeWidthStr;
@@ -198,7 +199,12 @@ impl EditorState {
     /// catalog entry not currently placed, sorted by name.
     pub fn column_items(&self, column: Column) -> Vec<String> {
         match column.region() {
-            Some(region) => self.layout.get(region).to_vec(),
+            Some(region) => self
+                .layout
+                .get(region)
+                .iter()
+                .map(|n| n.to_string())
+                .collect(),
             None => {
                 let mut names: Vec<String> = self
                     .catalog
@@ -238,7 +244,7 @@ impl EditorState {
         }
         // Re-borrow from the layout/catalog rather than the temporary vec.
         match self.column.region() {
-            Some(region) => self.layout.get(region).get(index).map(String::as_str),
+            Some(region) => self.layout.get(region).get(index).map(WidgetName::as_str),
             None => self
                 .catalog
                 .iter()
@@ -553,7 +559,7 @@ fn preview_regions(
         let all = state.layout().get(region);
         // Only names the registry knows render for real; anything else (a
         // plugin stem, an unresolvable instance) becomes a chip.
-        let names: Vec<String> = all
+        let names: Vec<WidgetName> = all
             .iter()
             .filter(|n| registry.contains(n.as_str()))
             .cloned()

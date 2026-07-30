@@ -336,24 +336,21 @@ mod tests {
         // Guards the committed data, not just the parser: a typo in
         // registry/index.json fails CI instead of only failing at runtime for
         // whoever runs `plugin search` next.
+        use rustline_core::RangeName;
+
         let body = include_str!("../../../registry/index.json");
         let idx = parse_index(body).expect("registry/index.json must parse");
         assert!(!idx.plugins.is_empty());
         for e in &idx.plugins {
-            assert!(!e.name.is_empty(), "every entry needs a name");
+            // T1: the same click-toggle-name rule (non-empty, <= 15 bytes,
+            // [A-Za-z0-9_-] only, not the reserved `window` — invariant #7),
+            // now checked in the one place that defines it rather than
+            // re-asserted by hand here.
             assert!(
-                e.name.len() <= 15,
-                "{}: a plugin name over 15 bytes is not click-toggleable (invariant #7)",
+                RangeName::parse(&e.name).is_ok(),
+                "{}: must be a valid click-toggle name (invariant #7)",
                 e.name
             );
-            assert!(
-                e.name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
-                "{}: plugin names must be [A-Za-z0-9_-] (invariant #7)",
-                e.name
-            );
-            assert_ne!(e.name, "window", "`window` is reserved");
             assert!(!e.description.is_empty(), "{}: needs a description", e.name);
         }
     }

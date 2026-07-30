@@ -718,9 +718,12 @@ since a meaningful absolute load number depends on your core count.
 
 ## Logging
 
-rustline writes logs to `~/.local/share/rustline/rustline.log`
-(`$XDG_DATA_HOME/rustline/rustline.log`) at `info` by default, and error-level
-messages to stderr. The file rotates to `rustline.log.1` once it exceeds 5 MiB.
+rustline writes logs to a **daily-rotated** file under
+`~/.local/share/rustline` (`$XDG_DATA_HOME/rustline`) at `info` by default,
+and error-level messages to stderr. Today's file is named
+`rustline.<YYYY-MM-DD>.log` (e.g. `rustline.2026-07-27.log`, the date always
+in UTC) — 7 daily generations are kept, oldest deleted as a new day starts;
+there's no size cap and no single `.log.1` backup.
 
 Raise the file verbosity with repeated `-v` (file sink only):
 
@@ -737,7 +740,16 @@ Override either sink in `config.toml` (`RUST_LOG` is not used):
     [log]
     file_level   = "info"    # off|error|warn|info|debug|trace
     stderr_level = "error"
-    file         = "~/.local/share/rustline/rustline.log"   # optional
+    file         = "~/.local/share/rustline/rustline.log"   # optional; split into dir + filename prefix/suffix, then re-joined per day as "<prefix>.<date>.<suffix>"
+
+A static misconfiguration (an unparseable theme file, an unknown widget name,
+a plugin missing its ABI handshake, and the like) logs once instead of on
+every render tick — tmux re-invokes `rustline render` every `status-interval`
+seconds, so without dedup one typo would write a line per second, forever.
+rustline tracks which warnings it has already logged in
+`<data_root>/.warn-markers/` (`~/.local/share/rustline/.warn-markers`); editing
+`config.toml` clears that cache, so a fixed — or newly broken — config re-arms
+every warning for one more render.
 
 ## Previewing on the command line
 
@@ -923,19 +935,29 @@ function — the same `Context` in, `Segment`s out contract as a built-in
 widget, just crossing the wasm boundary as JSON.
 
 Everything a plugin can touch is capability-gated by the host: network
-requests, arbitrary file paths, and running local commands are checked
-against per-plugin allowlists in your config (`allowed_urls` / `allowed_paths`
-/ `allowed_commands`, each a glob or a `re:`-prefixed regex; `re:` patterns
-are anchored to a full-string match, so include `.*` for a
-prefix, e.g. `re:https://wttr\.in/.*`), and each plugin gets its own sandboxed
-state directory with a size
-quota (`max_state_bytes`, default 50 MB) for caching data between renders. The
-host also exposes a TTL-cached HTTP GET (and a TTL-cached exec — see below),
-so a plugin can fetch remote data or run a slow command at most once per
-interval without managing its own cache — the bundled `weather`
-example uses the former. A plugin has no ambient access to anything — a
-disallowed request is simply refused, and any plugin error, timeout, or
-crash renders as an empty segment rather than breaking the status line.
+requests, file reads/writes, and running local commands are checked against
+per-plugin allowlists in your config (`allowed_urls` / `allowed_paths` /
+`allowed_write_paths` / `allowed_commands`, each a glob or a `re:`-prefixed
+regex; `re:` patterns are anchored to a full-string match, so include `.*`
+for a prefix, e.g. `re:https://wttr\.in/.*`), and each plugin gets its own
+sandboxed state directory with a size quota (`max_state_bytes`, default 50
+MB) for caching data between renders. The host also exposes a TTL-cached
+HTTP GET (and a TTL-cached exec — see below), so a plugin can fetch remote
+data or run a slow command at most once per interval without managing its
+own cache — the bundled `weather` example uses the former. A plugin has no
+ambient access to anything — a disallowed request is simply refused, and any
+plugin error, timeout, or crash renders as an empty segment rather than
+breaking the status line.
+
+**Reads and writes are separate grants.** `allowed_paths` only ever grants
+**read** access (`rl_file_read`); to let a plugin write a file you must also
+add a pattern to `allowed_write_paths` (empty by default — no plugin can
+write anywhere until you grant it explicitly). A path is denied outright if
+any component along it is a symlink, unless you set `resolve_symlinks =
+true` for that plugin — which then follows symlinks and matches the
+allowlist against the resolved location instead, so only turn it on for a
+plugin/path where you're fine with a grant following a link out of the
+directory you named.
 
 **Plugin security, plainly:** an approved `allowed_commands` entry lets a
 plugin run a real program with **your own environment variables and user
@@ -995,12 +1017,13 @@ right = ["counter", "cwd", "datetime"]
 format = "seen {count}x"
 ```
 
-`filewatch` needs a path allowlist (`allowed_paths`), and `httpget` a URL
+`filewatch` needs a **read** path allowlist (`allowed_paths` — it only ever
+reads, so it doesn't need `allowed_write_paths`), and `httpget` a URL
 allowlist, same shape as `weather`'s:
 
 ```toml
 [plugins.filewatch]
-allowed_paths = ["/home/steve/.cache/build-status"]
+allowed_paths = ["/home/steve/.cache/build-status"]   # read-only grant
 
 [plugins.filewatch.options]
 path = "/home/steve/.cache/build-status"
@@ -1044,13 +1067,21 @@ rustline plugin list
 rustline plugin list --json                        # same info as a JSON array, for scripting
 rustline plugin url add weather "https://wttr.in/*"
 rustline plugin url list weather --json             # its allowed_urls as a JSON array of strings
+rustline plugin path add filewatch "/home/steve/.cache/*"       # allowed_paths: read only
+rustline plugin write-path add <plugin> "/home/steve/notes/*"   # allowed_write_paths: write only
 rustline plugin cmd add cmdrun "uname *"             # allowed_commands works the same way
 ```
 
+`write-path` is `path`'s write-only counterpart (`add`/`remove`/`list
+[--json]`, same as the other three) — granting one never grants the other.
+`plugin list`/`plugin list --json` both show `allowed_write_paths` and
+`resolve_symlinks` alongside the read allowlist.
+
 A plugin can also declare a capability *manifest* — a sidecar
 `<plugin_dir>/<name>.toml` (or an embedded `rustline-manifest` wasm custom
-section) listing the `allowed_urls`/`allowed_paths`/`allowed_commands` it
-wants — so you don't have to hand-write them yourself:
+section) listing `requested_urls`/`requested_paths`/`requested_write_paths`/
+`requested_commands` — so you don't have to hand-write the allowlists
+yourself:
 
 ```bash
 rustline plugin approve weather        # shows what it requests, asks to confirm
@@ -1058,9 +1089,14 @@ rustline plugin approve weather --yes  # non-interactive; for scripts
 rustline plugin approve cmdrun         # commands get an extra, explicit warning
 ```
 
-`approve` writes exactly the requested patterns into
-`[plugins.<name>]`'s allowlists (never more than what's declared), and does
-nothing if the plugin has no manifest.
+`approve` prints what's requested — labeling the read line
+`allowed_paths (read-only)`, an explicit overwrite-danger banner when the
+manifest requests write paths, and a separate warning when it requests
+commands (since those run real programs with the user's own permissions) —
+then, after confirmation (or unconditionally with `--yes`), writes exactly
+those requested patterns into `[plugins.<name>]`'s allowlists (never more
+than what's declared). It does nothing if the plugin has no manifest, or if
+the manifest requests no capabilities at all.
 
 Not sure what plugins exist yet? Browse the curated index:
 

@@ -42,7 +42,7 @@ mod tests {
     use chrono::{DateTime, Local, TimeZone};
     use rustline_core::{
         Battery, BatteryState, Color, Context, CpuUsage, DiskInfo, GitInfo, MediaInfo, MemInfo,
-        NetIface, ThemeColors, Throughput, WindowCtx,
+        NetIface, ThemeColors, Throughput, WidgetName, WindowCtx,
     };
 
     use super::*;
@@ -113,7 +113,7 @@ mod tests {
             }),
             cpu_history: vec![0.1, 0.5, 0.9],
             mem_history: vec![0.2, 0.4, 0.6],
-            toggled: BTreeSet::from(["weather".to_string()]),
+            toggled: BTreeSet::from([WidgetName::from("weather")]),
             colors: ThemeColors {
                 error: Color::Rgb(1, 2, 3),
                 ..ThemeColors::default()

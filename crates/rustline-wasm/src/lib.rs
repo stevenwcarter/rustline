@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use rustline_abi::ABI_VERSION;
 use rustline_core::{
-    Config, PluginConfig, RANGE_NAME_MAX_BYTES, Registry, WidgetDescriptor, WidgetSource,
+    Config, PluginConfig, RangeName, Registry, WidgetDescriptor, WidgetName, WidgetSource,
 };
 
 pub use argv::canonical_argv;
@@ -95,7 +95,12 @@ pub fn discover_plugin_names(plugin_dir: &Path) -> Vec<String> {
 /// with a built-in, a checksum that fails to verify against the recorded
 /// digest, a `name()` export that disagrees with the stem, or any
 /// instantiation error is logged and skipped — never fatal.
-pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, needed: &[String]) {
+pub fn register_plugins(
+    reg: &mut Registry,
+    cfg: &Config,
+    plugin_dir: &Path,
+    needed: &[WidgetName],
+) {
     let root = state_root();
     // One resolved path, reused per plugin below: each instance gets its own
     // `FileDenialObserver` (cheap — just a `PathBuf` clone) writing to the
@@ -109,12 +114,19 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
             continue;
         }
         if reg.contains(stem) {
-            tracing::warn!(plugin = %stem, "plugin name collides with a built-in, skipping");
+            rustline_core::diag::warn_once(
+                &format!("plugin-skip:builtin-collision:{stem}"),
+                || {
+                    tracing::warn!(plugin = %stem, "plugin name collides with a built-in, skipping");
+                },
+            );
             continue;
         }
         let pc = cfg.plugins.get(stem).cloned().unwrap_or_default();
         let Ok(wasm) = std::fs::read(&path) else {
-            tracing::warn!(plugin = %stem, "failed to read plugin file, skipping");
+            rustline_core::diag::warn_once(&format!("plugin-skip:read-failed:{stem}"), || {
+                tracing::warn!(plugin = %stem, "failed to read plugin file, skipping");
+            });
             continue;
         };
         // W19: verify the recorded digest before building any capability object
@@ -125,19 +137,29 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
         match integrity::verify_checksum(pc.checksum.as_deref(), &wasm) {
             integrity::ChecksumVerdict::NotRecorded | integrity::ChecksumVerdict::Match => {}
             integrity::ChecksumVerdict::Mismatch { expected, actual } => {
-                tracing::warn!(
-                    plugin = %stem,
-                    %expected,
-                    %actual,
-                    "plugin checksum mismatch, skipping"
+                rustline_core::diag::warn_once(
+                    &format!("plugin-skip:checksum:{stem}:{actual}"),
+                    || {
+                        tracing::warn!(
+                            plugin = %stem,
+                            %expected,
+                            %actual,
+                            "plugin checksum mismatch, skipping"
+                        );
+                    },
                 );
                 continue;
             }
             integrity::ChecksumVerdict::Malformed { recorded } => {
-                tracing::warn!(
-                    plugin = %stem,
-                    %recorded,
-                    "recorded plugin checksum is not a valid sha256 digest, skipping"
+                rustline_core::diag::warn_once(
+                    &format!("plugin-skip:checksum-malformed:{stem}"),
+                    || {
+                        tracing::warn!(
+                            plugin = %stem,
+                            %recorded,
+                            "recorded plugin checksum is not a valid sha256 digest, skipping"
+                        );
+                    },
                 );
                 continue;
             }
@@ -149,18 +171,33 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
         let mut plugin = match host::build_plugin(&wasm, ctx) {
             Ok(p) => p,
             Err(error) => {
-                tracing::warn!(plugin = %stem, %error, "failed to instantiate plugin, skipping");
+                rustline_core::diag::warn_once(
+                    &format!("plugin-skip:instantiate:{stem}:{error}"),
+                    || {
+                        tracing::warn!(plugin = %stem, %error, "failed to instantiate plugin, skipping");
+                    },
+                );
                 continue;
             }
         };
         match plugin.call::<&str, &str>("name", "") {
             Ok(name) if name == stem => {}
             Ok(name) => {
-                tracing::warn!(plugin = %stem, exported = %name, "plugin name mismatch, skipping");
+                rustline_core::diag::warn_once(
+                    &format!("plugin-skip:name-mismatch:{stem}:{name}"),
+                    || {
+                        tracing::warn!(plugin = %stem, exported = %name, "plugin name mismatch, skipping");
+                    },
+                );
                 continue;
             }
             Err(error) => {
-                tracing::warn!(plugin = %stem, %error, "plugin missing name export, skipping");
+                rustline_core::diag::warn_once(
+                    &format!("plugin-skip:no-name-export:{stem}:{error}"),
+                    || {
+                        tracing::warn!(plugin = %stem, %error, "plugin missing name export, skipping");
+                    },
+                );
                 continue;
             }
         }
@@ -176,20 +213,35 @@ pub fn register_plugins(reg: &mut Registry, cfg: &Config, plugin_dir: &Path, nee
         match abi_decision(ABI_VERSION, guest_abi_version) {
             AbiDecision::Register => {}
             AbiDecision::RegisterLegacy => {
-                tracing::info!(plugin = %stem, "plugin has no abi_version export, registering as legacy");
+                rustline_core::diag::warn_once(&format!("plugin-legacy:{stem}"), || {
+                    tracing::info!(plugin = %stem, "plugin has no abi_version export, registering as legacy");
+                });
             }
             AbiDecision::Skip => {
-                tracing::warn!(
-                    plugin = %stem,
-                    host = ABI_VERSION,
-                    guest = ?guest_abi_version,
-                    "plugin ABI version mismatch, skipping"
+                rustline_core::diag::warn_once(
+                    &format!("plugin-skip:abi-mismatch:{stem}:{guest_abi_version:?}"),
+                    || {
+                        tracing::warn!(
+                            plugin = %stem,
+                            host = ABI_VERSION,
+                            guest = ?guest_abi_version,
+                            "plugin ABI version mismatch, skipping"
+                        );
+                    },
                 );
                 continue;
             }
         }
-        if stem.len() > RANGE_NAME_MAX_BYTES {
-            tracing::warn!(plugin = %stem, "plugin name > 15 bytes; not click-toggleable");
+        // Permissive (invariant N2): a stem that fails to parse as a
+        // `RangeName` (too long, a `[A-Za-z0-9_-]` violation, or the reserved
+        // `window`) still registers below — it just never becomes clickable,
+        // since `WasmWidget::range_name` (via `host::plugin_range_name`)
+        // refuses to produce a `RangeName` for it either. Same rule, checked
+        // once.
+        if let Err(err) = RangeName::parse(stem) {
+            rustline_core::diag::warn_once(&format!("plugin-skip:unclickable:{stem}"), || {
+                tracing::warn!(plugin = %stem, %err, "not click-toggleable: {err}");
+            });
         }
         let widget = host::WasmWidget::new(plugin, options, stem);
         let shared = Arc::new(widget);
@@ -246,7 +298,7 @@ pub fn instantiate_named(
 mod tests {
     use std::sync::Arc;
 
-    use rustline_core::{Config, PluginConfig, Registry};
+    use rustline_core::{Config, PluginConfig, Registry, WidgetName};
 
     use super::{
         AbiDecision, DenialObserver, abi_decision, discover_plugin_names, instantiate_named,
@@ -380,7 +432,7 @@ mod tests {
     fn cfg_with_stub_checksum(checksum: Option<String>) -> Config {
         let mut cfg = Config::default();
         cfg.plugins.insert(
-            "stub".to_string(),
+            "stub".into(),
             PluginConfig {
                 checksum,
                 ..Default::default()
@@ -409,7 +461,7 @@ mod tests {
 
         let mut reg = Registry::new();
         let events = capture(|| {
-            register_plugins(&mut reg, &cfg, dir.path(), &["stub".to_string()]);
+            register_plugins(&mut reg, &cfg, dir.path(), &[WidgetName::from("stub")]);
         });
 
         assert!(
@@ -444,7 +496,7 @@ mod tests {
 
         let mut reg = Registry::new();
         let events = capture(|| {
-            register_plugins(&mut reg, &cfg, dir.path(), &["stub".to_string()]);
+            register_plugins(&mut reg, &cfg, dir.path(), &[WidgetName::from("stub")]);
         });
 
         assert!(

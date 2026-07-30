@@ -1,10 +1,10 @@
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget, WidgetName};
 
 /// Renders the current time, formatted with a `chrono` strftime string.
 pub struct DateTime {
     /// Registry/layout name; the toggle key threaded through render + click,
     /// and this instance's range name (invariant #7).
-    pub name: String,
+    pub name: WidgetName,
     pub format: String,
     pub alt_format: String,
     /// An IANA zone name to render in instead of `ctx.now`'s local zone;
@@ -30,8 +30,10 @@ impl Widget for DateTime {
         let formatted = match zone.and_then(|z| z.parse::<chrono_tz::Tz>().ok()) {
             Some(tz) => ctx.now.with_timezone(&tz).format(fmt).to_string(),
             None => {
-                if zone.is_some_and(|z| !z.is_empty()) {
-                    tracing::warn!(zone, "unknown timezone; using Local");
+                if let Some(z) = zone.filter(|z| !z.is_empty()) {
+                    crate::diag::warn_once(&format!("timezone:{z}"), || {
+                        tracing::warn!(zone, "unknown timezone; using Local");
+                    });
                 }
                 ctx.now.format(fmt).to_string()
             }
@@ -39,7 +41,7 @@ impl Widget for DateTime {
         vec![Segment::new(formatted)]
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -104,7 +106,7 @@ mod tests {
     #[test]
     fn datetime_toggled_uses_alt_format() {
         let mut c = ctx_at();
-        c.toggled.insert("datetime".to_string());
+        c.toggled.insert(WidgetName::from("datetime"));
         let w = DateTime {
             name: "datetime".into(),
             format: "%H:%M".into(),
@@ -185,7 +187,7 @@ mod tests {
                 timezone: None,
             }
             .range_name(),
-            Some("datetime")
+            Some(RangeName::parse("datetime").unwrap())
         );
     }
 }

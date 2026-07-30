@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use crate::render::{Direction, RangeGroup, Theme, render_region_ranged, render_window_pill};
-use crate::{ColorOverride, Context, Registry, Segment, Widget, WindowCtx};
+use crate::{ColorOverride, Context, RangeName, Registry, Segment, Widget, WidgetName, WindowCtx};
 
 /// Fill in each segment's background from `theme.palette`, cycling through
 /// it in order, but only where a segment doesn't already carry an explicit
@@ -50,7 +50,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
 /// log file is the only channel the user can actually consult. Without the
 /// name, a six-widget bar loses one widget and the log says only that
 /// "a widget" panicked.
-fn render_guarded(name: &str, widget: &dyn Widget, ctx: &Context) -> Vec<Segment> {
+fn render_guarded(name: &WidgetName, widget: &dyn Widget, ctx: &Context) -> Vec<Segment> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| widget.render(ctx))) {
         Ok(segments) => segments,
         Err(payload) => {
@@ -100,7 +100,7 @@ fn apply_color_override(segments: &mut [Segment], over: &ColorOverride) {
 /// feature existed.
 pub fn render_named_region(
     dir: Direction,
-    names: &[String],
+    names: &[WidgetName],
     ctx: &Context,
     registry: &Registry,
     theme: &Theme,
@@ -111,20 +111,20 @@ pub fn render_named_region(
     // Render each widget (panic-guarded), apply its color override (if any,
     // looked up by the name `resolve` paired it with), and keep its
     // clickable range name.
-    let rendered: Vec<(Option<String>, Vec<Segment>)> = widgets
+    let rendered: Vec<(Option<RangeName>, Vec<Segment>)> = widgets
         .iter()
         .map(|(name, w)| {
             let mut segments = render_guarded(name, w.as_ref(), ctx);
-            if let Some(over) = overrides.get(name) {
+            if let Some(over) = overrides.get(name.as_str()) {
                 apply_color_override(&mut segments, over);
             }
-            (w.range_name().map(str::to_string), segments)
+            (w.range_name(), segments)
         })
         .collect();
 
     // Assign palette across the FLATTENED region (unchanged global cycling),
     // then regroup by remembered lengths so range markup can bracket each widget.
-    let range_names: Vec<Option<String>> = rendered.iter().map(|(n, _)| n.clone()).collect();
+    let range_names: Vec<Option<RangeName>> = rendered.iter().map(|(n, _)| n.clone()).collect();
     let lens: Vec<usize> = rendered.iter().map(|(_, s)| s.len()).collect();
     let mut flat: Vec<Segment> = rendered.into_iter().flat_map(|(_, s)| s).collect();
     assign_palette(&mut flat, theme);
@@ -145,7 +145,7 @@ pub fn render_named_region(
 /// One window's rounded pill (no range wrapping). Shared by the single-window
 /// (`render window`) and batched (`render windows`) paths.
 fn window_pill(ctx: &Context, registry: &Registry, theme: &Theme) -> String {
-    let widgets = registry.resolve(&["windows".to_string()]);
+    let widgets = registry.resolve(&[WidgetName::from("windows")]);
     let segments: Vec<Segment> = widgets
         .iter()
         .flat_map(|(name, w)| render_guarded(name, w.as_ref(), ctx))
@@ -347,7 +347,7 @@ mod tests {
         let mut reg = Registry::with_builtins(&Config::default());
         reg.register("boom", Box::new(|| Box::new(Boom)));
         let theme = Theme::default();
-        let names = vec!["boom".to_string(), "hostname".to_string()];
+        let names = vec![WidgetName::from("boom"), WidgetName::from("hostname")];
         let out = render_named_region(
             Direction::Left,
             &names,
@@ -381,7 +381,7 @@ mod tests {
         };
         let out = render_named_region(
             Direction::Right,
-            &["cpu".to_string()],
+            &[WidgetName::from("cpu")],
             &c,
             &reg,
             &theme,
@@ -399,8 +399,8 @@ mod tests {
             fn render(&self, _c: &Context) -> Vec<Segment> {
                 vec![Segment::new("hi")]
             }
-            fn range_name(&self) -> Option<&str> {
-                Some("clicky")
+            fn range_name(&self) -> Option<RangeName> {
+                Some(RangeName::parse("clicky").unwrap())
             }
         }
         let mut reg = Registry::with_builtins(&Config::default());
@@ -422,6 +422,45 @@ mod tests {
     }
 
     #[test]
+    fn charset_violating_instance_name_never_reaches_range_markup() {
+        // T1 render-boundary characterization: register an `[instances.<name>]`
+        // entry whose name would forge markup if interpolated unescaped (the
+        // exact PoC from `range_name.rs`'s `BadChar` test). Before `RangeName`
+        // existed, `Registry::with_builtins`'s instance pass only warned on
+        // LENGTH, never charset, so this 11-byte name registered and — with a
+        // non-empty `alt_format` — `clickable_range` happily returned
+        // `Some("a#[norange]")`, which `render_region_ranged` wrote straight
+        // into `#[range=user|...]` with no sanitization (invariant #8 only
+        // covers segment TEXT, not the range name). After T1, `range_name()`
+        // refuses to produce a `RangeName` for it, so no range markup for this
+        // widget must appear at all — while the widget itself still registers
+        // and renders (permissive registration, invariant N2).
+        let mut cfg = Config::default();
+        cfg.instances.insert(
+            "a#[norange]".into(),
+            toml::from_str("kind='datetime'\nalt_format='ALT'").unwrap(),
+        );
+        let reg = Registry::with_builtins(&cfg);
+        let theme = cfg.to_theme();
+        let out = render_named_region(
+            Direction::Left,
+            &[WidgetName::from("a#[norange]")],
+            &ctx(),
+            &reg,
+            &theme,
+            &HashMap::new(),
+        );
+        assert!(
+            !out.contains("#[range=user|a"),
+            "charset-violating name must never reach range markup: {out}"
+        );
+        assert!(
+            !out.is_empty(),
+            "the widget still registers and renders: {out}"
+        );
+    }
+
+    #[test]
     fn per_widget_color_override_pins_bg() {
         // W29: an explicit `bg` override on one widget must survive
         // `assign_palette` untouched, while a widget with no override still
@@ -438,7 +477,7 @@ mod tests {
                 bg: Some(Color::Named("blue".into())),
             },
         );
-        let names = vec!["hostname".to_string(), "datetime".to_string()];
+        let names = vec![WidgetName::from("hostname"), WidgetName::from("datetime")];
         let out = render_named_region(Direction::Left, &names, &ctx(), &reg, &theme, &overrides);
         assert!(
             out.contains("bg=blue"),
@@ -471,7 +510,7 @@ mod tests {
                 bg: None,
             },
         );
-        let names = vec!["hostname".to_string(), "datetime".to_string()];
+        let names = vec![WidgetName::from("hostname"), WidgetName::from("datetime")];
         let out = render_named_region(Direction::Left, &names, &ctx(), &reg, &theme, &overrides);
         assert!(
             out.contains(&format!("fg=black,bg={}", theme.palette[0].to_tmux())),
@@ -494,9 +533,9 @@ mod tests {
         let reg = Registry::with_builtins(&cfg);
         let theme = cfg.to_theme();
         let names = vec![
-            "hostname".to_string(),
-            "nope".to_string(),
-            "datetime".to_string(),
+            WidgetName::from("hostname"),
+            WidgetName::from("nope"),
+            WidgetName::from("datetime"),
         ];
         let out = render_named_region(
             Direction::Left,
@@ -568,7 +607,11 @@ mod tests {
     #[test]
     fn panic_guard_degrades_to_empty_and_keeps_the_name() {
         // The guard must still contain the panic (invariant #6 / N2)...
-        let segs = render_guarded("cpu", &PanickingWidget, &Context::default());
+        let segs = render_guarded(
+            &WidgetName::from("cpu"),
+            &PanickingWidget,
+            &Context::default(),
+        );
         assert!(segs.is_empty());
     }
 

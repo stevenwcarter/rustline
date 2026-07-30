@@ -47,19 +47,35 @@ impl FileDenialObserver {
 
 impl DenialObserver for FileDenialObserver {
     fn observe(&self, plugin: &str, kind: DenialKind, target: &str) {
-        record(&self.path, plugin, kind, target);
+        // Emit *alongside* the record, not instead of it. Without a log line a
+        // denial is invisible unless the guest happens to call `rl_log`, and a
+        // blank widget looks identical to a plugin that simply returned
+        // nothing. `record`'s dedup keeps this to one line per distinct
+        // triple, so a persistently-denied plugin does not spam the log.
+        if record(&self.path, plugin, kind, target) {
+            tracing::warn!(
+                %plugin,
+                ?kind,
+                %target,
+                "capability denied; see `rustline plugin denials {plugin}`"
+            );
+        }
     }
 }
 
 /// Append `(plugin, kind, target)` to `path` unless it's already present.
-/// Best-effort: any failure (can't create the parent dir, can't open/write
-/// the file) is `warn!`-logged and swallowed — never panics.
-fn record(path: &Path, plugin: &str, kind: DenialKind, target: &str) {
+/// Returns `true` iff the triple was newly recorded — the caller uses that to
+/// log the denial exactly once, reusing the dedup that already keeps the JSONL
+/// quiet.
+///
+/// Best-effort: any failure is `warn!`-logged, swallowed, and reported as
+/// not-recorded (so a later successful write still logs it once).
+fn record(path: &Path, plugin: &str, kind: DenialKind, target: &str) -> bool {
     let already_recorded = read_records(path)
         .iter()
         .any(|d| d.plugin == plugin && d.kind == kind && d.target == target);
     if already_recorded {
-        return;
+        return false;
     }
     let entry = Denial {
         plugin: plugin.to_string(),
@@ -67,13 +83,13 @@ fn record(path: &Path, plugin: &str, kind: DenialKind, target: &str) {
         target: target.to_string(),
     };
     let Ok(line) = serde_json::to_string(&entry) else {
-        return; // Denial is trivially serializable; kept for totality.
+        return false; // Denial is trivially serializable; kept for totality.
     };
     if let Some(parent) = path.parent()
         && let Err(error) = std::fs::create_dir_all(parent)
     {
         tracing::warn!(%error, path = %path.display(), "failed to create denials dir");
-        return;
+        return false;
     }
     let write_result = std::fs::OpenOptions::new()
         .create(true)
@@ -83,8 +99,12 @@ fn record(path: &Path, plugin: &str, kind: DenialKind, target: &str) {
             use std::io::Write as _;
             writeln!(file, "{line}")
         });
-    if let Err(error) = write_result {
-        tracing::warn!(%error, path = %path.display(), "failed to write denial record");
+    match write_result {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "failed to write denial record");
+            false
+        }
     }
 }
 
@@ -120,15 +140,107 @@ pub fn read_denials(name: &str) -> Vec<Denial> {
 mod tests {
     use super::*;
 
+    // `observe` has no seam to inject a fake logger, so tests capture real
+    // `tracing` events with a minimal hand-rolled `Subscriber` (no test-only
+    // dep needed — `Subscriber`/`Visit` are already part of the `tracing`
+    // crate). Mirrors the identical harness in `lib.rs`/`perform.rs` test
+    // modules; not shared because it's private to each and reaching across
+    // modules would mean widening visibility purely for a test.
+    //
+    // Every test that calls `observer.observe(...)` — not just the ones
+    // asserting on log content — routes the call through `capture()`, even
+    // when the returned events are discarded. A callsite's first-ever firing
+    // registers its cached "interest" against whatever dispatcher is active
+    // at that moment; that registration races any concurrent `Dispatch::new`
+    // (which `capture()`'s `with_default` triggers) that's rebuilding cached
+    // interest for the same callsite. A firing under the ambient
+    // (non-`with_default`) dispatcher can lose that race and leave the
+    // callsite cached as uninteresting even while a real subscriber is
+    // installed elsewhere — a registration/rebuild race, not a one-time,
+    // permanent poisoning. This is not hypothetical: the identical shape
+    // (an unguarded firing alongside a `capture()`-guarded assertion on the
+    // same callsite) was measured on the analogous `rustline-core` pair —
+    // `instance_opts_falls_back_and_reports_a_type_error` firing outside
+    // `capture()` — at 57/600 filtered runs and 2/300 whole-binary runs
+    // failing (see that test's comment in
+    // `crates/rustline-core/src/widgets/mod.rs`). Without the wrapping here,
+    // `observe_logs_exactly_once_for_a_repeated_denial` below would flake the
+    // same way under `cargo test --workspace`.
+    use std::sync::{Arc, Mutex};
+
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Level, Metadata, Subscriber};
+
+    type CapturedEvent = (Level, Vec<(String, String)>);
+
+    #[derive(Default)]
+    struct FieldVisitor(Vec<(String, String)>);
+
+    impl Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+    }
+
+    /// A subscriber that accepts and records every event, purely so a test
+    /// can assert what `observe` logged.
+    struct RecordingSubscriber(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    impl Subscriber for RecordingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .unwrap()
+                .push((*event.metadata().level(), visitor.0));
+        }
+
+        fn enter(&self, _span: &Id) {}
+        fn exit(&self, _span: &Id) {}
+    }
+
+    /// Run `f` under a scoped recording subscriber and return every event it
+    /// emitted, in order.
+    fn capture(f: impl FnOnce()) -> Vec<CapturedEvent> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = RecordingSubscriber(events.clone());
+        tracing::subscriber::with_default(subscriber, f);
+        events.lock().unwrap().clone()
+    }
+
+    fn field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        fields
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
     #[test]
     fn dedup_same_triple_records_once() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("denials.jsonl");
         let observer = FileDenialObserver::new(path.clone());
 
-        for _ in 0..3 {
-            observer.observe("weather", DenialKind::Url, "https://evil.example/");
-        }
+        capture(|| {
+            for _ in 0..3 {
+                observer.observe("weather", DenialKind::Url, "https://evil.example/");
+            }
+        });
 
         assert_eq!(read_records(&path).len(), 1);
     }
@@ -139,10 +251,12 @@ mod tests {
         let path = dir.path().join("denials.jsonl");
         let observer = FileDenialObserver::new(path.clone());
 
-        observer.observe("weather", DenialKind::Url, "https://a/");
-        observer.observe("weather", DenialKind::Url, "https://b/"); // different target
-        observer.observe("weather", DenialKind::Path, "https://a/"); // different kind
-        observer.observe("counter", DenialKind::Url, "https://a/"); // different plugin
+        capture(|| {
+            observer.observe("weather", DenialKind::Url, "https://a/");
+            observer.observe("weather", DenialKind::Url, "https://b/"); // different target
+            observer.observe("weather", DenialKind::Path, "https://a/"); // different kind
+            observer.observe("counter", DenialKind::Url, "https://a/"); // different plugin
+        });
 
         assert_eq!(read_records(&path).len(), 4);
     }
@@ -153,8 +267,10 @@ mod tests {
         let path = dir.path().join("denials.jsonl");
         let observer = FileDenialObserver::new(path.clone());
 
-        observer.observe("weather", DenialKind::Url, "https://a/");
-        observer.observe("counter", DenialKind::Path, "/etc/passwd");
+        capture(|| {
+            observer.observe("weather", DenialKind::Url, "https://a/");
+            observer.observe("counter", DenialKind::Path, "/etc/passwd");
+        });
 
         assert_eq!(
             read_denials_at(&path, "weather"),
@@ -184,9 +300,71 @@ mod tests {
         let path = blocker.path().join("sub").join("denials.jsonl");
         let observer = FileDenialObserver::new(path.clone());
 
-        observer.observe("weather", DenialKind::Url, "https://a/"); // must not panic
+        capture(|| {
+            observer.observe("weather", DenialKind::Url, "https://a/"); // must not panic
+        });
 
         assert!(read_records(&path).is_empty());
+    }
+
+    #[test]
+    fn record_reports_whether_the_triple_was_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("denials.jsonl");
+        assert!(record(&path, "weather", DenialKind::Url, "https://a/"));
+        assert!(!record(&path, "weather", DenialKind::Url, "https://a/"));
+        assert!(record(&path, "weather", DenialKind::Url, "https://b/"));
+    }
+
+    #[test]
+    fn a_failed_write_does_not_claim_the_triple_was_recorded() {
+        let blocker = tempfile::NamedTempFile::new().unwrap();
+        let path = blocker.path().join("sub").join("denials.jsonl");
+        assert!(!record(&path, "weather", DenialKind::Url, "https://a/"));
+    }
+
+    #[test]
+    fn a_failed_open_does_not_claim_the_triple_was_recorded() {
+        // Distinct from the `create_dir_all` failure above: here the parent
+        // exists and `record` reaches the final `OpenOptions::open`, which
+        // fails because `path` itself is a directory. Pins the write's own
+        // `Err` arm returning `false` (not just the earlier bail-outs).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("denials.jsonl");
+        std::fs::create_dir(&path).unwrap();
+        assert!(!record(&path, "weather", DenialKind::Url, "https://a/"));
+    }
+
+    /// Pins the point of `observe`: it must log *exactly when* `record`
+    /// reports the triple as newly seen, not unconditionally and not on every
+    /// call regardless of dedup. A version that logs before/without checking
+    /// `record`'s result would emit 3 events here instead of 1.
+    #[test]
+    fn observe_logs_exactly_once_for_a_repeated_denial() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("denials.jsonl");
+        let observer = FileDenialObserver::new(path);
+
+        let events = capture(|| {
+            for _ in 0..3 {
+                observer.observe("weather", DenialKind::Url, "https://evil.example/");
+            }
+        });
+
+        assert_eq!(
+            events.len(),
+            1,
+            "record's dedup must gate the log too, got: {events:?}"
+        );
+        let (level, fields) = &events[0];
+        assert_eq!(*level, Level::WARN);
+        assert_eq!(field(fields, "plugin"), Some("weather"));
+        assert_eq!(field(fields, "kind"), Some("Url"));
+        assert_eq!(field(fields, "target"), Some("https://evil.example/"));
+        assert_eq!(
+            field(fields, "message"),
+            Some("capability denied; see `rustline plugin denials weather`")
+        );
     }
 
     #[test]

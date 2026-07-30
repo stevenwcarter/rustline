@@ -1,6 +1,6 @@
 use crate::widgets::bar;
 use crate::widgets::spark::sparkline;
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget, WidgetName};
 
 /// Nerd-Font CPU/chip glyph (nf-md-chip 󰘚).
 const CPU_ICON: &str = "\u{f061a}";
@@ -9,7 +9,7 @@ const CPU_ICON: &str = "\u{f061a}";
 pub struct CpuWidget {
     /// Registry/layout name; the toggle key threaded through render + click,
     /// and this instance's range name (invariant #7).
-    pub name: String,
+    pub name: WidgetName,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
@@ -61,7 +61,7 @@ impl Widget for CpuWidget {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn toggled_uses_alt_format() {
         let mut c = ctx(Some(CpuUsage { percent: 50.0 }));
-        c.toggled.insert("cpu".to_string());
+        c.toggled.insert(WidgetName::from("cpu"));
         let out = w2("{percent}%", "{icon} {bar} {percent}%", "").render(&c);
         assert_eq!(out[0].text, "\u{f061a} ████░░░░ 50%");
         // untoggled -> normal format
@@ -146,7 +146,10 @@ mod tests {
 
     #[test]
     fn range_name_some_only_with_alt_format() {
-        assert_eq!(w2("{percent}%", "{bar}", "").range_name(), Some("cpu"));
+        assert_eq!(
+            w2("{percent}%", "{bar}", "").range_name(),
+            Some(RangeName::parse("cpu").unwrap())
+        );
         assert_eq!(w2("{percent}%", "", "").range_name(), None);
     }
 

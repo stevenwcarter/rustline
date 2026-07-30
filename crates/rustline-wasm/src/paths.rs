@@ -47,10 +47,10 @@ pub fn wasmtime_cache_config_path() -> Option<PathBuf> {
 /// Lazily ensure `<root>/wasmtime-cache.toml` exists, pointing wasmtime's
 /// compile cache at `<root>/wasmtime-cache/`, and return its path. Returns
 /// `None` (never panics) on any I/O failure, or if the cache dir isn't
-/// absolute (wasmtime requires an absolute cache directory). Uses the same
-/// atomic temp-file + rename convention as `cpu.rs`'s snapshot store. The cache
-/// dir is deliberately kept distinct from plugins' own state subdirs
-/// (`<root>/<name>/`).
+/// absolute (wasmtime requires an absolute cache directory). Persists via
+/// `rustline_core::atomic_write::write_atomic`, the same primitive `cpu.rs`'s
+/// snapshot store uses. The cache dir is deliberately kept distinct from
+/// plugins' own state subdirs (`<root>/<name>/`).
 ///
 /// The cache directory is created up-front so that a `Some(path)` result
 /// implies a writable, wasmtime-usable config: an unwritable root fails
@@ -76,9 +76,7 @@ pub fn ensure_wasmtime_cache_config(root: &Path) -> Option<PathBuf> {
     if std::fs::read_to_string(&config_path).ok().as_deref() == Some(body.as_str()) {
         return Some(config_path);
     }
-    let tmp = config_path.with_extension("tmp");
-    std::fs::write(&tmp, &body).ok()?;
-    std::fs::rename(&tmp, &config_path).ok()?;
+    rustline_core::atomic_write::write_atomic(&config_path, body.as_bytes()).ok()?;
     Some(config_path)
 }
 
@@ -163,5 +161,30 @@ mod tests {
         let now = std::fs::read_to_string(&p).unwrap();
         assert!(!now.contains("enabled"), "stale key rewritten away: {now}");
         assert_eq!(now, cache_config_toml(&dir.path().join("wasmtime-cache")));
+    }
+
+    // Pins that the rewrite above actually goes through `write_atomic` rather
+    // than truncating the target in place: `fs::write` reuses the target
+    // file's inode, `write_atomic` replaces it via `rename`. Nothing else
+    // here would notice a regression to a bare `fs::write` —
+    // `cache_config_rewrites_stale_content` reads back the same bytes either
+    // way.
+    #[test]
+    #[cfg(unix)]
+    fn cache_config_rewrite_replaces_the_file_rather_than_truncating_it_in_place() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = ensure_wasmtime_cache_config(dir.path()).unwrap();
+        let first_ino = std::fs::metadata(&config_path).unwrap().ino();
+        // A stale schema (same inode: a plain in-place fs::write) forces the
+        // fast-path's byte comparison to miss, so the next call rewrites.
+        std::fs::write(&config_path, "[cache]\nenabled = true\n").unwrap();
+        ensure_wasmtime_cache_config(dir.path()).unwrap();
+        let second_ino = std::fs::metadata(&config_path).unwrap().ino();
+        assert_ne!(
+            first_ino, second_ino,
+            "ensure_wasmtime_cache_config must replace the file, not truncate it in place"
+        );
     }
 }

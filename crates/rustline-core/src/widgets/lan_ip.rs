@@ -1,11 +1,11 @@
 use crate::widgets::net;
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget, WidgetName};
 
 /// Renders the machine's LAN IPv4, selected from `Context.interfaces`.
 pub struct LanIp {
     /// Registry/layout name; the toggle key threaded through render + click,
     /// and this instance's range name (invariant #7).
-    pub name: String,
+    pub name: WidgetName,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
@@ -19,7 +19,7 @@ impl Widget for LanIp {
         net::render_ip(fmt, ip, &self.down_format)
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn lan_ip_toggled_uses_alt_format() {
         let mut c = ctx(vec![ifc("eth0", "192.168.1.20")]);
-        c.toggled.insert("lan_ip".to_string());
+        c.toggled.insert(WidgetName::from("lan_ip"));
         let w = LanIp {
             name: "lan_ip".into(),
             format: "{ip}".into(),

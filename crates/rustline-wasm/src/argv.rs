@@ -26,15 +26,37 @@ fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// The canonical rendering of one argv. Holding one is proof it came from
+/// [`canonical_argv`] — the `allowed_commands` gate requires it at the type
+/// level, so checking the bare program name (bypassing the whole-argv gate)
+/// no longer compiles. The exec cache key is derived from a `CanonicalArgv`
+/// at its single call site by convention, not by the type system: `cache_path`
+/// (in `cache.rs`) still takes its `key` as a bare `&str`. Typing that
+/// parameter is open finding T22.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalArgv(String);
+
+impl CanonicalArgv {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CanonicalArgv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Render `program` + `args` to the string an `allowed_commands` pattern is
 /// matched against. See the module docs for why this is quoted.
-pub fn canonical_argv(program: &str, args: &[String]) -> String {
+pub fn canonical_argv(program: &str, args: &[String]) -> CanonicalArgv {
     let mut out = quote(program);
     for arg in args {
         out.push(' ');
         out.push_str(&quote(arg));
     }
-    out
+    CanonicalArgv(out)
 }
 
 #[cfg(test)]
@@ -48,14 +70,14 @@ mod tests {
     #[test]
     fn plain_args_join_with_single_spaces() {
         assert_eq!(
-            canonical_argv("playerctl", &s(&["metadata"])),
+            canonical_argv("playerctl", &s(&["metadata"])).as_str(),
             "playerctl metadata"
         );
         assert_eq!(
-            canonical_argv("git", &s(&["status", "--porcelain"])),
+            canonical_argv("git", &s(&["status", "--porcelain"])).as_str(),
             "git status --porcelain"
         );
-        assert_eq!(canonical_argv("uname", &[]), "uname");
+        assert_eq!(canonical_argv("uname", &[]).as_str(), "uname");
     }
 
     #[test]
@@ -64,7 +86,7 @@ mod tests {
         // canonical_argv("git", ["log", "--author=a", "b"]) and could match a
         // pattern written for that different call.
         assert_eq!(
-            canonical_argv("git", &s(&["log", "--author=a b"])),
+            canonical_argv("git", &s(&["log", "--author=a b"])).as_str(),
             "git log '--author=a b'"
         );
         assert_ne!(
@@ -75,34 +97,37 @@ mod tests {
 
     #[test]
     fn tabs_and_newlines_are_treated_as_whitespace_needing_quotes() {
-        assert_eq!(canonical_argv("x", &s(&["a\tb"])), "x 'a\tb'");
-        assert_eq!(canonical_argv("x", &s(&["a\nb"])), "x 'a\nb'");
+        assert_eq!(canonical_argv("x", &s(&["a\tb"])).as_str(), "x 'a\tb'");
+        assert_eq!(canonical_argv("x", &s(&["a\nb"])).as_str(), "x 'a\nb'");
     }
 
     #[test]
     fn an_embedded_single_quote_is_escaped_not_dropped() {
         assert_eq!(
-            canonical_argv("x", &s(&["it's here"])),
+            canonical_argv("x", &s(&["it's here"])).as_str(),
             r#"x 'it'\''s here'"#
         );
     }
 
     #[test]
     fn an_empty_arg_becomes_empty_quotes_rather_than_vanishing() {
-        assert_eq!(canonical_argv("x", &s(&["", "y"])), "x '' y");
+        assert_eq!(canonical_argv("x", &s(&["", "y"])).as_str(), "x '' y");
     }
 
     #[test]
     fn a_program_needing_quotes_is_quoted_too() {
         assert_eq!(
-            canonical_argv("/opt/my tools/bin", &[]),
+            canonical_argv("/opt/my tools/bin", &[]).as_str(),
             "'/opt/my tools/bin'"
         );
     }
 
     #[test]
     fn a_bare_double_quote_triggers_quoting_rather_than_being_emitted_bare() {
-        assert_eq!(canonical_argv("x", &s(&[r#"id="42""#])), r#"x 'id="42"'"#);
+        assert_eq!(
+            canonical_argv("x", &s(&[r#"id="42""#])).as_str(),
+            r#"x 'id="42"'"#
+        );
         // If a literal `"` were silently dropped or ignored instead of
         // forcing quoting, this would render identically to the quote-free
         // variant below, collapsing two distinct arguments onto the same
@@ -117,7 +142,7 @@ mod tests {
     fn a_backslash_adjacent_to_a_single_quote_does_not_interfere_with_the_escape() {
         // `\'` (backslash then quote) is quoted, with the embedded quote
         // escaped as `'\''` and the raw backslash carried through unchanged.
-        assert_eq!(canonical_argv("x", &s(&["\\'"])), "x '\\'\\'''");
+        assert_eq!(canonical_argv("x", &s(&["\\'"])).as_str(), "x '\\'\\'''");
         // Swapping the two characters' order (`'\` — quote then backslash)
         // must render to a DIFFERENT canonical string: if a raw backslash in
         // the input could be confused with the backslash the escape scheme

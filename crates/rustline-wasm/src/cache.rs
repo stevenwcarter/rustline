@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 
-use crate::state::check_cap;
+use crate::state;
 
 /// A cached entry, shared by both TTL caches. For the HTTP cache `status` is
 /// the (2xx) status the body was fetched under and `body` is the response
@@ -25,6 +25,22 @@ pub struct CacheEntry {
     pub fetched_at: String,
     pub status: u16,
     pub body: String,
+    /// When a refresh was last *attempted*, successful or not — RFC3339, or
+    /// empty for an entry written before this field existed (or never
+    /// attempted). `fetched_at` only advances on success, so without this a
+    /// dead upstream is re-fetched on every single render forever: the
+    /// fresh-hit branch can never be taken again once the TTL lapses.
+    /// `#[serde(default)]` keeps old on-disk entries readable.
+    ///
+    /// The backoff this field drives (`is_fresh` in `perform_http_get_cached`/
+    /// `perform_exec_cached`) is inert whenever `ttl_secs <= 0`, since
+    /// `is_fresh` treats `[0, ttl_secs)` as fresh — an empty range when
+    /// `ttl_secs` isn't positive. `host.rs` maps an unparseable guest
+    /// `ttl_secs` string to `0` via `unwrap_or(0)`, so a guest sending
+    /// garbage silently loses the backoff and gets the pre-fix retry storm
+    /// back. Known, not fixed here — see B4's follow-up notes.
+    #[serde(default)]
+    pub last_attempt_at: String,
 }
 
 /// FNV-1a (64-bit) of the cache key (a URL or a canonical argv string) — a
@@ -73,15 +89,153 @@ pub fn read_entry(path: &Path) -> Option<CacheEntry> {
     serde_json::from_str(&raw).ok()
 }
 
-/// Quota-checked write of `content` to `path` (creating the namespace
-/// directory `path` sits in — `HTTP_NAMESPACE`/`EXEC_NAMESPACE`, per the
-/// caller). `check_cap` accounts against the whole `state_dir` (invariant N3).
-pub fn write_entry(state_dir: &Path, path: &Path, content: &str, cap: u64) -> Result<(), String> {
-    check_cap(state_dir, path, content.len() as u64, cap)?;
+/// Delete entries from a cache namespace directory until it fits in
+/// `keep_bytes`, oldest first. Returns bytes freed.
+///
+/// Sizes are collected in one cheap `metadata()`-only pass first; if that
+/// alone already fits in `keep_bytes`, we return without ever reading or
+/// parsing a single entry's content — a namespace that gets asked to evict
+/// on every render must not pay a full parse when there's nothing to do.
+///
+/// Ordering is by the entry's own `fetched_at` when it parses — a file we
+/// cannot parse is not a usable cache entry, so it sorts as oldest and goes
+/// first.
+///
+/// Best-effort throughout (invariant N2: a cache is disposable). Only ever
+/// touches regular files directly inside `dir` — callers must only pass a
+/// `HTTP_NAMESPACE`/`EXEC_NAMESPACE` subdirectory (see `namespace_dir`,
+/// `write_entry`'s only caller of this function).
+fn evict_namespace(dir: &Path, keep_bytes: u64) -> u64 {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let candidates: Vec<(PathBuf, u64)> = read
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .filter_map(|e| Some((e.path(), e.metadata().ok()?.len())))
+        .collect();
+
+    let mut total: u64 = candidates.iter().map(|(_, len)| *len).sum();
+    if total <= keep_bytes {
+        return 0;
+    }
+
+    let mut entries: Vec<(i64, u64, PathBuf)> = candidates
+        .into_iter()
+        .map(|(path, len)| {
+            let stamp = read_entry(&path)
+                .and_then(|c| DateTime::parse_from_rfc3339(&c.fetched_at).ok())
+                .map(|d| d.timestamp())
+                .unwrap_or(i64::MIN);
+            (stamp, len, path)
+        })
+        .collect();
+    entries.sort_by_key(|(stamp, _, _)| *stamp); // oldest first
+
+    let mut freed: u64 = 0;
+    for (_, len, path) in entries {
+        if total <= keep_bytes {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(len);
+            freed = freed.saturating_add(len);
+        }
+    }
+    freed
+}
+
+/// `path`'s cache namespace directory, or `None` if `path` doesn't actually
+/// sit inside a recognized one. `evict_namespace` unconditionally unlinks
+/// files under whatever directory it's given, so this is the one place that
+/// decides it's safe to call it — it must not guess: only an exact
+/// `HTTP_NAMESPACE`/`EXEC_NAMESPACE` immediate parent qualifies. A
+/// `write_entry` caller passing some other `path` (a bug, since `write_entry`
+/// is `pub`) gets a refused write instead of its state root pruned.
+fn namespace_dir(path: &Path) -> Option<&Path> {
+    let parent = path.parent()?;
+    let name = parent.file_name()?.to_str()?;
+    (name == HTTP_NAMESPACE || name == EXEC_NAMESPACE).then_some(parent)
+}
+
+/// Quota-checked, atomic write of `content` to `path` (creating the
+/// namespace directory `path` sits in). `current_size` is the caller's
+/// memoized state-dir size (see `CapabilityCtx::state_size`) — `check_cap`
+/// accounts it against the whole `state_dir` (invariant N3) without ever
+/// walking the directory itself. When the check fails, entries are evicted
+/// from `path`'s own namespace before giving up — see `namespace_dir` for
+/// why that's the only directory this ever touches.
+///
+/// On success, returns the new total size of `state_dir`, which the caller
+/// should feed back into its memo (`CapabilityCtx::set_state_size`). After an
+/// eviction the total is re-measured with one fresh `dir_size` walk rather
+/// than estimated, because eviction frees an amount the caller cannot
+/// predict — a re-walk is always correct (invariant N3). The size of the
+/// file being replaced is also re-read after eviction, not reused from
+/// before it: eviction's first pick is the oldest entry, which is exactly
+/// the entry a refresh write is replacing, so eviction routinely deletes it
+/// out from under the pre-eviction reading.
+pub fn write_entry(
+    state_dir: &Path,
+    path: &Path,
+    content: &str,
+    current_size: u64,
+    cap: u64,
+) -> Result<u64, String> {
+    let new_len = content.len() as u64;
+    // Read before any eviction, purely to size the eviction target below:
+    // `base` there is still the pre-eviction memo, so it must pair with the
+    // pre-eviction size of the file it's about to replace. It must NOT be
+    // reused for the returned total — eviction's first pick is always the
+    // oldest entry, and the entry being refreshed here is by definition
+    // stale, so eviction routinely deletes this very file. The total is
+    // computed from a fresh read after eviction, below.
+    let replaced = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let mut base = current_size;
+    if let Err(first) = state::check_cap(base, path, new_len, cap) {
+        // The cache is at quota. Without eviction this returns Err forever:
+        // every subsequent render then pays a live fetch or a real subprocess
+        // spawn while a full state dir of dead entries sits on disk.
+        let Some(namespace) = namespace_dir(path) else {
+            // `path` isn't really inside a cache namespace — refuse to
+            // guess at something safe to delete and surface the original
+            // quota error untouched.
+            return Err(first);
+        };
+        // `state::projected_size` is the same formula `check_cap` just used,
+        // shared rather than re-derived here, purely to size how much to
+        // evict — the pass/fail decision stays check_cap's alone (invariant
+        // N3); this only feeds `evict_namespace`'s target. Accounting
+        // against a fraction of the *whole* cap (rather than this deficit)
+        // is wrong: whatever else lives in `state_dir` — another cache
+        // namespace, real persisted state — can already exceed that fraction
+        // on its own, leaving nothing to evict even though the actual
+        // shortfall is small and lives entirely in this namespace.
+        let projected = state::projected_size(base, replaced, new_len);
+        let needed = projected.saturating_sub(cap);
+        let namespace_total = state::dir_size(namespace);
+        // An eighth of the namespace's own size as headroom, so a plugin
+        // riding the boundary doesn't evict again on the very next render.
+        let headroom = namespace_total / 8;
+        let keep_bytes = namespace_total.saturating_sub(needed.saturating_add(headroom));
+        evict_namespace(namespace, keep_bytes);
+        // Eviction frees an amount this function cannot predict, so the
+        // total is re-measured rather than estimated.
+        base = state::dir_size(state_dir);
+        state::check_cap(base, path, new_len, cap).map_err(|_| first)?;
+    }
+    // Re-read now that any eviction has already happened: if it deleted
+    // `path` (the common case — see above), this reads 0 where the
+    // pre-eviction `replaced` above would still hold its stale, now-wrong
+    // size. When no eviction ran, nothing on disk has changed since the
+    // first read, so this matches it exactly.
+    let replaced = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    std::fs::write(path, content).map_err(|e| e.to_string())
+    rustline_core::atomic_write::write_atomic(path, content.as_bytes())
+        .map_err(|e| e.to_string())?;
+    Ok(state::projected_size(base, replaced, new_len))
 }
 
 #[cfg(test)]
@@ -128,18 +282,508 @@ mod tests {
             fetched_at: "2026-07-20T12:00:00-04:00".into(),
             status: 200,
             body: "hello".into(),
+            last_attempt_at: "2026-07-20T12:00:00-04:00".into(),
         };
         let content = serde_json::to_string(&entry).unwrap();
         let path = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/y");
-        write_entry(dir.path(), &path, &content, 1_000).unwrap();
+        let total = write_entry(dir.path(), &path, &content, 0, 1_000).unwrap();
+        assert_eq!(total, content.len() as u64);
         let got = read_entry(&path).unwrap();
         assert_eq!(got.status, 200);
         assert_eq!(got.body, "hello");
         // a write that would blow the quota is refused
         let big = "z".repeat(2_000);
         let big_path = cache_path(dir.path(), HTTP_NAMESPACE, "big");
-        assert!(write_entry(dir.path(), &big_path, &big, 1_000).is_err());
+        assert!(write_entry(dir.path(), &big_path, &big, total, 1_000).is_err());
         // a missing file reads as None
         assert!(read_entry(Path::new("/no/such/file.json")).is_none());
+    }
+
+    #[test]
+    fn write_entry_reports_the_new_total_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/y");
+        let content = entry_json("2026-07-26T12:00:00-04:00", "hi");
+        let total = write_entry(dir.path(), &p, &content, 0, 10_000).unwrap();
+        assert_eq!(total, content.len() as u64);
+        assert_eq!(total, crate::state::dir_size(dir.path()));
+    }
+
+    #[test]
+    fn write_entry_after_eviction_reports_a_re_measured_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let cap = 1_200;
+        for i in 0..10 {
+            let p = cache_path(dir.path(), HTTP_NAMESPACE, &format!("https://x/{i}"));
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(
+                &p,
+                entry_json("2026-07-20T12:00:00-04:00", &"z".repeat(150)),
+            )
+            .unwrap();
+        }
+        let fresh = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/new");
+        let before = crate::state::dir_size(dir.path());
+        let total = write_entry(
+            dir.path(),
+            &fresh,
+            &entry_json("2026-07-26T12:00:00-04:00", "new"),
+            before,
+            cap,
+        )
+        .expect("eviction makes room");
+        assert_eq!(
+            total,
+            crate::state::dir_size(dir.path()),
+            "reported total is truthful"
+        );
+        assert!(total <= cap);
+    }
+
+    /// Fix pass 1 (Critical 1): eviction's first pick is always the oldest
+    /// entry, and the entry a caller is refreshing is exactly the stale one —
+    /// so eviction routinely deletes the very file `write_entry` is about to
+    /// overwrite. The pre-eviction `replaced` read is correct for *sizing*
+    /// the eviction (it pairs with the pre-eviction `base`), but reusing it
+    /// for the *returned total* double-subtracts that entry's size once
+    /// eviction has already removed it from the post-eviction `base`. This
+    /// pins the case the sibling `write_entry_after_eviction_reports_a_re_measured_total`
+    /// test above cannot: that test writes to a brand-new path, so its
+    /// `replaced` is always 0 and the bug is invisible.
+    #[test]
+    fn write_entry_re_reads_replaced_after_eviction_deletes_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        // Ten entries with distinct, strictly increasing timestamps (same
+        // string length, so every serialized entry is the same size) —
+        // index 0 is unambiguously the oldest and therefore eviction's first
+        // pick.
+        let mut entry_len = 0u64;
+        for i in 0..10 {
+            let ts = format!("2026-07-20T12:{i:02}:00-04:00");
+            let content = entry_json(&ts, &"z".repeat(150));
+            entry_len = content.len() as u64;
+            let p = cache_path(dir.path(), HTTP_NAMESPACE, &format!("https://x/{i}"));
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, &content).unwrap();
+        }
+        // A cap tight enough that refreshing the oldest entry needs eviction.
+        let cap = entry_len * 6;
+        let before = crate::state::dir_size(dir.path());
+        assert!(
+            before > cap,
+            "namespace must start over cap to force eviction"
+        );
+
+        // Refresh https://x/0 — the oldest entry, and therefore the one
+        // eviction deletes first.
+        let target = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/0");
+        assert!(read_entry(&target).is_some(), "target must pre-exist");
+        let refreshed = entry_json("2026-07-27T09:00:00-04:00", "refreshed");
+        let total =
+            write_entry(dir.path(), &target, &refreshed, before, cap).expect("eviction makes room");
+
+        assert_eq!(
+            total,
+            crate::state::dir_size(dir.path()),
+            "the returned total must match the real directory size even when \
+             eviction deleted the entry being replaced"
+        );
+        assert!(
+            read_entry(&target).is_some(),
+            "the refreshed entry must have been written back"
+        );
+    }
+
+    #[test]
+    fn an_entry_without_last_attempt_at_still_deserializes() {
+        // Entries written by an older build must keep working (wire-type
+        // discipline: additive, defaulted fields only).
+        let old = r#"{"fetched_at":"2026-07-20T12:00:00-04:00","status":200,"body":"hi"}"#;
+        let e: CacheEntry = serde_json::from_str(old).unwrap();
+        assert_eq!(e.body, "hi");
+        assert!(e.last_attempt_at.is_empty());
+    }
+
+    fn entry_json(fetched_at: &str, body: &str) -> String {
+        serde_json::to_string(&CacheEntry {
+            fetched_at: fetched_at.to_string(),
+            status: 200,
+            body: body.to_string(),
+            last_attempt_at: fetched_at.to_string(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_full_cache_evicts_and_the_write_then_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let cap = 1_200;
+        // A real plugin state file living directly in `state_dir`, alongside
+        // the cache namespace — not cache, and not inside the namespace
+        // `write_entry` is told to evict from. If eviction were ever wired to
+        // the wrong directory (`state_dir` instead of `path.parent()`), this
+        // is exactly the file it would wrongly delete.
+        let sibling = dir.path().join("counter-state.json");
+        std::fs::write(&sibling, "keep me").unwrap();
+        // Fill the namespace past the cap with distinct keys.
+        for i in 0..10 {
+            let p = cache_path(dir.path(), HTTP_NAMESPACE, &format!("https://x/{i}"));
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(
+                &p,
+                entry_json("2026-07-20T12:00:00-04:00", &"z".repeat(150)),
+            )
+            .unwrap();
+        }
+        let fresh = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/new");
+        // Before: over cap, so this write would be refused forever.
+        let before = crate::state::dir_size(dir.path());
+        assert!(before > cap);
+        let result = write_entry(
+            dir.path(),
+            &fresh,
+            &entry_json("2026-07-26T12:00:00-04:00", "new"),
+            before,
+            cap,
+        );
+        // Checked ahead of `result`'s own assertion so a wiring bug that
+        // "successfully" frees room by deleting the sibling is caught even
+        // when the write itself would otherwise look like it worked.
+        assert_eq!(
+            std::fs::read_to_string(&sibling).unwrap(),
+            "keep me",
+            "eviction triggered by write_entry must not touch a sibling state file"
+        );
+        result.expect("eviction makes room");
+        assert!(read_entry(&fresh).is_some(), "the new entry landed");
+    }
+
+    #[test]
+    fn eviction_prefers_removing_the_oldest_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let ns = dir.path().join(HTTP_NAMESPACE);
+        std::fs::create_dir_all(&ns).unwrap();
+        let old = ns.join("old.json");
+        let new = ns.join("new.json");
+        let old_content = entry_json("2020-01-01T00:00:00-00:00", &"z".repeat(400));
+        std::fs::write(&old, &old_content).unwrap();
+        std::fs::write(
+            &new,
+            entry_json("2026-07-26T12:00:00-04:00", &"z".repeat(400)),
+        )
+        .unwrap();
+        // Each serialized entry is 511 bytes (111-byte JSON envelope + the
+        // 400-byte body); 600 sits strictly between one entry (511) and both
+        // (1022), so evicting only the oldest is enough to clear it.
+        let freed = evict_namespace(&ns, 600);
+        // Pin the exact byte count, not just "something": a freed count that
+        // doesn't match what was actually deleted would leave the caller
+        // (write_entry's cap/2 headroom target) accounting against a lie.
+        assert_eq!(
+            freed,
+            old_content.len() as u64,
+            "freed must equal the deleted entry's size"
+        );
+        assert!(!old.exists(), "the oldest entry goes first");
+        assert!(new.exists(), "the newest entry is retained");
+    }
+
+    #[test]
+    fn a_cap_too_small_to_ever_fit_still_errors_without_looping() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/y");
+        let big = "z".repeat(5_000);
+        assert!(write_entry(dir.path(), &p, &big, 0, 10).is_err());
+    }
+
+    #[test]
+    fn eviction_never_touches_files_outside_the_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let sibling = dir.path().join("counter-state.json");
+        std::fs::write(&sibling, "keep me").unwrap();
+        let ns = dir.path().join(HTTP_NAMESPACE);
+        std::fs::create_dir_all(&ns).unwrap();
+        std::fs::write(
+            ns.join("a.json"),
+            entry_json("2020-01-01T00:00:00-00:00", &"z".repeat(400)),
+        )
+        .unwrap();
+        evict_namespace(&ns, 0);
+        assert!(sibling.exists(), "a sibling state file is not cache");
+    }
+
+    #[test]
+    fn write_entry_never_sacrifices_a_sibling_state_file_to_make_room() {
+        // A cap so small that only deleting the (non-cache) sibling file
+        // could ever satisfy it — the HTTP namespace doesn't even exist yet,
+        // so eviction there frees nothing. If `write_entry` ever evicted
+        // against `state_dir` instead of the namespace it actually sits in,
+        // this is exactly the failure mode: it would "succeed" by deleting a
+        // real plugin state file rather than correctly refusing the write.
+        let dir = tempfile::tempdir().unwrap();
+        let cap = 20;
+        let sibling = dir.path().join("counter-state.json");
+        std::fs::write(&sibling, "x".repeat(50)).unwrap();
+        let fresh = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/new");
+        let current = state::dir_size(dir.path());
+
+        assert!(
+            write_entry(dir.path(), &fresh, "new", current, cap).is_err(),
+            "a cap this small can never be satisfied without deleting real state"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sibling).unwrap(),
+            "x".repeat(50),
+            "the sibling state file must survive a refused write"
+        );
+    }
+
+    // --- Fix pass 1: the wedge B13 was meant to remove is still reachable
+    // whenever `cap / 2` (measured against the whole-state cap) is smaller
+    // than the namespace being written to. ---
+
+    #[test]
+    fn write_entry_evicts_enough_when_another_namespace_also_shares_the_cap() {
+        // Reproduces the reviewer's "both caches in use" repro: a plugin
+        // that calls both `rl_http_get` and `rl_exec` shares one
+        // whole-state-dir cap (`check_cap`, invariant N3) across two
+        // independent cache namespaces. `cap / 2` compares half of the
+        // *whole* cap against the namespace being written — when the
+        // *other* namespace alone already exceeds that half, evicting
+        // against `cap / 2` finds the target namespace already "under
+        // budget" and frees nothing, wedging the write forever even though
+        // the actual deficit is small and lives entirely in the namespace
+        // being written.
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path();
+
+        let exec_ns = state_dir.join(EXEC_NAMESPACE);
+        std::fs::create_dir_all(&exec_ns).unwrap();
+        let exec_body = "e".repeat(400);
+        for i in 0..3 {
+            std::fs::write(
+                exec_ns.join(format!("{i}.json")),
+                entry_json("2020-01-01T00:00:00-00:00", &exec_body),
+            )
+            .unwrap();
+        }
+
+        let http_ns = state_dir.join(HTTP_NAMESPACE);
+        std::fs::create_dir_all(&http_ns).unwrap();
+        let http_body = "h".repeat(300);
+        for i in 0..2 {
+            std::fs::write(
+                http_ns.join(format!("{i}.json")),
+                entry_json("2020-01-01T00:00:00-00:00", &http_body),
+            )
+            .unwrap();
+        }
+
+        let exec_total = state::dir_size(&exec_ns);
+        let http_total = state::dir_size(&http_ns);
+        let cap = exec_total + http_total; // already exactly at the boundary
+
+        let fresh = cache_path(state_dir, HTTP_NAMESPACE, "https://x/new");
+        let content = entry_json("2026-07-26T12:00:00-04:00", "new");
+
+        write_entry(state_dir, &fresh, &content, exec_total + http_total, cap).expect(
+            "the deficit is small and lives entirely in the namespace being \
+             written, so eviction must free enough room regardless of how \
+             much of the cap the exec cache alone already occupies",
+        );
+        assert!(read_entry(&fresh).is_some(), "the new http entry landed");
+        assert_eq!(
+            state::dir_size(&exec_ns),
+            exec_total,
+            "the exec namespace must not be touched by an http-cache write"
+        );
+    }
+
+    #[test]
+    fn write_entry_evicts_enough_when_real_state_files_also_share_the_cap() {
+        // Reproduces the reviewer's "weather shape" repro: a real,
+        // persisted plugin state file (not cache) lives directly in the
+        // state dir alongside the http cache namespace and shares the same
+        // whole-state cap. `cap / 2` compared against the http namespace
+        // alone is smaller than the http namespace's own size whenever the
+        // state file eats enough of the cap on its own — freeing nothing,
+        // wedging the write.
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path();
+
+        std::fs::write(state_dir.join("weather-state.json"), "s".repeat(1_200)).unwrap();
+
+        let http_ns = state_dir.join(HTTP_NAMESPACE);
+        std::fs::create_dir_all(&http_ns).unwrap();
+        let http_body = "h".repeat(700);
+        std::fs::write(
+            http_ns.join("old.json"),
+            entry_json("2020-01-01T00:00:00-00:00", &http_body),
+        )
+        .unwrap();
+
+        let http_total = state::dir_size(&http_ns);
+        let current = state::dir_size(state_dir);
+        let cap = current; // already exactly at the boundary
+
+        let fresh = cache_path(state_dir, HTTP_NAMESPACE, "https://x/new");
+        let content = entry_json("2026-07-26T12:00:00-04:00", "new");
+
+        write_entry(state_dir, &fresh, &content, current, cap).expect(
+            "the deficit lives entirely in the namespace being written; a \
+             real state file elsewhere in the state dir must not prevent \
+             eviction from making room",
+        );
+        assert!(read_entry(&fresh).is_some(), "the new http entry landed");
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join("weather-state.json")).unwrap(),
+            "s".repeat(1_200),
+            "a real persisted state file must survive untouched"
+        );
+        // Sanity: the http namespace did shrink (something was evicted),
+        // it didn't just happen to already fit.
+        assert!(state::dir_size(&http_ns) < http_total + content.len() as u64);
+    }
+
+    // --- `path.parent().unwrap_or(state_dir)` makes the plugin's state
+    // root a deletion target whenever `path` isn't really inside a cache
+    // namespace. `write_entry` is `pub`; nothing in the type system stopped
+    // this before a code-level guard existed. ---
+
+    #[test]
+    fn write_entry_refuses_to_evict_when_the_target_is_not_a_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path();
+        std::fs::write(state_dir.join("counter-state.json"), "x".repeat(900)).unwrap();
+        std::fs::write(state_dir.join("weather-state.json"), "y".repeat(900)).unwrap();
+        let current = state::dir_size(state_dir);
+
+        let result = write_entry(
+            state_dir,
+            &state_dir.join("newthing.json"),
+            "hello",
+            current,
+            1_000,
+        );
+
+        assert!(
+            result.is_err(),
+            "quota exceeded, and there is nowhere safe to evict from"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join("counter-state.json")).unwrap(),
+            "x".repeat(900),
+            "counter state must survive"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join("weather-state.json")).unwrap(),
+            "y".repeat(900),
+            "weather state must survive"
+        );
+    }
+
+    #[test]
+    fn write_entry_refuses_to_evict_when_the_path_has_no_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path();
+        std::fs::write(state_dir.join("counter-state.json"), "c".repeat(900)).unwrap();
+        let current = state::dir_size(state_dir);
+
+        let result = write_entry(state_dir, Path::new(""), &"x".repeat(200), current, 500);
+
+        assert!(
+            result.is_err(),
+            "destroying real state and still failing is strictly worse than refusing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join("counter-state.json")).unwrap(),
+            "c".repeat(900),
+            "a parent-less write target must not fall back to evicting the state root"
+        );
+    }
+
+    // --- Two load-bearing behaviours that were prose-only. ---
+
+    #[test]
+    fn evict_namespace_ignores_directories_when_sizing_the_namespace() {
+        // Only regular files should count toward `total`/eviction. Without
+        // the `is_file()` filter, a subdirectory's own (nonzero) reported
+        // size would inflate `total` forever, since `remove_file` on a
+        // directory always fails and never decrements it back down —
+        // forcing eviction to keep deleting real entries chasing a target
+        // it can never reach.
+        let dir = tempfile::tempdir().unwrap();
+        let ns = dir.path().join(HTTP_NAMESPACE);
+        std::fs::create_dir_all(ns.join("not_a_cache_entry")).unwrap();
+        let entry = ns.join("only.json");
+        let content = entry_json("2020-01-01T00:00:00-00:00", "x");
+        std::fs::write(&entry, &content).unwrap();
+
+        // The namespace already fits without touching anything, as long as
+        // the directory isn't wrongly counted.
+        let freed = evict_namespace(&ns, content.len() as u64);
+
+        assert_eq!(freed, 0, "a namespace within budget evicts nothing");
+        assert!(entry.exists(), "the only real cache entry must survive");
+    }
+
+    #[test]
+    fn write_entry_headroom_leaves_slack_not_just_the_bare_minimum() {
+        // Pins that eviction's headroom is actually nonzero: with no
+        // headroom, eviction would free exactly enough to land the write on
+        // the cap boundary and nothing more, so the very next render at the
+        // same size would immediately re-wedge.
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path();
+        let ns = state_dir.join(HTTP_NAMESPACE);
+        std::fs::create_dir_all(&ns).unwrap();
+
+        let body = "z".repeat(100);
+        let entry_len = entry_json("2020-01-01T00:00:00-00:00", &body).len() as u64;
+        for i in 0..10 {
+            let ts = format!("2020-01-{:02}T00:00:00-00:00", i + 1);
+            std::fs::write(ns.join(format!("{i}.json")), entry_json(&ts, &body)).unwrap();
+        }
+        let namespace_total = entry_len * 10;
+
+        let content = entry_json("2026-07-26T12:00:00-04:00", &body);
+        let new_len = content.len() as u64;
+        // Exactly one entry's worth over cap: the bare minimum eviction
+        // (no headroom) would free precisely one old entry and land the
+        // write exactly on the cap boundary.
+        let cap = namespace_total + new_len - entry_len;
+
+        let fresh = cache_path(state_dir, HTTP_NAMESPACE, "https://x/new");
+        let current = state::dir_size(state_dir);
+        write_entry(state_dir, &fresh, &content, current, cap)
+            .expect("the namespace can cover this");
+
+        assert!(
+            state::dir_size(&ns) < cap,
+            "headroom should leave slack under the cap, not land exactly on the boundary"
+        );
+    }
+
+    // Pins that `write_entry` actually goes through `write_atomic` rather
+    // than truncating the target in place: `fs::write` reuses the target
+    // file's inode, `write_atomic` replaces it via `rename`. Nothing else
+    // here would notice a regression to a bare `fs::write` —
+    // `write_entry_roundtrips_and_enforces_cap` reads back the same bytes
+    // either way.
+    #[test]
+    #[cfg(unix)]
+    fn write_entry_replaces_the_file_rather_than_truncating_it_in_place() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = cache_path(dir.path(), HTTP_NAMESPACE, "https://x/y");
+        let total = write_entry(dir.path(), &path, "first", 0, 1_000).unwrap();
+        let first_ino = std::fs::metadata(&path).unwrap().ino();
+        write_entry(dir.path(), &path, "second, and longer", total, 1_000).unwrap();
+        let second_ino = std::fs::metadata(&path).unwrap().ino();
+        assert_ne!(
+            first_ino, second_ino,
+            "write_entry must replace the file, not truncate it in place"
+        );
     }
 }

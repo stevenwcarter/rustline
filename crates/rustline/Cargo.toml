@@ -19,6 +19,13 @@ gethostname = "1"
 if-addrs = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["registry", "fmt", "ansi"] }
+# Daily log rotation that re-evaluates its target on every write. The
+# hand-rolled size rotation it replaces decided once at process start, so the
+# long-lived `daemon run` process kept appending to an unlinked inode after the
+# second rotation and lost every diagnostic. Used as a blocking `MakeWriter`,
+# NOT via `non_blocking`: that returns a `WorkerGuard` which must outlive the
+# subscriber, and short-lived `render` processes would drop it and lose logs.
+tracing-appender = "0.2.5"
 anyhow = "1"
 toml = "0.9"
 toml_edit = "0.25"

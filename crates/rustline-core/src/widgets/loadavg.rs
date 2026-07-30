@@ -1,4 +1,4 @@
-use crate::{Context, Segment, Widget};
+use crate::{Context, RangeName, Segment, Widget, WidgetName};
 
 /// Renders the 1/5/15-minute load average, when available.
 ///
@@ -9,7 +9,7 @@ use crate::{Context, Segment, Widget};
 pub struct LoadAvg {
     /// Registry/layout name; the toggle key threaded through render + click,
     /// and this instance's range name (invariant #7).
-    pub name: String,
+    pub name: WidgetName,
     pub format: String,
     pub alt_format: String,
     pub down_format: String,
@@ -39,7 +39,7 @@ impl Widget for LoadAvg {
         }
     }
 
-    fn range_name(&self) -> Option<&str> {
+    fn range_name(&self) -> Option<RangeName> {
         crate::widgets::clickable_range(&self.name, &self.alt_format)
     }
 }
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn toggled_uses_alt_format() {
         let mut c = ctx_load(Some([0.42, 0.31, 0.296]));
-        c.toggled.insert("loadavg".to_string());
+        c.toggled.insert(WidgetName::from("loadavg"));
         let out = w("{load1}", "{load1:.1} {load5:.1} {load15:.1}", "").render(&c);
         assert_eq!(out[0].text, "0.4 0.3 0.3");
         // untoggled -> normal format
@@ -265,7 +265,10 @@ mod tests {
 
     #[test]
     fn range_name_some_only_with_alt_format() {
-        assert_eq!(w("{load1}", "{load1:.1}", "").range_name(), Some("loadavg"));
+        assert_eq!(
+            w("{load1}", "{load1:.1}", "").range_name(),
+            Some(RangeName::parse("loadavg").unwrap())
+        );
         assert_eq!(w("{load1}", "", "").range_name(), None);
     }
 

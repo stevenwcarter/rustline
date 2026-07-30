@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
@@ -1426,6 +1426,31 @@ fn isolated_cmd(home: &Path, xdg_data: &Path, xdg_config: &Path) -> Command {
     c
 }
 
+/// Reads the one log file `tracing-appender` rotated into `dir` (named
+/// `rustline.<date>.log`, so a fixed filename can't be asserted here). Filtered
+/// to `rustline.`-prefixed entries so an unrelated file dropped into the same
+/// dir by a future change doesn't fail this on an unrelated count mismatch.
+/// Each of these tests runs a single `render`, so exactly one file is
+/// expected.
+fn read_only_log_file(dir: &Path) -> String {
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .expect("log dir created")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("rustline."))
+        })
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "exactly one log file in {dir:?}: {entries:?}"
+    );
+    fs::read_to_string(entries.remove(0)).expect("log file readable")
+}
+
 #[test]
 fn warning_lands_in_log_file_and_not_stderr_at_default() {
     let dir = tempdir().unwrap();
@@ -1466,10 +1491,244 @@ fn warning_lands_in_log_file_and_not_stderr_at_default() {
     );
 
     // The file sink (INFO) captured the WARN.
-    let log = fs::read_to_string(data.join("rustline/rustline.log")).expect("log file created");
+    let log = read_only_log_file(&data.join("rustline"));
     assert!(
         log.contains("unknown widget"),
         "warning captured in log file; got: {log}"
+    );
+}
+
+/// Pins the `warn_once` cross-process dedup layer end-to-end: that
+/// `warn_once::install` is actually reached from `main` (a wiring
+/// regression here leaves every test in `warn_once.rs` green, since those
+/// only exercise `should_emit`/`reset_if_generation_changed` directly —
+/// never the real hook), that `marker_dir()` resolves to a real, usable
+/// path, and that installing after `logging::init` still lets the warning
+/// reach the log file. Two renders of an unchanged config log the warning
+/// once; touching the config file re-arms it for exactly one more.
+#[test]
+fn warn_dedup_resets_when_config_mtime_changes() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    fs::create_dir_all(config.join("rustline")).unwrap();
+    let config_path = config.join("rustline/config.toml");
+    let config_body = "[layout]\nleft = [\"definitely_not_a_widget\"]\n";
+    fs::write(&config_path, config_body).unwrap();
+
+    let render = || {
+        let out = isolated_cmd(&home, &data, &config)
+            .args([
+                "render",
+                "left",
+                "--session",
+                "0",
+                "--window",
+                "0",
+                "--pane",
+                "0",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "render exited 0");
+    };
+
+    // Same XDG_DATA_HOME (and thus the same marker dir) across both
+    // renders, each a fresh process — cross-process state is the whole
+    // point of this layer.
+    render();
+    render();
+
+    let log = read_only_log_file(&data.join("rustline"));
+    assert_eq!(
+        log.matches("unknown widget").count(),
+        1,
+        "two renders of one config warn once, not twice; got: {log}"
+    );
+
+    // Bump the mtime forward explicitly rather than relying on the
+    // filesystem's write-timing resolution alone (not guaranteed
+    // sub-second everywhere): this is what actually changes the
+    // generation string and re-arms the warn.
+    let before = fs::metadata(&config_path).unwrap().modified().unwrap();
+    fs::write(&config_path, config_body).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&config_path)
+        .unwrap()
+        .set_modified(before + std::time::Duration::from_secs(1))
+        .unwrap();
+    render();
+
+    let log = read_only_log_file(&data.join("rustline"));
+    assert_eq!(
+        log.matches("unknown widget").count(),
+        2,
+        "a config edit re-arms the warn for one more render; got: {log}"
+    );
+}
+
+/// Final pre-merge fix (Important 2): `resolve_base_theme`'s "invalid theme
+/// file" warn was missed by D2's original sweep — that sweep converted only
+/// `warn!` sites, and its sibling eleven lines below ("unknown theme base")
+/// WAS converted, but this one, which fires once per render on a themes-dir
+/// file that fails to parse, was not. Same shape as
+/// `warn_dedup_resets_when_config_mtime_changes` above: two renders of an
+/// unchanged malformed theme file log the warning once, not twice.
+#[test]
+fn theme_file_parse_warn_dedups_across_renders() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    fs::create_dir_all(config.join("rustline/themes")).unwrap();
+    fs::write(
+        config.join("rustline/config.toml"),
+        "[theme]\nbase = \"broken\"\n",
+    )
+    .unwrap();
+    fs::write(
+        config.join("rustline/themes/broken.toml"),
+        "this is not valid toml [[[",
+    )
+    .unwrap();
+
+    let render = || {
+        let out = isolated_cmd(&home, &data, &config)
+            .args([
+                "render",
+                "left",
+                "--session",
+                "0",
+                "--window",
+                "0",
+                "--pane",
+                "0",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "render exited 0");
+    };
+
+    render();
+    render();
+
+    let log = read_only_log_file(&data.join("rustline"));
+    assert_eq!(
+        log.matches("invalid theme file").count(),
+        1,
+        "two renders of one malformed theme file warn once, not twice; got: {log}"
+    );
+}
+
+/// IMPORTANT-2 regression: pins `install`'s refusal to install the dedup
+/// hook at all when the marker dir is wedged. The unit test
+/// `a_wedged_marker_dir_reports_reset_failure` in `warn_once.rs` only pins
+/// that `reset_if_generation_changed` *reports* failure — it calls that
+/// function directly and never exercises `install`'s early return, so a
+/// future `let _ = reset_if_generation_changed(…)` in `install` (installing
+/// the hook unconditionally regardless of the result) would leave every
+/// test in that module green. Such a regression would be dangerous in
+/// exactly the shape `CRITICAL-1` already fixed once: with the hook
+/// installed anyway, `should_emit` would find the first render's stale `k`
+/// marker still present (its removal having failed for the same wedged-dir
+/// reason) and suppress the second render's warn via `AlreadyExists` — the
+/// wrong dedup outcome arrived at by accident, not by design. Only
+/// `install`'s actual refusal (no hook installed at all, so every warn in
+/// that run emits unconditionally) produces the 1 -> 2 count asserted below;
+/// the accidental-suppression path would leave it stuck at 1.
+#[test]
+#[cfg(unix)]
+fn warn_dedup_disables_when_marker_dir_is_wedged() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Unix mode bits are meaningless to root; see the identical guard on
+    // `a_wedged_marker_dir_reports_reset_failure` in `warn_once.rs`.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: running as root, permission bits aren't enforced");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    fs::create_dir_all(config.join("rustline")).unwrap();
+    let config_path = config.join("rustline/config.toml");
+    let config_body = "[layout]\nleft = [\"definitely_not_a_widget\"]\n";
+    fs::write(&config_path, config_body).unwrap();
+
+    let render = || {
+        let out = isolated_cmd(&home, &data, &config)
+            .args([
+                "render",
+                "left",
+                "--session",
+                "0",
+                "--window",
+                "0",
+                "--pane",
+                "0",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "render exited 0");
+    };
+
+    render();
+    let log = read_only_log_file(&data.join("rustline"));
+    assert_eq!(
+        log.matches("unknown widget").count(),
+        1,
+        "first render warns once; got: {log}"
+    );
+
+    // Wedge the marker dir: an unwritable directory (blocks removing or
+    // creating entries) *and* an unwritable stamp file (blocks overwriting
+    // its content directly) — a directory-only chmod still lets an existing
+    // file's bytes be overwritten in place, so the stamp is chmod'd too,
+    // matching the established pattern at `warn_once.rs`'s
+    // `a_wedged_marker_dir_reports_reset_failure`.
+    let marker_dir = data.join("rustline/.warn-markers");
+    let stamp = marker_dir.join(".generation");
+    fs::set_permissions(&stamp, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(&marker_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Bump the config's mtime forward (content unchanged) so the next
+    // render's generation actually differs from the recorded one, driving
+    // `reset_if_generation_changed` into the remove-and-restamp path — the
+    // wedge above is what makes that path fail. An unchanged generation
+    // would short-circuit on the matching stamp before ever touching the
+    // wedged permissions, defeating the point of this test.
+    let before = fs::metadata(&config_path).unwrap().modified().unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&config_path)
+        .unwrap()
+        .set_modified(before + std::time::Duration::from_secs(1))
+        .unwrap();
+
+    render();
+
+    // Restore permissions before any assertion below can panic, so the
+    // tempdir's own Drop cleanup (which unlinks everything inside
+    // `marker_dir`) doesn't fail.
+    fs::set_permissions(&marker_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&stamp, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let log = read_only_log_file(&data.join("rustline"));
+    assert_eq!(
+        log.matches("unknown widget").count(),
+        2,
+        "a wedged marker dir must disable dedup for the whole run rather than \
+         suppress via a stale marker; got: {log}"
     );
 }
 
@@ -1549,7 +1808,7 @@ fn invalid_config_warning_lands_in_log_file() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let log = fs::read_to_string(data.join("rustline/rustline.log")).expect("log file created");
+    let log = read_only_log_file(&data.join("rustline"));
     assert!(
         log.contains("invalid config"),
         "deferred load-warning reaches the log file after logging::init; got: {log}"
@@ -1570,7 +1829,7 @@ fn unwritable_log_dir_degrades_to_stderr_only() {
         dir.path().join("config"),
     );
     fs::create_dir_all(&data).unwrap();
-    // Occupies `$XDG_DATA_HOME/rustline`, so `open_log`'s
+    // Occupies `$XDG_DATA_HOME/rustline`, so `logging::init`'s
     // `create_dir_all($XDG_DATA_HOME/rustline)` fails: a non-directory
     // already exists at that path.
     fs::write(data.join("rustline"), "not a directory").unwrap();
@@ -1599,8 +1858,8 @@ fn unwritable_log_dir_degrades_to_stderr_only() {
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("cannot open log file"),
-        "file-open failure degrades to a stderr-only report; got: {stderr}"
+        stderr.contains("cannot open log dir"),
+        "dir-open failure degrades to a stderr-only report; got: {stderr}"
     );
 }
 
@@ -1745,6 +2004,24 @@ fn config_edit_does_not_recreate_existing_file() {
     );
 }
 
+/// Extracts the path from doctor's `  log:     {path} (daily, 7 kept)` row
+/// (see `doctor.rs`'s resolved-paths printout). Panics with the full stdout
+/// on a shape mismatch so a future change to the row's formatting fails
+/// loudly here instead of silently returning a bogus path.
+fn doctor_log_row_path(stdout: &str) -> PathBuf {
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("log:"))
+        .unwrap_or_else(|| panic!("doctor prints a log: row: {stdout}"));
+    let path_str = line
+        .trim_start()
+        .strip_prefix("log:")
+        .map(str::trim)
+        .and_then(|s| s.strip_suffix(" (daily, 7 kept)"))
+        .unwrap_or_else(|| panic!("log: row has the expected shape: {line}"));
+    PathBuf::from(path_str)
+}
+
 #[test]
 fn doctor_runs_and_prints_resolved_paths() {
     // Host-dependent (tmux may or may not be installed, running, or have
@@ -1775,7 +2052,10 @@ fn doctor_runs_and_prints_resolved_paths() {
     let expected_config = config.join("rustline/config.toml");
     let expected_themes = config.join("rustline/themes");
     let expected_plugins = data.join("rustline/plugins");
-    let expected_log = data.join("rustline/rustline.log");
+    // The log file name carries today's date (see `logging::current_log_path`),
+    // so only its directory is asserted here; the rotation scheme is asserted
+    // separately below.
+    let expected_log_dir = data.join("rustline");
     assert!(
         stdout.contains(&expected_config.display().to_string()),
         "resolved config path present: {stdout}"
@@ -1789,8 +2069,67 @@ fn doctor_runs_and_prints_resolved_paths() {
         "resolved plugin dir present: {stdout}"
     );
     assert!(
-        stdout.contains(&expected_log.display().to_string()),
-        "resolved log path present: {stdout}"
+        stdout.contains(&format!(
+            "log:     {}/rustline.",
+            expected_log_dir.display()
+        )),
+        "log row prints the resolved log path: {stdout}"
+    );
+    assert!(
+        stdout.contains("(daily, 7 kept)"),
+        "log row names the rotation scheme: {stdout}"
+    );
+
+    // `doctor`'s own `logging::init` creates the file it reports, so this
+    // holds unconditionally and catches any future drift between the
+    // filename `current_log_path` reports and the one the appender actually
+    // wrote.
+    let log_path = doctor_log_row_path(&stdout);
+    assert!(
+        log_path.exists(),
+        "doctor's reported log path must exist on disk: {log_path:?}"
+    );
+}
+
+/// `doctor`'s reported log filename must not depend on the host's timezone:
+/// `RollingFileAppender` always rotates on a UTC day boundary, so
+/// `current_log_path` must compute its date in UTC too. A test that only
+/// runs at one TZ can't reliably prove that — reverting to
+/// `chrono::Local::now()` fails under, say, `America/Detroit` during its
+/// UTC-offset window, but passes under `TZ=UTC`, which is what most CI boxes
+/// (and Docker's default) run as. So instead this spawns `rustline doctor`
+/// twice, under two TZs whose local calendar dates can never agree —
+/// `Etc/GMT-14` (UTC+14) and `Etc/GMT+12` (UTC-12) are 26 hours apart, more
+/// than a full day — and asserts the reported filenames match. On
+/// `Utc::now()` they always match; on `Local::now()` they can never both
+/// match, regardless of what timezone the test itself happens to run under.
+#[test]
+fn doctor_log_path_is_timezone_invariant() {
+    let log_filename_under_tz = |tz: &str| -> String {
+        let dir = tempdir().unwrap();
+        let (home, data, config) = (
+            dir.path().join("home"),
+            dir.path().join("data"),
+            dir.path().join("config"),
+        );
+        let out = isolated_cmd(&home, &data, &config)
+            .env("TZ", tz)
+            .arg("doctor")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        doctor_log_row_path(&stdout)
+            .file_name()
+            .unwrap_or_else(|| panic!("log path has a file name: {stdout}"))
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    let east = log_filename_under_tz("Etc/GMT-14");
+    let west = log_filename_under_tz("Etc/GMT+12");
+    assert_eq!(
+        east, west,
+        "doctor's reported log filename must not depend on the host timezone"
     );
 }
 
@@ -2241,6 +2580,195 @@ fn daemon_status_with_no_daemon_running_exits_nonzero() {
         stderr.contains("not running"),
         "prints \"not running\": {stderr}"
     );
+}
+
+/// B27: a stale daemon socket — a file at the socket path that `exists()`
+/// accepts but `connect` refuses — is the actionable case a user must be
+/// told about, since it costs a connect attempt on every render. This spawns
+/// the real binary (mirrors `warning_lands_in_log_file_and_not_stderr_at_default`'s
+/// pattern) rather than asserting on `try_render_at`'s return value, because
+/// the whole point of the Step 3 refactor is *which* level each failure logs
+/// at — a distinction only a real subscriber, not a `None` return, can prove.
+#[test]
+fn daemon_stale_socket_falls_back_and_warns_in_log_not_stderr() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    let runtime = data.join("runtime").join("rustline");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::write(runtime.join("daemon.sock"), b"not a socket").unwrap();
+
+    let render = || {
+        let out = isolated_cmd(&home, &data, &config)
+            .args([
+                "render",
+                "right",
+                "--session",
+                "0",
+                "--window",
+                "0",
+                "--pane",
+                "0",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "still falls back to an in-process render; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // Default stderr level is ERROR, so a WARN must NOT surface on stderr.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("daemon socket"),
+            "stale-socket warning must not hit stderr at default level; got: {stderr}"
+        );
+    };
+
+    // The stale socket is persistent across ticks (a dead daemon's leftover
+    // file doesn't go away on its own), so the WARN must route through
+    // `warn_once` and dedup across renders rather than repeat once per tick —
+    // exactly the ~86,400-lines/day spam `warn_once.rs`'s module doc warns
+    // about. Render twice against the same socket and pin the count, not
+    // just presence, so stripping the `warn_once` wrapper is caught.
+    render();
+    render();
+
+    let log = read_only_log_file(&data.join("rustline"));
+    assert_eq!(
+        log.matches("daemon socket exists but refuses connections")
+            .count(),
+        1,
+        "stale-socket warning must dedup across renders via warn_once, \
+         not repeat once per tick; got: {log}"
+    );
+}
+
+/// The stale-socket WARN above is deliberately deduped (`warn_once`) because
+/// it is persistent — a dead daemon's socket file sits there across every
+/// tick. The `debug!` diagnostics for the *other* failure branches are the
+/// opposite: detail for an intermittent failure, meant for `-vvv`, and must
+/// fire on every render or `-vvv` becomes useless for exactly the case it
+/// exists to debug (see the module doc). This pins that a real daemon that
+/// accepts a connection but never answers — triggering the client's read
+/// timeout, not the connect-refused WARN branch — logs the `debug!` diagnostic
+/// on *both* of two renders, not just the first.
+#[test]
+fn daemon_debug_diagnostics_fire_on_every_render_not_once_per_generation() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+    let runtime = data.join("runtime").join("rustline");
+    fs::create_dir_all(&runtime).unwrap();
+    let sock = runtime.join("daemon.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+
+    // Accept and stall past the client's 250ms read timeout, twice — once per
+    // render below. No need to speak the wire protocol at all: it's the
+    // client's `read_frame` timing out that must log at `debug`.
+    let handle = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (_stream, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+    });
+
+    let render = || {
+        let out = isolated_cmd(&home, &data, &config)
+            .args([
+                "render",
+                "right",
+                "--session",
+                "0",
+                "--window",
+                "0",
+                "--pane",
+                "0",
+                "-vvv",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "still falls back to an in-process render; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    render();
+    render();
+    handle.join().unwrap();
+
+    let log = read_only_log_file(&data.join("rustline"));
+    assert_eq!(
+        log.matches("daemon response read failed or timed out")
+            .count(),
+        2,
+        "the debug diagnostic must fire on every render, not be deduped like \
+         the stale-socket WARN; got: {log}"
+    );
+}
+
+/// The flip side of the stale-socket case above: a daemon that was simply
+/// never installed — the default for every user not opting in, and the path
+/// every other smoke test in this file already exercises via
+/// `isolated_cmd`'s empty `XDG_RUNTIME_DIR` — must never put a line in the
+/// log. Asserted explicitly so a future change that logs on this path
+/// (mutating the "actionable vs. not" distinction B27 exists to draw) fails
+/// a test instead of shipping a log line on every tick for every user not
+/// running the daemon.
+#[test]
+fn daemon_missing_socket_leaves_no_daemon_diagnostics_in_log() {
+    let dir = tempdir().unwrap();
+    let (home, data, config) = (
+        dir.path().join("home"),
+        dir.path().join("data"),
+        dir.path().join("config"),
+    );
+
+    let render = |extra_args: &[&str]| {
+        let out = isolated_cmd(&home, &data, &config)
+            .args([
+                "render",
+                "right",
+                "--session",
+                "0",
+                "--window",
+                "0",
+                "--pane",
+                "0",
+            ])
+            .args(extra_args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "render exited 0");
+    };
+    render(&[]);
+    // A missing socket is the default state for every user not running the
+    // daemon, so a `debug!` there would still be one line per render tick for
+    // anyone running `-vvv` — and `debug` sits below the default file-sink
+    // level (INFO), so only a `-vvv` render can catch a regression that logs
+    // at `debug` instead of staying silent.
+    render(&["-vvv"]);
+
+    // The log dir/file may or may not exist depending on whether anything
+    // else logged at file-sink level (INFO, or DEBUG under -vvv); either way,
+    // nothing in it may mention the daemon.
+    if let Ok(entries) = fs::read_dir(data.join("rustline")) {
+        for path in entries.filter_map(Result::ok).map(|e| e.path()) {
+            let text = fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.to_ascii_lowercase().contains("daemon"),
+                "no daemon socket installed -> no daemon diagnostics in the log; got: {text}"
+            );
+        }
+    }
 }
 
 /// `rustline widget …` — enable/disable/move against the `[layout]` arrays,

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 // `segment.rs`.
 pub use rustline_abi::{
     Battery, BatteryState, CpuUsage, DiskInfo, GitInfo, MediaInfo, MemInfo, NetIface, Throughput,
+    WidgetName,
 };
 
 /// Metadata about a single tmux window, used to render per-window segments
@@ -129,7 +130,7 @@ pub struct Context {
     /// widget/plugin name; also serialized to WASM guests so a plugin can honor
     /// toggling by checking its own name.
     #[serde(default)]
-    pub toggled: BTreeSet<String>,
+    pub toggled: BTreeSet<WidgetName>,
     /// Theme-derived colors (default text fg, bar background, and the four
     /// semantic colors) copied from the resolved theme at build time, so
     /// widgets and WASM guests can style consistently. `#[serde(default)]` keeps
@@ -281,7 +282,7 @@ mod tests {
     #[test]
     fn context_toggled_survives_serde_and_defaults_empty() {
         let mut ctx = sample();
-        ctx.toggled = std::collections::BTreeSet::from(["cpu".to_string()]);
+        ctx.toggled = std::collections::BTreeSet::from([WidgetName::from("cpu")]);
         let json = serde_json::to_string(&ctx).unwrap();
         let back: Context = serde_json::from_str(&json).unwrap();
         assert!(back.toggled.contains("cpu"));

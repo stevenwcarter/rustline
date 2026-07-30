@@ -9,37 +9,392 @@
 use crate::abi::{
     CachedExecResult, CachedHttpResult, ExecResult, HttpResult, ReadResult, WriteResult,
 };
-use crate::argv::canonical_argv;
+use crate::allow::{CapKind, CommandCap, ReadPathCap, Url, UrlCap, WritePathCap};
+use crate::argv::{CanonicalArgv, canonical_argv};
 use crate::cache::{
     CacheEntry, EXEC_NAMESPACE, HTTP_NAMESPACE, age_secs, cache_path, is_fresh, read_entry,
     write_entry,
 };
-use crate::capability::{CapabilityCtx, DenialKind};
+use crate::capability::CapabilityCtx;
 use crate::fetch::Fetcher;
 use crate::run::{MAX_OUTPUT_BYTES, Runner};
-use crate::state::{check_cap, normalize_abs, sanitize_relpath};
+use crate::state::{
+    PathResolveError, SandboxRelPath, check_cap, resolve_for_allowlist, sanitize_relpath,
+};
+
+// ==== Outcome enums ====
+//
+// Each `pub fn perform_*` below delegates to a private `*_outcome` fn that
+// runs the exact same gate-first control flow and side effects (denial
+// observation, cache reads/writes, state-size invalidation, tracing) as
+// before, but returns one of these enums instead of building the wire
+// struct's flag combination inline. A single `From` impl per enum is then the
+// **one** place that ok/status/error/stale/etc. get assembled for a given
+// wire type — so two call sites can no longer drift into two different flag
+// combinations for what should be the same outcome. Each `From` arm is a
+// transcription of the return literal it replaces, not a redesign: the wire
+// structs (`HttpResult` & co.) are unmodified, and the `wire_pins` tests pin
+// every arm's exact JSON, before and after this refactor.
+
+enum HttpOutcome {
+    Denied { url: String },
+    Completed { status: u16, body: String },
+    TransportFailed { error: String },
+}
+
+impl From<HttpOutcome> for HttpResult {
+    fn from(o: HttpOutcome) -> HttpResult {
+        match o {
+            HttpOutcome::Denied { url } => HttpResult {
+                ok: false,
+                error: format!("url not allowed: {url}"),
+                ..Default::default()
+            },
+            HttpOutcome::Completed { status, body } => HttpResult {
+                ok: true,
+                status,
+                body,
+                error: String::new(),
+            },
+            HttpOutcome::TransportFailed { error } => HttpResult {
+                ok: false,
+                error,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+enum CachedHttpOutcome {
+    Denied {
+        url: String,
+    },
+    Fresh {
+        status: u16,
+        body: String,
+        age_secs: i64,
+    },
+    Backoff {
+        status: u16,
+        body: String,
+        age_secs: i64,
+    },
+    Refreshed {
+        status: u16,
+        body: String,
+    },
+    ServedStale {
+        status: u16,
+        body: String,
+        age_secs: i64,
+        error: String,
+    },
+    NoUsableAnswer {
+        error: String,
+    },
+}
+
+impl From<CachedHttpOutcome> for CachedHttpResult {
+    fn from(o: CachedHttpOutcome) -> CachedHttpResult {
+        match o {
+            CachedHttpOutcome::Denied { url } => CachedHttpResult {
+                ok: false,
+                error: format!("url not allowed: {url}"),
+                ..Default::default()
+            },
+            CachedHttpOutcome::Fresh {
+                status,
+                body,
+                age_secs,
+            } => CachedHttpResult {
+                ok: true,
+                status,
+                body,
+                error: String::new(),
+                stale: false,
+                age_secs,
+            },
+            CachedHttpOutcome::Backoff {
+                status,
+                body,
+                age_secs,
+            } => CachedHttpResult {
+                ok: true,
+                status,
+                body,
+                error: "refresh backoff; serving cached".to_string(),
+                stale: true,
+                age_secs,
+            },
+            CachedHttpOutcome::Refreshed { status, body } => CachedHttpResult {
+                ok: true,
+                status,
+                body,
+                error: String::new(),
+                stale: false,
+                age_secs: 0,
+            },
+            CachedHttpOutcome::ServedStale {
+                status,
+                body,
+                age_secs,
+                error,
+            } => CachedHttpResult {
+                ok: true,
+                status,
+                body,
+                error,
+                stale: true,
+                age_secs,
+            },
+            CachedHttpOutcome::NoUsableAnswer { error } => CachedHttpResult {
+                ok: false,
+                error,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+enum ExecOutcome {
+    Denied {
+        candidate: CanonicalArgv,
+    },
+    Ran {
+        status: i32,
+        stdout: String,
+        stderr: String,
+        truncated: bool,
+    },
+    CouldNotRun {
+        error: String,
+    },
+}
+
+impl From<ExecOutcome> for ExecResult {
+    fn from(o: ExecOutcome) -> ExecResult {
+        match o {
+            ExecOutcome::Denied { candidate } => ExecResult {
+                ok: false,
+                status: -1,
+                error: format!("command not allowed: {candidate}"),
+                ..Default::default()
+            },
+            ExecOutcome::Ran {
+                status,
+                stdout,
+                stderr,
+                truncated,
+            } => ExecResult {
+                ok: true,
+                status,
+                truncated,
+                stdout,
+                stderr,
+                error: String::new(),
+            },
+            ExecOutcome::CouldNotRun { error } => ExecResult {
+                ok: false,
+                status: -1,
+                error,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+/// `Fresh`/`Backoff`/`ServedStale` carry no `stderr`/`truncated` fields
+/// because a served-from-cache entry never has either — `CacheEntry`
+/// persists only `fetched_at`/`status`/`body`. Their `From` arms hardcode
+/// `stderr: String::new()`/`truncated: false` accordingly, matching
+/// [`perform_exec_cached`]'s doc comment on this round-trip limitation. Only
+/// `Ran` (a run that just happened, not served from cache) carries a real
+/// `stderr`/`truncated`.
+enum CachedExecOutcome {
+    Denied {
+        candidate: CanonicalArgv,
+    },
+    Fresh {
+        status: i32,
+        stdout: String,
+        age_secs: i64,
+    },
+    Backoff {
+        status: i32,
+        stdout: String,
+        age_secs: i64,
+    },
+    Ran {
+        status: i32,
+        stdout: String,
+        stderr: String,
+        truncated: bool,
+    },
+    ServedStale {
+        status: i32,
+        stdout: String,
+        age_secs: i64,
+        error: String,
+    },
+    NoUsableAnswer {
+        error: String,
+    },
+}
+
+impl From<CachedExecOutcome> for CachedExecResult {
+    fn from(o: CachedExecOutcome) -> CachedExecResult {
+        match o {
+            CachedExecOutcome::Denied { candidate } => CachedExecResult {
+                ok: false,
+                status: -1,
+                error: format!("command not allowed: {candidate}"),
+                ..Default::default()
+            },
+            CachedExecOutcome::Fresh {
+                status,
+                stdout,
+                age_secs,
+            } => CachedExecResult {
+                ok: true,
+                status,
+                stdout,
+                stderr: String::new(),
+                error: String::new(),
+                stale: false,
+                age_secs,
+                truncated: false,
+            },
+            CachedExecOutcome::Backoff {
+                status,
+                stdout,
+                age_secs,
+            } => CachedExecResult {
+                ok: true,
+                status,
+                stdout,
+                stderr: String::new(),
+                error: "refresh backoff; serving cached".to_string(),
+                stale: true,
+                age_secs,
+                truncated: false,
+            },
+            CachedExecOutcome::Ran {
+                status,
+                stdout,
+                stderr,
+                truncated,
+            } => CachedExecResult {
+                ok: true,
+                status,
+                truncated,
+                stdout,
+                stderr,
+                error: String::new(),
+                stale: false,
+                age_secs: 0,
+            },
+            CachedExecOutcome::ServedStale {
+                status,
+                stdout,
+                age_secs,
+                error,
+            } => CachedExecResult {
+                ok: true,
+                status,
+                stdout,
+                stderr: String::new(),
+                error,
+                stale: true,
+                age_secs,
+                truncated: false,
+            },
+            CachedExecOutcome::NoUsableAnswer { error } => CachedExecResult {
+                ok: false,
+                error,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+/// Shared by both `perform_state_read` and `perform_file_read` — both
+/// decode to the same [`ReadResult`] wire type. `Denied` is only ever
+/// produced by the file-read allowlist-miss path (state reads have no
+/// allowlist); a `bad-relpath`/resolve-error/real-I/O failure all collapse
+/// onto `Failed`, since they share the same `ok:false,error` wire shape.
+enum ReadOutcome {
+    Denied { path: String },
+    Found { contents: String },
+    Absent,
+    Failed { error: String },
+}
+
+impl From<ReadOutcome> for ReadResult {
+    fn from(o: ReadOutcome) -> ReadResult {
+        match o {
+            ReadOutcome::Denied { path } => ReadResult {
+                ok: false,
+                error: format!("path not allowed: {path}"),
+                ..Default::default()
+            },
+            ReadOutcome::Found { contents } => ReadResult {
+                ok: true,
+                exists: true,
+                contents,
+                error: String::new(),
+            },
+            ReadOutcome::Absent => ReadResult {
+                ok: true,
+                exists: false,
+                ..Default::default()
+            },
+            ReadOutcome::Failed { error } => ReadResult {
+                ok: false,
+                error,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+/// Shared by both `perform_state_write` and `perform_file_write` — see
+/// [`ReadOutcome`]'s doc for why `Denied` is file-write-only.
+enum WriteOutcome {
+    Denied { path: String },
+    Written,
+    Failed { error: String },
+}
+
+impl From<WriteOutcome> for WriteResult {
+    fn from(o: WriteOutcome) -> WriteResult {
+        match o {
+            WriteOutcome::Denied { path } => WriteResult {
+                ok: false,
+                error: format!("path not allowed: {path}"),
+            },
+            WriteOutcome::Written => WriteResult {
+                ok: true,
+                error: String::new(),
+            },
+            WriteOutcome::Failed { error } => WriteResult { ok: false, error },
+        }
+    }
+}
 
 pub fn perform_http_get(ctx: &CapabilityCtx, url: &str, fetcher: &dyn Fetcher) -> HttpResult {
-    if !ctx.allowed_urls.allows(url) {
-        ctx.observe_denial(DenialKind::Url, url);
-        return HttpResult {
-            ok: false,
-            error: format!("url not allowed: {url}"),
-            ..Default::default()
+    http_get_outcome(ctx, url, fetcher).into()
+}
+
+fn http_get_outcome(ctx: &CapabilityCtx, url: &str, fetcher: &dyn Fetcher) -> HttpOutcome {
+    if !ctx.allowed_urls.allows(&Url::new(url)) {
+        ctx.observe_denial(UrlCap::DENIAL, url);
+        return HttpOutcome::Denied {
+            url: url.to_string(),
         };
     }
     match fetcher.get(url) {
-        Ok((status, body)) => HttpResult {
-            ok: true,
-            status,
-            body,
-            error: String::new(),
-        },
-        Err(error) => HttpResult {
-            ok: false,
-            error,
-            ..Default::default()
-        },
+        Ok((status, body)) => HttpOutcome::Completed { status, body },
+        Err(error) => HttpOutcome::TransportFailed { error },
     }
 }
 
@@ -53,14 +408,22 @@ pub fn perform_http_get_cached(
     now: &str,
     fetcher: &dyn Fetcher,
 ) -> CachedHttpResult {
+    http_get_cached_outcome(ctx, url, ttl_secs, now, fetcher).into()
+}
+
+fn http_get_cached_outcome(
+    ctx: &CapabilityCtx,
+    url: &str,
+    ttl_secs: i64,
+    now: &str,
+    fetcher: &dyn Fetcher,
+) -> CachedHttpOutcome {
     // 1) gate first (invariant N1): a denied url makes no network call and
     //    touches no cache file.
-    if !ctx.allowed_urls.allows(url) {
-        ctx.observe_denial(DenialKind::Url, url);
-        return CachedHttpResult {
-            ok: false,
-            error: format!("url not allowed: {url}"),
-            ..Default::default()
+    if !ctx.allowed_urls.allows(&Url::new(url)) {
+        ctx.observe_denial(UrlCap::DENIAL, url);
+        return CachedHttpOutcome::Denied {
+            url: url.to_string(),
         };
     }
 
@@ -73,13 +436,25 @@ pub fn perform_http_get_cached(
         && let Some(age) = age_secs(now, &e.fetched_at)
         && is_fresh(age, ttl_secs)
     {
-        return CachedHttpResult {
-            ok: true,
+        return CachedHttpOutcome::Fresh {
             status: e.status,
             body: e.body.clone(),
-            error: String::new(),
-            stale: false,
             age_secs: age,
+        };
+    }
+
+    // 2b) negative-cache backoff: a refresh was attempted within the last TTL
+    //     window and we still hold a last-good entry, so serve it immediately
+    //     rather than paying another blocking fetch. Without this, a dead
+    //     upstream costs a full fetch timeout on EVERY render forever.
+    if let Some(e) = &entry
+        && let Some(since_attempt) = age_secs(now, &e.last_attempt_at)
+        && is_fresh(since_attempt, ttl_secs)
+    {
+        return CachedHttpOutcome::Backoff {
+            status: e.status,
+            body: e.body.clone(),
+            age_secs: age_secs(now, &e.fetched_at).unwrap_or(0),
         };
     }
 
@@ -90,19 +465,21 @@ pub fn perform_http_get_cached(
                 fetched_at: now.to_string(),
                 status,
                 body: body.clone(),
+                last_attempt_at: now.to_string(),
             })
             .unwrap_or_default();
-            if let Err(error) = write_entry(&dir, &path, &content, ctx.max_state_bytes) {
-                tracing::warn!(%error, %url, "http cache write failed; returning body unpersisted");
+            match write_entry(&dir, &path, &content, ctx.state_size(), ctx.max_state_bytes) {
+                Ok(total) => ctx.set_state_size(total),
+                Err(error) => {
+                    ctx.invalidate_state_size();
+                    tracing::warn!(
+                        %error,
+                        %url,
+                        "http cache write failed; returning body unpersisted"
+                    );
+                }
             }
-            CachedHttpResult {
-                ok: true,
-                status,
-                body,
-                error: String::new(),
-                stale: false,
-                age_secs: 0,
-            }
+            CachedHttpOutcome::Refreshed { status, body }
         }
         // non-2xx or transport error → refresh failed.
         other => {
@@ -114,20 +491,36 @@ pub fn perform_http_get_cached(
                 // serve last-good stale (no egress beyond the failed attempt).
                 Some(e) => {
                     let age = age_secs(now, &e.fetched_at).unwrap_or(0);
-                    CachedHttpResult {
-                        ok: true,
+                    // Record the failed attempt so the next render backs off
+                    // instead of re-entering a blocking fetch. body/status/
+                    // fetched_at are deliberately untouched: this entry is
+                    // still the last-good response.
+                    let content = serde_json::to_string(&CacheEntry {
+                        fetched_at: e.fetched_at.clone(),
+                        status: e.status,
+                        body: e.body.clone(),
+                        last_attempt_at: now.to_string(),
+                    })
+                    .unwrap_or_default();
+                    match write_entry(&dir, &path, &content, ctx.state_size(), ctx.max_state_bytes)
+                    {
+                        Ok(total) => ctx.set_state_size(total),
+                        Err(write_error) => {
+                            ctx.invalidate_state_size();
+                            tracing::warn!(error = %write_error, "negative-cache write failed");
+                        }
+                    }
+                    CachedHttpOutcome::ServedStale {
                         status: e.status,
                         body: e.body,
-                        error,
-                        stale: true,
                         age_secs: age,
+                        error,
                     }
                 }
-                None => CachedHttpResult {
-                    ok: false,
-                    error,
-                    ..Default::default()
-                },
+                // Nothing to negative-cache against, and writing a body-less
+                // entry would corrupt the stale-serve path — behaviour here
+                // is unchanged.
+                None => CachedHttpOutcome::NoUsableAnswer { error },
             }
         }
     }
@@ -148,31 +541,28 @@ pub fn perform_exec(
     args: &[String],
     runner: &dyn Runner,
 ) -> ExecResult {
+    exec_outcome(ctx, program, args, runner).into()
+}
+
+fn exec_outcome(
+    ctx: &CapabilityCtx,
+    program: &str,
+    args: &[String],
+    runner: &dyn Runner,
+) -> ExecOutcome {
     let candidate = canonical_argv(program, args);
     if !ctx.allowed_commands.allows(&candidate) {
-        ctx.observe_denial(DenialKind::Command, &candidate);
-        return ExecResult {
-            ok: false,
-            status: -1,
-            error: format!("command not allowed: {candidate}"),
-            ..Default::default()
-        };
+        ctx.observe_denial(CommandCap::DENIAL, candidate.as_str());
+        return ExecOutcome::Denied { candidate };
     }
     match runner.run(program, args) {
-        Ok((status, stdout, stderr)) => ExecResult {
-            ok: true,
+        Ok((status, stdout, stderr)) => ExecOutcome::Ran {
             status,
             truncated: is_truncated(&stdout, &stderr),
             stdout,
             stderr,
-            error: String::new(),
         },
-        Err(error) => ExecResult {
-            ok: false,
-            status: -1,
-            error,
-            ..Default::default()
-        },
+        Err(error) => ExecOutcome::CouldNotRun { error },
     }
 }
 
@@ -203,39 +593,54 @@ pub fn perform_exec_cached(
     now: &str,
     runner: &dyn Runner,
 ) -> CachedExecResult {
+    exec_cached_outcome(ctx, program, args, ttl_secs, now, runner).into()
+}
+
+fn exec_cached_outcome(
+    ctx: &CapabilityCtx,
+    program: &str,
+    args: &[String],
+    ttl_secs: i64,
+    now: &str,
+    runner: &dyn Runner,
+) -> CachedExecOutcome {
     let candidate = canonical_argv(program, args);
     if !ctx.allowed_commands.allows(&candidate) {
-        ctx.observe_denial(DenialKind::Command, &candidate);
-        return CachedExecResult {
-            ok: false,
-            status: -1,
-            error: format!("command not allowed: {candidate}"),
-            ..Default::default()
-        };
+        ctx.observe_denial(CommandCap::DENIAL, candidate.as_str());
+        return CachedExecOutcome::Denied { candidate };
     }
 
     let dir = ctx.state_dir();
-    let path = cache_path(&dir, EXEC_NAMESPACE, &candidate);
+    let path = cache_path(&dir, EXEC_NAMESPACE, candidate.as_str());
     let entry = read_entry(&path);
 
     if let Some(e) = &entry
         && let Some(age) = age_secs(now, &e.fetched_at)
         && is_fresh(age, ttl_secs)
     {
-        return CachedExecResult {
-            ok: true,
+        return CachedExecOutcome::Fresh {
             status: i32::from(e.status),
-            stdout: e.body.clone(),
             // `CacheEntry` doesn't persist stderr (only the successful
             // stdout body is worth caching); a served entry always reports
-            // it empty, fresh or stale.
-            stderr: String::new(),
-            error: String::new(),
-            stale: false,
+            // it empty, fresh or stale — see `CachedExecOutcome::from`'s
+            // `Fresh`/`Backoff` arms.
+            stdout: e.body.clone(),
             age_secs: age,
-            // Round-trip limitation: `CacheEntry` doesn't persist whether the
-            // original run was truncated — see this function's doc comment.
-            truncated: false,
+        };
+    }
+
+    // negative-cache backoff: mirrors `perform_http_get_cached`'s — a refresh
+    // was attempted within the last TTL window and we still hold a last-good
+    // entry, so serve it immediately rather than paying another blocking
+    // spawn/timeout.
+    if let Some(e) = &entry
+        && let Some(since_attempt) = age_secs(now, &e.last_attempt_at)
+        && is_fresh(since_attempt, ttl_secs)
+    {
+        return CachedExecOutcome::Backoff {
+            status: i32::from(e.status),
+            stdout: e.body.clone(),
+            age_secs: age_secs(now, &e.fetched_at).unwrap_or(0),
         };
     }
 
@@ -245,34 +650,35 @@ pub fn perform_exec_cached(
                 fetched_at: now.to_string(),
                 status: 0,
                 body: stdout.clone(),
+                last_attempt_at: now.to_string(),
             })
             .unwrap_or_default();
-            if let Err(error) = write_entry(&dir, &path, &content, ctx.max_state_bytes) {
-                tracing::warn!(%error, %candidate, "exec cache write failed; returning body unpersisted");
+            match write_entry(&dir, &path, &content, ctx.state_size(), ctx.max_state_bytes) {
+                Ok(total) => ctx.set_state_size(total),
+                Err(error) => {
+                    ctx.invalidate_state_size();
+                    tracing::warn!(
+                        %error,
+                        %candidate,
+                        "exec cache write failed; returning body unpersisted"
+                    );
+                }
             }
-            CachedExecResult {
-                ok: true,
+            CachedExecOutcome::Ran {
                 status: 0,
                 truncated: is_truncated(&stdout, &stderr),
                 stdout,
                 stderr,
-                error: String::new(),
-                stale: false,
-                age_secs: 0,
             }
         }
         // Ran, but a non-zero exit is data, not an error: return it as-is
         // without caching it (only a successful run is worth serving stale
         // later).
-        Ok((status, stdout, stderr)) => CachedExecResult {
-            ok: true,
+        Ok((status, stdout, stderr)) => CachedExecOutcome::Ran {
             status,
             truncated: is_truncated(&stdout, &stderr),
             stdout,
             stderr,
-            error: String::new(),
-            stale: false,
-            age_secs: 0,
         },
         // Couldn't run at all (denied is already handled above; this is a
         // spawn failure or timeout): serve the last-good entry stale if one
@@ -280,23 +686,35 @@ pub fn perform_exec_cached(
         Err(error) => match entry {
             Some(e) => {
                 let age = age_secs(now, &e.fetched_at).unwrap_or(0);
-                CachedExecResult {
-                    ok: true,
+                // Record the failed attempt so the next render backs off
+                // instead of re-entering a blocking spawn/timeout. body/
+                // status/fetched_at are deliberately untouched: this entry is
+                // still the last-good response.
+                let content = serde_json::to_string(&CacheEntry {
+                    fetched_at: e.fetched_at.clone(),
+                    status: e.status,
+                    body: e.body.clone(),
+                    last_attempt_at: now.to_string(),
+                })
+                .unwrap_or_default();
+                match write_entry(&dir, &path, &content, ctx.state_size(), ctx.max_state_bytes) {
+                    Ok(total) => ctx.set_state_size(total),
+                    Err(write_error) => {
+                        ctx.invalidate_state_size();
+                        tracing::warn!(error = %write_error, "negative-cache write failed");
+                    }
+                }
+                CachedExecOutcome::ServedStale {
                     status: i32::from(e.status),
                     stdout: e.body,
-                    stderr: String::new(),
-                    error,
-                    stale: true,
                     age_secs: age,
-                    // Round-trip limitation: see this function's doc comment.
-                    truncated: false,
+                    error,
                 }
             }
-            None => CachedExecResult {
-                ok: false,
-                error,
-                ..Default::default()
-            },
+            // Nothing to negative-cache against, and writing a body-less
+            // entry would corrupt the stale-serve path — behaviour here is
+            // unchanged.
+            None => CachedExecOutcome::NoUsableAnswer { error },
         },
     }
 }
@@ -310,128 +728,233 @@ fn is_truncated(stdout: &str, stderr: &str) -> bool {
 }
 
 pub fn perform_state_read(ctx: &CapabilityCtx, relpath: &str) -> ReadResult {
-    let rel = match sanitize_relpath(relpath) {
+    state_read_outcome(ctx, relpath).into()
+}
+
+fn state_read_outcome(ctx: &CapabilityCtx, relpath: &str) -> ReadOutcome {
+    let rel: SandboxRelPath = match sanitize_relpath(relpath) {
         Ok(r) => r,
-        Err(error) => {
-            return ReadResult {
-                ok: false,
-                error,
-                ..Default::default()
-            };
-        }
+        Err(error) => return ReadOutcome::Failed { error },
     };
-    let full = ctx.state_dir().join(rel);
+    let full = ctx.state_dir().join(&rel);
     match std::fs::read_to_string(&full) {
-        Ok(contents) => ReadResult {
-            ok: true,
-            exists: true,
-            contents,
-            error: String::new(),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ReadResult {
-            ok: true,
-            exists: false,
-            ..Default::default()
-        },
-        Err(e) => ReadResult {
-            ok: false,
+        Ok(contents) => ReadOutcome::Found { contents },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ReadOutcome::Absent,
+        Err(e) => ReadOutcome::Failed {
             error: e.to_string(),
-            ..Default::default()
         },
     }
 }
 
 pub fn perform_state_write(ctx: &CapabilityCtx, relpath: &str, contents: &str) -> WriteResult {
-    let rel = match sanitize_relpath(relpath) {
+    state_write_outcome(ctx, relpath, contents).into()
+}
+
+fn state_write_outcome(ctx: &CapabilityCtx, relpath: &str, contents: &str) -> WriteOutcome {
+    let rel: SandboxRelPath = match sanitize_relpath(relpath) {
         Ok(r) => r,
-        Err(error) => return WriteResult { ok: false, error },
+        Err(error) => return WriteOutcome::Failed { error },
     };
     let dir = ctx.state_dir();
-    let full = dir.join(rel);
-    if let Err(error) = check_cap(&dir, &full, contents.len() as u64, ctx.max_state_bytes) {
-        return WriteResult { ok: false, error };
+    let full = dir.join(&rel);
+    let new_len = contents.len() as u64;
+    if check_cap(ctx.state_size(), &full, new_len, ctx.max_state_bytes).is_err() {
+        // The refusal may be the memo's own fault: it can go stale-high
+        // whenever the state dir shrinks behind this ctx's back — a user
+        // clearing the plugin's state dir, a crashed-render staging orphan
+        // being reaped, a concurrent render's cache eviction. `write_entry`'s
+        // quota-failure path already self-heals by re-measuring after its
+        // own eviction; a bare refusal here previously did not, so it never
+        // recovered until something else happened to invalidate the memo.
+        // Invalidating and re-checking once costs a walk only on this rare
+        // refusal path, and can only make the decision more accurate, never
+        // looser (invariant N3).
+        ctx.invalidate_state_size();
+        if let Err(error) = check_cap(ctx.state_size(), &full, new_len, ctx.max_state_bytes) {
+            return WriteOutcome::Failed { error };
+        }
     }
+    // Captured once now that the check above has passed: nothing between
+    // here and the write below changes the memo, so re-reading `state_size()`
+    // again in the success arm would only return this same value.
+    let current_size = ctx.state_size();
     if let Some(parent) = full.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
-        return WriteResult {
-            ok: false,
+        return WriteOutcome::Failed {
             error: e.to_string(),
         };
     }
-    match std::fs::write(&full, contents.as_bytes()) {
-        Ok(()) => WriteResult {
-            ok: true,
-            error: String::new(),
-        },
-        Err(e) => WriteResult {
-            ok: false,
-            error: e.to_string(),
-        },
+    // Read before the write: the file being replaced (if any) still has its
+    // old size right up until `write_atomic` lands, and the memo update
+    // below needs that old size to net out correctly against the new one.
+    let replaced = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+    match rustline_core::atomic_write::write_atomic(&full, contents.as_bytes()) {
+        Ok(()) => {
+            ctx.set_state_size(
+                current_size
+                    .saturating_sub(replaced)
+                    .saturating_add(new_len),
+            );
+            WriteOutcome::Written
+        }
+        Err(e) => {
+            // A failed write should leave the memo untouched in the common
+            // case (`write_atomic` cleans up its own staging file), but
+            // trusting that here couples this call site to that internal
+            // detail. Invalidating costs one extra walk on the next write and
+            // is always correct — when in doubt, invalidate (invariant N3).
+            ctx.invalidate_state_size();
+            WriteOutcome::Failed {
+                error: e.to_string(),
+            }
+        }
     }
 }
 
+/// Read an arbitrary file, gated by `allowed_paths` — the **read** allowlist;
+/// `allowed_write_paths` does not authorize a read (see `perform_file_write`
+/// for the write counterpart and why the two are separate).
+///
+/// **resolve → match → act (invariant N1, order load-bearing):** the path is
+/// resolved for symlinks (`resolve_for_allowlist`) strictly before the
+/// allowlist check, and the check strictly before the filesystem is touched —
+/// resolving after matching would let a symlink component slip past the
+/// allowlist entirely.
+///
+/// A symlink refusal from `resolve_for_allowlist` is itself a capability
+/// denial — `resolve_symlinks` is the config value that decides it — so it
+/// reaches `ctx.observe_denial` just like the allowlist-miss case below.
+/// `resolve_for_allowlist`'s malformed-input errors (not absolute, `..`
+/// traversal) do not: they reject the same input for every plugin regardless
+/// of config, so there is no policy decision to log.
 pub fn perform_file_read(ctx: &CapabilityCtx, path: &str) -> ReadResult {
-    let norm = match normalize_abs(path) {
+    file_read_outcome(ctx, path).into()
+}
+
+fn file_read_outcome(ctx: &CapabilityCtx, path: &str) -> ReadOutcome {
+    let resolved = match resolve_for_allowlist(path, ctx.resolve_symlinks) {
         Ok(p) => p,
         Err(error) => {
-            return ReadResult {
-                ok: false,
-                error,
-                ..Default::default()
+            if let PathResolveError::SymlinkDenied(target) = &error {
+                ctx.observe_denial(ReadPathCap::DENIAL, target);
+            }
+            return ReadOutcome::Failed {
+                error: error.to_string(),
             };
         }
     };
-    if !ctx.allowed_paths.allows(&norm) {
-        ctx.observe_denial(DenialKind::Path, &norm);
-        return ReadResult {
-            ok: false,
-            error: format!("path not allowed: {norm}"),
-            ..Default::default()
-        };
-    }
-    match std::fs::read_to_string(&norm) {
-        Ok(contents) => ReadResult {
-            ok: true,
-            exists: true,
-            contents,
-            error: String::new(),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ReadResult {
-            ok: true,
-            exists: false,
-            ..Default::default()
-        },
-        Err(e) => ReadResult {
-            ok: false,
+    let allowed = match ctx.allowed_paths.check_path(resolved) {
+        Ok(allowed) => allowed,
+        Err(denied) => {
+            ctx.observe_denial(ReadPathCap::DENIAL, denied.as_str());
+            return ReadOutcome::Denied {
+                path: denied.as_str().to_string(),
+            };
+        }
+    };
+    match std::fs::read_to_string(&allowed) {
+        Ok(contents) => ReadOutcome::Found { contents },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ReadOutcome::Absent,
+        Err(e) => ReadOutcome::Failed {
             error: e.to_string(),
-            ..Default::default()
         },
     }
 }
 
+/// Write an arbitrary file, gated by `allowed_write_paths` — the **write**
+/// allowlist, deliberately separate from the read-only `allowed_paths`. The
+/// two used to be one list: approving a manifest that requested a path
+/// advertised as "read your aliases to show a badge" also handed the plugin
+/// arbitrary overwrite of that file (see `PluginConfig::allowed_write_paths`'s
+/// doc for the exploit and the migration ruling — an existing `allowed_paths`
+/// entry now grants read only).
+///
+/// **resolve → match → act (invariant N1, order load-bearing):** see
+/// `perform_file_read`'s doc — the same ordering, and the same
+/// symlink-denial-must-observe reasoning, applies here.
 pub fn perform_file_write(ctx: &CapabilityCtx, path: &str, contents: &str) -> WriteResult {
-    let norm = match normalize_abs(path) {
+    file_write_outcome(ctx, path, contents).into()
+}
+
+fn file_write_outcome(ctx: &CapabilityCtx, path: &str, contents: &str) -> WriteOutcome {
+    let resolved = match resolve_for_allowlist(path, ctx.resolve_symlinks) {
         Ok(p) => p,
-        Err(error) => return WriteResult { ok: false, error },
+        Err(error) => {
+            if let PathResolveError::SymlinkDenied(target) = &error {
+                ctx.observe_denial(WritePathCap::DENIAL, target);
+            }
+            return WriteOutcome::Failed {
+                error: error.to_string(),
+            };
+        }
     };
-    if !ctx.allowed_paths.allows(&norm) {
-        ctx.observe_denial(DenialKind::Path, &norm);
-        return WriteResult {
-            ok: false,
-            error: format!("path not allowed: {norm}"),
-        };
-    }
-    match std::fs::write(&norm, contents.as_bytes()) {
-        Ok(()) => WriteResult {
-            ok: true,
-            error: String::new(),
-        },
-        Err(e) => WriteResult {
-            ok: false,
+    let allowed = match ctx.allowed_write_paths.check_path(resolved) {
+        Ok(allowed) => allowed,
+        Err(denied) => {
+            ctx.observe_denial(WritePathCap::DENIAL, denied.as_str());
+            return WriteOutcome::Denied {
+                path: denied.as_str().to_string(),
+            };
+        }
+    };
+    // Deliberately not `write_atomic`: `path` is an arbitrary allowlisted
+    // absolute path a plugin asked to write, not a temp/cache/state file this
+    // module owns. Rename-replace would change the target's inode and
+    // permissions and break existing hard links — not what a plugin writing
+    // to a user-designated path should do.
+    match std::fs::write(&allowed, contents.as_bytes()) {
+        Ok(()) => WriteOutcome::Written,
+        Err(e) => WriteOutcome::Failed {
             error: e.to_string(),
         },
     }
+}
+
+/// Longest guest log message forwarded to `tracing`, in bytes — this bound
+/// includes the `TRUNCATION_MARKER` appended on truncation, so a truncated
+/// message's *body* is capped to `MAX_GUEST_LOG_BYTES - TRUNCATION_MARKER.len()`
+/// and the total never exceeds this constant. Keeping the marker inside the
+/// budget (rather than appended on top of it) is what makes this doc
+/// literally true instead of quietly overselling by `TRUNCATION_MARKER.len()`
+/// bytes — harmless at 2 KiB, but wrong if this is ever tuned against a real
+/// limit such as a syslog line cap.
+pub(crate) const MAX_GUEST_LOG_BYTES: usize = 2 * 1024;
+
+/// Most `rl_log` calls forwarded per plugin instance per process.
+///
+/// 256 and "per process, not per render" are both deliberate choices, not
+/// defaults that happened: the cap exists to bound how much a buggy loop or
+/// hostile plugin can write to the user's disk over the life of the
+/// process — the abuse case — not to give a well-behaved plugin a fresh
+/// debugging allowance every render. Resetting the budget per render would
+/// defeat it against exactly the failure mode it exists to stop, since a
+/// plugin logging every render would then log forever. That is harmless on
+/// the CLI path, where a fresh process (and so a fresh budget) starts every
+/// render; it means the counter accumulates across the daemon's whole
+/// lifetime once a plugin instance is warm there — see
+/// [`CapabilityCtx`]'s `log_calls` field
+/// for what that costs a well-behaved plugin under the daemon.
+pub(crate) const MAX_GUEST_LOG_CALLS: u32 = 256;
+
+/// Appended to a guest message that was truncated. Budgeted *inside*
+/// `MAX_GUEST_LOG_BYTES` (see its doc), not added on top of it.
+const TRUNCATION_MARKER: &str = "…(truncated)";
+
+/// Truncate `msg` to at most `MAX_GUEST_LOG_BYTES` total, including
+/// `TRUNCATION_MARKER` when it truncates, and never splitting a character.
+/// The message is guest-supplied UTF-8, so a byte-index slice would panic on
+/// a multi-byte char straddling the cap.
+fn truncate_guest_msg(msg: &str) -> std::borrow::Cow<'_, str> {
+    if msg.len() <= MAX_GUEST_LOG_BYTES {
+        return std::borrow::Cow::Borrowed(msg);
+    }
+    let body_cap = MAX_GUEST_LOG_BYTES.saturating_sub(TRUNCATION_MARKER.len());
+    let mut end = body_cap;
+    while end > 0 && !msg.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::borrow::Cow::Owned(format!("{}{TRUNCATION_MARKER}", &msg[..end]))
 }
 
 /// Emit a guest log message through the host's `tracing` subscriber.
@@ -440,12 +963,41 @@ pub fn perform_file_write(ctx: &CapabilityCtx, path: &str, contents: &str) -> Wr
 /// intentional capability-free host function** (invariant N1): it never
 /// touches the network or filesystem, so there is no `CapabilityCtx`
 /// allowlist to check and — unlike `perform_http_get`/`perform_state_read`/
-/// etc. — no "denied" case to test. `plugin` tags the log line so
-/// multi-plugin output stays attributable; an unrecognized `level` string
-/// degrades to `info` (keeping the original string as a field) rather than
-/// dropping the message or panicking, matching invariant N2 (a plugin must
-/// never break the bar).
-pub fn perform_log(plugin: &str, level: &str, msg: &str) {
+/// etc. — no "denied" case to test. `plugin` (from `ctx.name`) tags the log
+/// line so multi-plugin output stays attributable; an unrecognized `level`
+/// string degrades to `info` (keeping the original string as a field) rather
+/// than dropping the message or panicking, matching invariant N2 (a plugin
+/// must never break the bar).
+///
+/// Capability-free does not mean unbounded, though: a guest with 16 MB of
+/// memory and a 500 M-fuel render budget can still issue thousands of calls
+/// or one huge message in a single render, and the log this function writes
+/// to is the user's only diagnostic when something goes wrong — so it must
+/// never be the thing that fills their disk. `msg` is truncated to
+/// `MAX_GUEST_LOG_BYTES` and calls are capped at `MAX_GUEST_LOG_CALLS` per
+/// instance per process — "per process" means per render on the CLI path,
+/// but per daemon lifetime under the daemon, since a `CapabilityCtx` there is
+/// built once and kept warm (see `MAX_GUEST_LOG_CALLS`'s doc and
+/// [`CapabilityCtx`]'s `log_calls` field
+/// for what that costs a well-behaved plugin). Neither check is a capability
+/// gate: nothing is denied, no `observe_denial` fires, and there is still no
+/// allowlist — every call still reaches `tracing`, just bounded in size and
+/// rate rather than admitted or refused.
+pub fn perform_log(ctx: &CapabilityCtx, level: &str, msg: &str) {
+    let calls = ctx.claim_log_call();
+    if calls > MAX_GUEST_LOG_CALLS {
+        if calls == MAX_GUEST_LOG_CALLS + 1 {
+            tracing::warn!(
+                target: "rustline_wasm::guest",
+                plugin = %ctx.name,
+                limit = MAX_GUEST_LOG_CALLS,
+                "guest log rate limit reached; further messages dropped this process"
+            );
+        }
+        return;
+    }
+    let plugin = &ctx.name;
+    let msg = truncate_guest_msg(msg);
     match level {
         "error" => tracing::error!(target: "rustline_wasm::guest", %plugin, "{msg}"),
         "warn" => tracing::warn!(target: "rustline_wasm::guest", %plugin, "{msg}"),
@@ -517,6 +1069,29 @@ mod tests {
         ctx_with_cap(urls, root, 16)
     }
 
+    /// A `CapabilityCtx` with `allowed_paths`/`allowed_write_paths`/
+    /// `resolve_symlinks` set directly, for the read/write producer tests
+    /// below. The tempdir root is canonicalized before use as the state
+    /// root: `tempfile::tempdir()` can itself sit under a symlink on some
+    /// systems (e.g. macOS's `/tmp` -> `/private/tmp`), and this ctx must not
+    /// introduce that as an incidental extra symlink hop unrelated to the
+    /// symlink each test is actually exercising.
+    fn test_ctx_paths(
+        dir: &tempfile::TempDir,
+        allowed_paths: &[&str],
+        allowed_write_paths: &[&str],
+        resolve_symlinks: bool,
+    ) -> CapabilityCtx {
+        let root = std::fs::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
+        let pc = PluginConfig {
+            allowed_paths: allowed_paths.iter().map(|s| s.to_string()).collect(),
+            allowed_write_paths: allowed_write_paths.iter().map(|s| s.to_string()).collect(),
+            resolve_symlinks,
+            ..PluginConfig::default()
+        };
+        CapabilityCtx::from_config("weather", &pc, root)
+    }
+
     // The cache tests wrap each body in a JSON envelope (fetched_at + status +
     // body), so even a short body's entry is well over `ctx_with`'s 16-byte
     // cap; tests that need a write to actually persist use a roomy cap here,
@@ -586,6 +1161,92 @@ mod tests {
         assert!(over.error.contains("quota"));
     }
 
+    /// A single oversized write already fails the cap check regardless of
+    /// what `current_size` it's handed, so
+    /// `state_write_then_read_roundtrips_and_enforces_cap` above can't tell a
+    /// correctly-updated memo from one that's stuck at its seed value. This
+    /// pins the case that actually distinguishes them: two writes, each
+    /// individually within the cap, whose *combined* total is not — a memo
+    /// that never advances past its initial (empty-dir) reading would let
+    /// the second one through.
+    #[test]
+    fn state_write_refuses_a_second_write_that_only_exceeds_cap_cumulatively() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&[], root.path().to_path_buf(), 20);
+        let first = perform_state_write(&ctx, "a.json", &"a".repeat(15));
+        assert!(first.ok, "{:?}", first.error);
+        // True total is now 15 bytes. A second, independent 10-byte file
+        // would put the true total at 25 > cap 20, and must be refused.
+        let second = perform_state_write(&ctx, "b.json", &"b".repeat(10));
+        assert!(
+            !second.ok,
+            "a write that only exceeds the cap once combined with the first must still be refused"
+        );
+        assert!(second.error.contains("quota"));
+    }
+
+    /// Fix pass 1 (Important 2): before this task every `check_cap` re-walked,
+    /// so a refusal caused by a stale-high memo self-corrected on the very
+    /// next write. After the memo, a bare refusal on this path never
+    /// invalidated, so nothing forced a re-walk — reachable whenever the
+    /// state dir shrinks behind this ctx's back (a user clearing the
+    /// plugin's state dir, a crashed-render staging orphan being reaped, a
+    /// concurrent render's cache eviction). This pins the self-heal: a
+    /// refusal caused purely by a stale-high memo must recover on its own
+    /// retry, without needing a later write to invalidate it first.
+    #[test]
+    fn state_write_self_heals_a_stale_high_memo_on_refusal() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&[], root.path().to_path_buf(), 100);
+        // Simulate the state dir having shrunk behind this ctx's back: the
+        // memo believes it's already full, even though the real dir is
+        // empty.
+        ctx.set_state_size(1_000);
+        let w = perform_state_write(&ctx, "a.json", "hello");
+        assert!(
+            w.ok,
+            "a refusal driven only by a stale-high memo must self-heal via one re-walk: {:?}",
+            w.error
+        );
+    }
+
+    /// The self-heal above must not turn every refusal into a pass: when the
+    /// state dir really is over cap, the re-walk confirms that and the write
+    /// stays refused.
+    #[test]
+    fn state_write_stays_refused_when_the_re_walk_confirms_it() {
+        let root = tempfile::tempdir().unwrap();
+        let cap = 10;
+        let ctx = ctx_with_cap(&[], root.path().to_path_buf(), cap);
+        std::fs::create_dir_all(ctx.state_dir()).unwrap();
+        std::fs::write(ctx.state_dir().join("existing.json"), "z".repeat(9)).unwrap();
+        let w = perform_state_write(&ctx, "a.json", "0123456789"); // 9 + 10 > cap 10
+        assert!(
+            !w.ok,
+            "a write that truly exceeds cap must stay refused after the self-heal retry"
+        );
+        assert!(w.error.contains("quota"));
+    }
+
+    /// The load-bearing performance claim this whole task exists for: a
+    /// sequence of writes through the real per-render entry point pays one
+    /// `dir_size` walk total (the memo's seed), not one per write.
+    #[test]
+    fn many_state_writes_pay_exactly_one_dir_size_walk() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&[], root.path().to_path_buf(), 1_000_000);
+        crate::state::reset_walk_count();
+        for i in 0..50 {
+            let w = perform_state_write(&ctx, &format!("f{i}.json"), "x");
+            assert!(w.ok, "{:?}", w.error);
+        }
+        assert_eq!(
+            crate::state::walk_count(),
+            1,
+            "50 writes should cost exactly one dir_size walk, not one per write"
+        );
+    }
+
     #[test]
     fn state_write_rejects_traversal() {
         let root = tempfile::tempdir().unwrap();
@@ -593,6 +1254,32 @@ mod tests {
         let w = perform_state_write(&ctx, "../escape", "x");
         assert!(!w.ok);
         assert!(w.error.contains("traversal"));
+    }
+
+    // Pins that `perform_state_write` actually goes through `write_atomic`
+    // rather than truncating the target in place: `fs::write` reuses the
+    // target file's inode, `write_atomic` replaces it via `rename`. Nothing
+    // else here would notice a regression to a bare `fs::write` —
+    // `state_write_then_read_roundtrips_and_enforces_cap` reads back the same
+    // bytes either way.
+    #[test]
+    #[cfg(unix)]
+    fn state_write_replaces_the_file_rather_than_truncating_it_in_place() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&[], root.path().to_path_buf(), 1_000);
+        let w = perform_state_write(&ctx, "weather.json", "first");
+        assert!(w.ok, "{:?}", w.error);
+        let path = ctx.state_dir().join("weather.json");
+        let first_ino = std::fs::metadata(&path).unwrap().ino();
+        let w = perform_state_write(&ctx, "weather.json", "second, and longer");
+        assert!(w.ok, "{:?}", w.error);
+        let second_ino = std::fs::metadata(&path).unwrap().ino();
+        assert_ne!(
+            first_ino, second_ino,
+            "perform_state_write must replace the file, not truncate it in place"
+        );
     }
 
     #[test]
@@ -630,6 +1317,128 @@ mod tests {
                 target.to_str().unwrap().to_string()
             )]
         );
+    }
+
+    // The following eight tests characterize the read/write path-grant split
+    // and the symlink escape it closes (invariant N1: `allowed_paths` is
+    // read-only, `allowed_write_paths` is the separate write grant; a grant
+    // is matched against the resolved location, not the name, once
+    // `resolve_symlinks` is on). Every legitimate producer of a read or write
+    // grant gets a test here — this narrows a shared funnel, so nothing is
+    // optional.
+
+    #[test]
+    fn a_read_grant_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("notes.txt");
+        std::fs::write(&f, "hi").unwrap();
+        let ctx = test_ctx_paths(&dir, &[&format!("{}/*", dir.path().display())], &[], false);
+        let r = perform_file_read(&ctx, f.to_str().unwrap());
+        assert!(r.ok && r.exists && r.contents == "hi");
+    }
+
+    #[test]
+    fn a_read_grant_alone_does_not_permit_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("notes.txt");
+        std::fs::write(&f, "original").unwrap();
+        let ctx = test_ctx_paths(&dir, &[&format!("{}/*", dir.path().display())], &[], false);
+        let w = perform_file_write(&ctx, f.to_str().unwrap(), "pwned");
+        assert!(!w.ok, "allowed_paths is read-only");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "original");
+    }
+
+    #[test]
+    fn a_write_grant_permits_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("notes.txt");
+        let ctx = test_ctx_paths(&dir, &[], &[&format!("{}/*", dir.path().display())], false);
+        let w = perform_file_write(&ctx, f.to_str().unwrap(), "written");
+        assert!(w.ok, "{}", w.error);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "written");
+    }
+
+    #[test]
+    fn a_write_grant_alone_does_not_permit_a_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("notes.txt");
+        std::fs::write(&f, "secret").unwrap();
+        let ctx = test_ctx_paths(&dir, &[], &[&format!("{}/*", dir.path().display())], false);
+        let r = perform_file_read(&ctx, f.to_str().unwrap());
+        assert!(!r.ok, "a write grant is not a read grant");
+    }
+
+    #[test]
+    fn a_symlink_under_a_grant_is_denied_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("bashrc");
+        std::fs::write(&target, "original").unwrap();
+        let link = dir.path().join("notes.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let glob = format!("{}/*", dir.path().display());
+        let spy = SpyObserver::default();
+        let ctx =
+            test_ctx_paths(&dir, &[&glob], &[&glob], false).with_observer(Arc::new(spy.clone()));
+
+        assert!(!perform_file_read(&ctx, link.to_str().unwrap()).ok);
+        assert!(!perform_file_write(&ctx, link.to_str().unwrap(), "pwned").ok);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+
+        // A symlink refusal IS a capability denial — `resolve_symlinks` is
+        // the config value that decides it — so both the read and the write
+        // must reach the observer, not just return `ok:false` to the guest.
+        // Before the fix, `resolve_for_allowlist`'s Err returned early, well
+        // before either function's `observe_denial` call, so this failed
+        // with `records() == []` on both counts.
+        let target_str = link.to_str().unwrap().to_string();
+        assert_eq!(
+            spy.records(),
+            vec![
+                ("weather".to_string(), DenialKind::Path, target_str.clone()),
+                ("weather".to_string(), DenialKind::Path, target_str),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_symlinks_matches_the_allowlist_against_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("bashrc");
+        std::fs::write(&target, "original").unwrap();
+        let link = dir.path().join("notes.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let glob = format!("{}/*", dir.path().display());
+        let ctx = test_ctx_paths(&dir, &[&glob], &[&glob], true);
+
+        // Resolution happens BEFORE matching, so the escape is caught by the
+        // allowlist rather than slipping past it.
+        assert!(!perform_file_write(&ctx, link.to_str().unwrap(), "pwned").ok);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+    }
+
+    #[test]
+    fn resolve_symlinks_allows_a_link_whose_target_is_inside_the_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        std::fs::write(&real, "hi").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let glob = format!("{}/*", dir.path().display());
+        let ctx = test_ctx_paths(&dir, &[&glob], &[], true);
+        let r = perform_file_read(&ctx, link.to_str().unwrap());
+        assert!(r.ok && r.contents == "hi", "{}", r.error);
+    }
+
+    #[test]
+    fn a_not_yet_existing_write_target_under_a_grant_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("new.txt");
+        let glob = format!("{}/*", dir.path().display());
+        let ctx = test_ctx_paths(&dir, &[], &[&glob], true);
+        let w = perform_file_write(&ctx, f.to_str().unwrap(), "fresh");
+        assert!(w.ok, "{}", w.error);
     }
 
     #[test]
@@ -785,6 +1594,155 @@ mod tests {
             ))
             .is_none()
         );
+    }
+
+    /// A quota failure can still evict — `write_entry` empties a cache
+    /// namespace looking for room before giving up (see `cache::write_entry`)
+    /// — so the directory can shrink even though the write it was trying to
+    /// make room for ultimately fails. If the memo isn't invalidated on that
+    /// failure it keeps reporting the old, now too-high size, which would
+    /// wedge every later write that the (now smaller) directory could
+    /// actually satisfy — the "stale-high memo" failure mode invariant N3
+    /// warns against.
+    #[test]
+    fn failed_cache_write_invalidates_the_memo_rather_than_trusting_a_stale_value() {
+        let root = tempfile::tempdir().unwrap();
+        let cap = 50;
+        let ctx = ctx_with_cap(&["https://x/*"], root.path().to_path_buf(), cap);
+        let ns = ctx.state_dir().join(crate::cache::HTTP_NAMESPACE);
+        std::fs::create_dir_all(&ns).unwrap();
+        for i in 0..5 {
+            std::fs::write(ns.join(format!("{i}.json")), "z".repeat(100)).unwrap();
+        }
+        // Seed the memo to the true, already-over-cap size.
+        let seeded = ctx.state_size();
+        assert!(
+            seeded > cap,
+            "the pre-populated namespace must already exceed the tiny cap"
+        );
+
+        // A response so large that even evicting the *entire* namespace
+        // can't make it fit: the write fails, but eviction empties the
+        // namespace on the way there, so the true total drops to ~0.
+        let body = "x".repeat(500);
+        let fetcher = ScriptedFetcher::ok(200, &body);
+        let r = perform_http_get_cached(&ctx, "https://x/y", 60, NOW, &fetcher);
+        assert!(
+            r.ok,
+            "the live-fetched body is still returned even though caching failed"
+        );
+
+        assert_eq!(
+            ctx.state_size(),
+            crate::state::dir_size(&ctx.state_dir()),
+            "a failed write must invalidate the memo so the next read re-walks \
+             to the truth, rather than trusting the stale pre-write size"
+        );
+    }
+
+    /// A [`Fetcher`] fake that can be scripted to fail, unlike
+    /// [`CountingFetcher`] (which always succeeds) — the negative-cache
+    /// backoff tests below need to assert exactly how many times a *failing*
+    /// fetch was attempted.
+    struct ScriptedFetcher {
+        calls: AtomicUsize,
+        reply: Result<(u16, String), String>,
+    }
+
+    impl ScriptedFetcher {
+        fn ok(status: u16, body: &str) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                reply: Ok((status, body.to_string())),
+            }
+        }
+
+        fn err(message: &str) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                reply: Err(message.to_string()),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl crate::fetch::Fetcher for ScriptedFetcher {
+        fn get(&self, _url: &str) -> Result<(u16, String), String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.reply.clone()
+        }
+    }
+
+    #[test]
+    fn a_failing_refresh_is_not_retried_within_the_backoff_window() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&["https://x/*"], root.path().to_path_buf(), 1_000_000);
+        let url = "https://x/y";
+
+        // Seed a good entry at T0.
+        let ok = ScriptedFetcher::ok(200, "body");
+        let r = perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:00:00Z", &ok);
+        assert!(r.ok && !r.stale);
+        assert_eq!(ok.calls(), 1);
+
+        // T0+120s: TTL lapsed, upstream now down -> one attempt, stale served.
+        let down = ScriptedFetcher::err("connection refused");
+        let r = perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:02:00Z", &down);
+        assert!(r.ok && r.stale, "last-good entry is served");
+        assert_eq!(down.calls(), 1);
+
+        // T0+130s: still inside the backoff window -> NO new attempt.
+        let r = perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:02:10Z", &down);
+        assert!(r.ok && r.stale, "still served stale");
+        assert_eq!(down.calls(), 1, "no second fetch inside the backoff window");
+        // The entry served is still the last-good response, byte-for-byte:
+        // only `last_attempt_at` may have moved. A failure arm that
+        // corrupted `body`/`status` (or reported the wrong `age_secs`)
+        // would still satisfy the assertions above.
+        assert_eq!(r.body, "body");
+        assert_eq!(r.status, 200);
+        assert_eq!(r.age_secs, 130);
+    }
+
+    #[test]
+    fn the_backoff_window_lapses_and_allows_another_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&["https://x/*"], root.path().to_path_buf(), 1_000_000);
+        let url = "https://x/y";
+        let ok = ScriptedFetcher::ok(200, "body");
+        perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:00:00Z", &ok);
+
+        let down = ScriptedFetcher::err("connection refused");
+        perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:02:00Z", &down);
+        assert_eq!(down.calls(), 1);
+        // one full TTL after the failed attempt
+        perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:03:01Z", &down);
+        assert_eq!(down.calls(), 2, "backoff lapsed, retry allowed");
+    }
+
+    #[test]
+    fn a_successful_refresh_clears_the_backoff() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&["https://x/*"], root.path().to_path_buf(), 1_000_000);
+        let url = "https://x/y";
+        let ok = ScriptedFetcher::ok(200, "one");
+        perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:00:00Z", &ok);
+        let ok2 = ScriptedFetcher::ok(200, "two");
+        let r = perform_http_get_cached(&ctx, url, 60, "2026-07-26T12:02:00Z", &ok2);
+        assert_eq!(r.body, "two");
+        assert!(!r.stale);
+    }
+
+    #[test]
+    fn a_failing_refresh_with_no_prior_entry_still_reports_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_cap(&["https://x/*"], root.path().to_path_buf(), 1_000_000);
+        let down = ScriptedFetcher::err("connection refused");
+        let r = perform_http_get_cached(&ctx, "https://x/y", 60, "2026-07-26T12:00:00Z", &down);
+        assert!(!r.ok, "nothing to serve stale");
     }
 
     /// Fixed instants for the exec-cache TTL tests below, mirroring the
@@ -1013,6 +1971,51 @@ mod tests {
     }
 
     #[test]
+    fn exec_a_failing_refresh_is_not_retried_within_the_backoff_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _o) = ctx_with_commands_in(&["date*"], dir.path());
+
+        // Seed a good entry at T0.
+        let ok = RecordingRunner::ok(0, "good");
+        let r = perform_exec_cached(&ctx, "date", &[], 60, NOW, &ok);
+        assert!(r.ok && !r.stale);
+        assert_eq!(ok.calls().len(), 1);
+
+        // T0+120s: TTL lapsed, spawn now fails -> one attempt, stale served.
+        let down = RecordingRunner::failing("boom");
+        let r = perform_exec_cached(&ctx, "date", &[], 60, "2026-07-20T12:02:00-04:00", &down);
+        assert!(r.ok && r.stale, "last-good entry is served");
+        assert_eq!(down.calls().len(), 1);
+
+        // T0+130s: still inside the backoff window -> NO new attempt.
+        let r = perform_exec_cached(&ctx, "date", &[], 60, "2026-07-20T12:02:10-04:00", &down);
+        assert!(r.ok && r.stale, "still served stale");
+        assert_eq!(
+            down.calls().len(),
+            1,
+            "no second run inside the backoff window"
+        );
+        // The entry served is still the last-good response, byte-for-byte:
+        // only `last_attempt_at` may have moved.
+        assert_eq!(r.stdout, "good");
+        assert_eq!(r.age_secs, 130);
+    }
+
+    #[test]
+    fn exec_the_backoff_window_lapses_and_allows_another_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _o) = ctx_with_commands_in(&["date*"], dir.path());
+        perform_exec_cached(&ctx, "date", &[], 60, NOW, &RecordingRunner::ok(0, "good"));
+
+        let down = RecordingRunner::failing("boom");
+        perform_exec_cached(&ctx, "date", &[], 60, "2026-07-20T12:02:00-04:00", &down);
+        assert_eq!(down.calls().len(), 1);
+        // one full TTL after the failed attempt
+        perform_exec_cached(&ctx, "date", &[], 60, "2026-07-20T12:03:01-04:00", &down);
+        assert_eq!(down.calls().len(), 2, "backoff lapsed, retry allowed");
+    }
+
+    #[test]
     fn exec_cached_serves_the_last_good_entry_stale_when_a_refresh_fails() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _o) = ctx_with_commands_in(&["date*"], dir.path());
@@ -1039,6 +2042,471 @@ mod tests {
         let exec = crate::cache::cache_path(dir.path(), EXEC_NAMESPACE, "same-key");
         assert_ne!(http, exec);
     }
+
+    /// Characterization tests pinning today's guest-visible wire JSON for
+    /// every `perform_*` outcome path, written BEFORE the [T4] typecheck
+    /// refactor that moves each function's flag-combination construction
+    /// behind a private outcome enum + `From` impl. These must keep passing,
+    /// byte-for-byte, straight through that refactor — that is what proves
+    /// the enums are a transcription of the existing literals, not a
+    /// redesign. Nested here (rather than a sibling module) so it can reuse
+    /// this module's fakes/ctx helpers via `super::*` without duplicating or
+    /// widening their visibility.
+    mod wire_pins {
+        use super::*;
+
+        // ---- http {denied, 2xx, transport-error} ----
+
+        #[test]
+        fn wire_pin_http_denied() {
+            let ctx = ctx_with(&[], std::env::temp_dir());
+            let r = perform_http_get(&ctx, "https://x.example/", &DeadFetcher);
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"status":0,"body":"","error":"url not allowed: https://x.example/"}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_http_ok() {
+            let ctx = ctx_with(&["https://wttr.in/*"], std::env::temp_dir());
+            let r = perform_http_get(&ctx, "https://wttr.in/48183", &FakeFetcher(200, "sunny"));
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"status":200,"body":"sunny","error":""}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_http_transport_error() {
+            let ctx = ctx_with(&["https://wttr.in/*"], std::env::temp_dir());
+            let r = perform_http_get(&ctx, "https://wttr.in/48183", &DeadFetcher);
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"status":0,"body":"","error":"connection refused"}"#
+            );
+        }
+
+        // ---- cached-http {denied, fresh-hit, refresh, served-stale, never-succeeded} ----
+
+        #[test]
+        fn wire_pin_cached_http_denied() {
+            let ctx = ctx_with(&[], std::env::temp_dir());
+            let r = perform_http_get_cached(
+                &ctx,
+                "https://x.example/",
+                1800,
+                "2026-07-20T12:00:00-04:00",
+                &DeadFetcher,
+            );
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"status":0,"body":"","error":"url not allowed: https://x.example/","stale":false,"age_secs":0}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_http_fresh_hit() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with_cap(&["https://wttr.in/*"], root.path().to_path_buf(), 1_000_000);
+            let url = "https://wttr.in/48183";
+            let f = CountingFetcher {
+                calls: std::sync::Arc::new(AtomicUsize::new(0)),
+                status: 200,
+                body: "sunny-72",
+            };
+            perform_http_get_cached(&ctx, url, 1800, "2026-07-20T12:00:00-04:00", &f);
+            let r2 = perform_http_get_cached(&ctx, url, 1800, "2026-07-20T12:10:00-04:00", &f);
+            assert_eq!(
+                serde_json::to_string(&r2).unwrap(),
+                r#"{"ok":true,"status":200,"body":"sunny-72","error":"","stale":false,"age_secs":600}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_http_refresh() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with_cap(&["https://wttr.in/*"], root.path().to_path_buf(), 1_000_000);
+            let url = "https://wttr.in/48183";
+            perform_http_get_cached(
+                &ctx,
+                url,
+                60,
+                "2026-07-20T12:00:00-04:00",
+                &FakeFetcher(200, "a"),
+            );
+            let r = perform_http_get_cached(
+                &ctx,
+                url,
+                60,
+                "2026-07-20T14:00:00-04:00",
+                &FakeFetcher(200, "b"),
+            );
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"status":200,"body":"b","error":"","stale":false,"age_secs":0}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_http_served_stale() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with_cap(&["https://wttr.in/*"], root.path().to_path_buf(), 1_000_000);
+            let url = "https://wttr.in/48183";
+            perform_http_get_cached(
+                &ctx,
+                url,
+                1800,
+                "2026-07-20T09:00:00-04:00",
+                &FakeFetcher(200, "good-55"),
+            );
+            let r =
+                perform_http_get_cached(&ctx, url, 1800, "2026-07-20T15:00:00-04:00", &DeadFetcher);
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"status":200,"body":"good-55","error":"connection refused","stale":true,"age_secs":21600}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_http_never_succeeded() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with_cap(&["https://x/*"], root.path().to_path_buf(), 1_000_000);
+            let down = ScriptedFetcher::err("connection refused");
+            let r = perform_http_get_cached(&ctx, "https://x/y", 60, "2026-07-26T12:00:00Z", &down);
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"status":0,"body":"","error":"connection refused","stale":false,"age_secs":0}"#
+            );
+        }
+
+        // ---- exec {denied, ran-zero, ran-nonzero, could-not-run} ----
+
+        #[test]
+        fn wire_pin_exec_denied() {
+            let (ctx, _o) = ctx_with_commands(&[]);
+            let runner = RecordingRunner::ok(0, "should not happen");
+            let out = perform_exec(&ctx, "playerctl", &argv(&["metadata"]), &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":false,"status":-1,"stdout":"","stderr":"","error":"command not allowed: playerctl metadata","truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_exec_ran_zero() {
+            let (ctx, _o) = ctx_with_commands(&["echo*"]);
+            let runner = RecordingRunner::ok(0, "hello\n");
+            let out = perform_exec(&ctx, "echo", &argv(&["hello"]), &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":0,"stdout":"hello\n","stderr":"","error":"","truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_exec_ran_nonzero() {
+            let (ctx, _o) = ctx_with_commands(&["false*"]);
+            let runner = RecordingRunner::ok(1, "");
+            let out = perform_exec(&ctx, "false", &[], &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":1,"stdout":"","stderr":"","error":"","truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_exec_could_not_run() {
+            let (ctx, _o) = ctx_with_commands(&["missing*"]);
+            let runner = RecordingRunner::failing("no such file");
+            let out = perform_exec(&ctx, "missing", &[], &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":false,"status":-1,"stdout":"","stderr":"","error":"no such file","truncated":false}"#
+            );
+        }
+
+        // ---- cached-exec {denied, fresh-hit, zero-exit-cached, nonzero-fresh, stale-fallback} ----
+
+        #[test]
+        fn wire_pin_cached_exec_denied() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&[], dir.path());
+            let runner = RecordingRunner::ok(0, "x");
+            let out = perform_exec_cached(&ctx, "date", &[], 60, NOW, &runner);
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":false,"status":-1,"stdout":"","stderr":"","error":"command not allowed: date","stale":false,"age_secs":0,"truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_exec_fresh_hit() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&["date*"], dir.path());
+            perform_exec_cached(
+                &ctx,
+                "date",
+                &[],
+                3600,
+                NOW,
+                &RecordingRunner::ok(0, "first"),
+            );
+            let out = perform_exec_cached(
+                &ctx,
+                "date",
+                &[],
+                3600,
+                NOW,
+                &RecordingRunner::ok(0, "second"),
+            );
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":0,"stdout":"first","stderr":"","error":"","stale":false,"age_secs":0,"truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_exec_zero_exit_cached() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&["date*"], dir.path());
+            let out = perform_exec_cached(
+                &ctx,
+                "date",
+                &[],
+                3600,
+                NOW,
+                &RecordingRunner::ok(0, "first run"),
+            );
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":0,"stdout":"first run","stderr":"","error":"","stale":false,"age_secs":0,"truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_exec_nonzero_fresh() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&["flaky*"], dir.path());
+            let out = perform_exec_cached(
+                &ctx,
+                "flaky",
+                &[],
+                3600,
+                NOW,
+                &RecordingRunner::ok(3, "bad"),
+            );
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":3,"stdout":"bad","stderr":"","error":"","stale":false,"age_secs":0,"truncated":false}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_cached_exec_stale_fallback() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _o) = ctx_with_commands_in(&["date*"], dir.path());
+            perform_exec_cached(&ctx, "date", &[], 60, NOW, &RecordingRunner::ok(0, "good"));
+            let out = perform_exec_cached(
+                &ctx,
+                "date",
+                &[],
+                60,
+                LATER,
+                &RecordingRunner::failing("boom"),
+            );
+            assert_eq!(
+                serde_json::to_string(&out).unwrap(),
+                r#"{"ok":true,"status":0,"stdout":"good","stderr":"","error":"boom","stale":true,"age_secs":7200,"truncated":false}"#
+            );
+        }
+
+        // ---- state-read {found, absent, failed, bad-relpath} ----
+
+        #[test]
+        fn wire_pin_state_read_found() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            perform_state_write(&ctx, "weather.json", "0123456789");
+            let r = perform_state_read(&ctx, "weather.json");
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"exists":true,"contents":"0123456789","error":""}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_state_read_absent() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            let r = perform_state_read(&ctx, "nope.json");
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"exists":false,"contents":"","error":""}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_state_read_bad_relpath() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            let r = perform_state_read(&ctx, "../escape");
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"exists":false,"contents":"","error":"path traversal not allowed"}"#
+            );
+        }
+
+        /// A relpath that resolves to a directory rather than a file, so
+        /// `std::fs::read_to_string` fails with something other than
+        /// `NotFound` — the "real I/O failure" outcome path, distinct from
+        /// both `Absent` and the `bad-relpath` validation failure above.
+        #[test]
+        fn wire_pin_state_read_failed() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            std::fs::create_dir_all(ctx.state_dir().join("adir")).unwrap();
+            let r = perform_state_read(&ctx, "adir");
+            // `std::io::Error`'s Display text for reading a directory is
+            // platform-specific; pinned to this Linux dev/CI box's actual
+            // wording (verified with a throwaway probe), not guessed. If this
+            // suite ever runs on macOS/Windows, this text needs re-pinning to
+            // that platform's wording; CI's `macos-check` job is check-only
+            // (`cargo check`, never `cargo test`), so CI itself is unaffected.
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"exists":false,"contents":"","error":"Is a directory (os error 21)"}"#
+            );
+        }
+
+        // ---- state-write {written, quota-refused, bad-relpath} ----
+
+        #[test]
+        fn wire_pin_state_write_written() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            let w = perform_state_write(&ctx, "weather.json", "0123456789");
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":true,"error":""}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_state_write_bad_relpath() {
+            let root = tempfile::tempdir().unwrap();
+            let ctx = ctx_with(&[], root.path().to_path_buf());
+            let w = perform_state_write(&ctx, "../escape", "x");
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":false,"error":"path traversal not allowed"}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_state_write_quota_refused() {
+            let root = tempfile::tempdir().unwrap();
+            let cap = 10;
+            let ctx = ctx_with_cap(&[], root.path().to_path_buf(), cap);
+            std::fs::create_dir_all(ctx.state_dir()).unwrap();
+            std::fs::write(ctx.state_dir().join("existing.json"), "z".repeat(9)).unwrap();
+            let w = perform_state_write(&ctx, "a.json", "0123456789"); // 9 + 10 > cap 10
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":false,"error":"state quota exceeded"}"#
+            );
+        }
+
+        // ---- file-read {denied, found, failed} ----
+
+        #[test]
+        fn wire_pin_file_read_denied() {
+            let ctx = ctx_with(&[], std::env::temp_dir());
+            let r = perform_file_read(&ctx, "/etc/hostname");
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"exists":false,"contents":"","error":"path not allowed: /etc/hostname"}"#
+            );
+        }
+
+        #[test]
+        fn wire_pin_file_read_found() {
+            let dir = tempfile::tempdir().unwrap();
+            let f = dir.path().join("notes.txt");
+            std::fs::write(&f, "hi").unwrap();
+            let ctx = test_ctx_paths(&dir, &[&format!("{}/*", dir.path().display())], &[], false);
+            let r = perform_file_read(&ctx, f.to_str().unwrap());
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":true,"exists":true,"contents":"hi","error":""}"#
+            );
+        }
+
+        /// A path that resolves and is allowlisted but is a directory, so the
+        /// eventual `std::fs::read_to_string` fails with something other than
+        /// `NotFound` — the "real I/O failure" path, distinct from both
+        /// `denied` and a plain missing file.
+        #[test]
+        fn wire_pin_file_read_failed() {
+            let dir = tempfile::tempdir().unwrap();
+            let sub = dir.path().join("subdir");
+            std::fs::create_dir_all(&sub).unwrap();
+            let ctx = test_ctx_paths(&dir, &[&format!("{}/*", dir.path().display())], &[], false);
+            let r = perform_file_read(&ctx, sub.to_str().unwrap());
+            // Same platform-specific `io::Error` text as `wire_pin_state_read_failed`
+            // (see the comment there): needs re-pinning on macOS/Windows; CI's
+            // `macos-check` job is check-only, so CI is unaffected.
+            assert_eq!(
+                serde_json::to_string(&r).unwrap(),
+                r#"{"ok":false,"exists":false,"contents":"","error":"Is a directory (os error 21)"}"#
+            );
+        }
+
+        // ---- file-write {denied, written, failed} ----
+
+        #[test]
+        fn wire_pin_file_write_denied() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("should_not_be_written.txt");
+            let ctx = ctx_with(&[], std::env::temp_dir());
+            let w = perform_file_write(&ctx, target.to_str().unwrap(), "secret");
+            let expected = format!(
+                r#"{{"ok":false,"error":"path not allowed: {}"}}"#,
+                target.to_str().unwrap()
+            );
+            assert_eq!(serde_json::to_string(&w).unwrap(), expected);
+        }
+
+        #[test]
+        fn wire_pin_file_write_written() {
+            let dir = tempfile::tempdir().unwrap();
+            let f = dir.path().join("notes.txt");
+            let ctx = test_ctx_paths(&dir, &[], &[&format!("{}/*", dir.path().display())], false);
+            let w = perform_file_write(&ctx, f.to_str().unwrap(), "written");
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":true,"error":""}"#
+            );
+        }
+
+        /// A write target that IS an existing directory, so `std::fs::write`
+        /// fails — the "real I/O failure" path, distinct from `denied`.
+        #[test]
+        fn wire_pin_file_write_failed() {
+            let dir = tempfile::tempdir().unwrap();
+            let sub = dir.path().join("subdir");
+            std::fs::create_dir_all(&sub).unwrap();
+            let ctx = test_ctx_paths(&dir, &[], &[&format!("{}/*", dir.path().display())], false);
+            let w = perform_file_write(&ctx, sub.to_str().unwrap(), "x");
+            // Same platform-specific `io::Error` text as the read-failure pins above
+            // (see `wire_pin_state_read_failed`): needs re-pinning on macOS/Windows;
+            // CI's `macos-check` job is check-only, so CI is unaffected.
+            assert_eq!(
+                serde_json::to_string(&w).unwrap(),
+                r#"{"ok":false,"error":"Is a directory (os error 21)"}"#
+            );
+        }
+    }
 }
 
 /// `perform_log` has no `CapabilityCtx` to pass through a fake `Fetcher`, so
@@ -1053,7 +2521,9 @@ mod log_tests {
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Level, Metadata, Subscriber};
 
-    use super::perform_log;
+    use super::{MAX_GUEST_LOG_BYTES, MAX_GUEST_LOG_CALLS, TRUNCATION_MARKER, perform_log};
+    use crate::capability::CapabilityCtx;
+    use rustline_core::PluginConfig;
 
     /// One captured event: its severity plus every field (incl. the implicit
     /// `message` field carrying the formatted log text) as `(name, debug)`.
@@ -1119,8 +2589,26 @@ mod log_tests {
             .map(|(_, v)| v.as_str())
     }
 
+    /// Run `f` under the recording subscriber and return every emitted
+    /// event's `message` field, newline-joined, so the size/rate tests below
+    /// can assert on truncation markers and rate-limit text with plain
+    /// string ops instead of walking `CapturedEvent`s by hand.
+    fn with_recording_subscriber(f: impl FnOnce()) -> String {
+        capture(f)
+            .iter()
+            .filter_map(|(_, fields)| field(fields, "message"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn test_ctx(name: &str, dir: &std::path::Path) -> CapabilityCtx {
+        CapabilityCtx::from_config(name, &PluginConfig::default(), dir.to_path_buf())
+    }
+
     #[test]
     fn maps_each_known_level_string_to_the_matching_tracing_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx("weather", dir.path());
         for (level_str, expected) in [
             ("error", Level::ERROR),
             ("warn", Level::WARN),
@@ -1128,7 +2616,7 @@ mod log_tests {
             ("debug", Level::DEBUG),
             ("trace", Level::TRACE),
         ] {
-            let events = capture(|| perform_log("weather", level_str, "hello"));
+            let events = capture(|| perform_log(&ctx, level_str, "hello"));
             assert_eq!(events.len(), 1, "level {level_str}");
             let (level, fields) = &events[0];
             assert_eq!(*level, expected, "level {level_str}");
@@ -1139,7 +2627,9 @@ mod log_tests {
 
     #[test]
     fn unrecognized_level_degrades_to_info_without_panicking() {
-        let events = capture(|| perform_log("weather", "bogus", "still logged"));
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx("weather", dir.path());
+        let events = capture(|| perform_log(&ctx, "bogus", "still logged"));
         assert_eq!(events.len(), 1);
         let (level, fields) = &events[0];
         assert_eq!(*level, Level::INFO);
@@ -1154,9 +2644,78 @@ mod log_tests {
         // other six `perform_*` functions — there is no "denied" case to
         // test; this just pins that every level (incl. an unknown one)
         // completes with no side effect beyond the emitted tracing event.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx("no-capability-needed", dir.path());
         for level in ["error", "warn", "info", "debug", "trace", "unknown"] {
-            let events = capture(|| perform_log("no-capability-needed", level, "logged"));
+            let events = capture(|| perform_log(&ctx, level, "logged"));
             assert_eq!(events.len(), 1, "level {level}");
         }
+    }
+
+    /// No test in this module gives `perform_log` a real temp dir:
+    /// `rl_log` is capability-free (N1) and never touches the filesystem, so
+    /// a `tempfile::tempdir()` here would imply a capability that must not
+    /// exist. `std::path::PathBuf::from("/tmp")` is a placeholder
+    /// `state_root` that is never read, matching `capability.rs`'s own
+    /// capability tests.
+    fn unused_state_root() -> std::path::PathBuf {
+        std::path::PathBuf::from("/tmp")
+    }
+
+    #[test]
+    fn an_oversized_message_is_truncated() {
+        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), unused_state_root());
+        let captured = with_recording_subscriber(|| {
+            perform_log(&ctx, "info", &"x".repeat(10_000));
+        });
+        assert!(
+            captured.len() <= MAX_GUEST_LOG_BYTES,
+            "message was truncated to the documented cap"
+        );
+        assert!(captured.contains(TRUNCATION_MARKER), "truncation is marked");
+    }
+
+    #[test]
+    fn truncation_never_splits_a_multibyte_char() {
+        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), unused_state_root());
+        // 3-byte chars straddling the byte cap: a naive &msg[..CAP] panics.
+        let msg = "€".repeat(MAX_GUEST_LOG_BYTES);
+        let captured = with_recording_subscriber(|| {
+            perform_log(&ctx, "info", &msg); // must not panic
+        });
+        assert!(captured.contains(TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn the_call_rate_is_capped_and_reported_once() {
+        let ctx = CapabilityCtx::from_config("p", &PluginConfig::default(), unused_state_root());
+        let captured = with_recording_subscriber(|| {
+            for i in 0..(MAX_GUEST_LOG_CALLS + 50) {
+                perform_log(&ctx, "info", &format!("line {i}"));
+            }
+        });
+        assert!(
+            captured.contains(&format!("line {}", MAX_GUEST_LOG_CALLS - 1)),
+            "the last in-budget call is forwarded"
+        );
+        assert!(!captured.contains(&format!("line {}", MAX_GUEST_LOG_CALLS + 10)));
+        assert_eq!(
+            captured.matches("guest log rate limit reached").count(),
+            1,
+            "the limit is reported exactly once"
+        );
+    }
+
+    #[test]
+    fn the_budget_is_per_plugin_instance() {
+        let a = CapabilityCtx::from_config("a", &PluginConfig::default(), unused_state_root());
+        let b = CapabilityCtx::from_config("b", &PluginConfig::default(), unused_state_root());
+        let captured = with_recording_subscriber(|| {
+            for _ in 0..MAX_GUEST_LOG_CALLS {
+                perform_log(&a, "info", "from a");
+            }
+            perform_log(&b, "info", "from b"); // b has its own budget (N4)
+        });
+        assert!(captured.contains("from b"));
     }
 }

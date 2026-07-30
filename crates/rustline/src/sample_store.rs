@@ -1,12 +1,14 @@
 //! Shared best-effort atomic per-widget state-file persistence: read/write a
-//! small text file under a state dir via a temp-file + rename, `warn!`ing
-//! (never panicking) on any I/O failure — a broken cache must never break the
-//! bar. Mirrors `cpu.rs`'s pre-existing `cpu-sample` snapshot store,
-//! generalized so any read surface that wants a cross-invocation sample cache
-//! (`throughput.rs` today; a future sparkline history widget tomorrow) can
-//! reuse the same file-handling code instead of re-implementing the
-//! atomic-write dance. Serialization/parsing of the sample's own shape stays
-//! with each caller, same as `cpu.rs`'s `serialize_snapshot`/`parse_snapshot`.
+//! small text file under a state dir via
+//! `rustline_core::atomic_write::write_atomic` (the workspace's one atomic-
+//! write primitive), `warn!`ing (never panicking) on any I/O failure — a
+//! broken cache must never break the bar. Mirrors `cpu.rs`'s pre-existing
+//! `cpu-sample` snapshot store, generalized so any read surface that wants a
+//! cross-invocation sample cache (`throughput.rs` today; a future sparkline
+//! history widget tomorrow) can reuse the same file-handling code instead of
+//! re-implementing the atomic-write dance. Serialization/parsing of the
+//! sample's own shape stays with each caller, same as `cpu.rs`'s
+//! `serialize_snapshot`/`parse_snapshot`.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,7 +26,8 @@ pub fn read_sample(state_dir: &Path, name: &str) -> Option<String> {
     std::fs::read_to_string(sample_path(state_dir, name)).ok()
 }
 
-/// Best-effort atomic persist (temp file + rename) of `contents` at
+/// Best-effort atomic persist (via
+/// `rustline_core::atomic_write::write_atomic`) of `contents` at
 /// `<state_dir>/<name>`; logs a warning and returns without panicking on any
 /// I/O failure.
 pub fn write_sample(state_dir: &Path, name: &str, contents: &str) {
@@ -32,13 +35,8 @@ pub fn write_sample(state_dir: &Path, name: &str, contents: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let tmp = path.with_extension("tmp");
-    if let Err(error) = std::fs::write(&tmp, contents) {
-        tracing::warn!(%error, %name, "failed to write sample-store temp file");
-        return;
-    }
-    if let Err(error) = std::fs::rename(&tmp, &path) {
-        tracing::warn!(%error, %name, "failed to rename sample-store file");
+    if let Err(error) = rustline_core::atomic_write::write_atomic(&path, contents.as_bytes()) {
+        tracing::warn!(%error, %name, "failed to write sample-store file");
     }
 }
 
@@ -102,5 +100,30 @@ mod tests {
     fn now_unix_secs_is_recent() {
         // Sanity: well after this feature's own epoch, never a panic.
         assert!(now_unix_secs() > 1_700_000_000); // 2023-11-14
+    }
+
+    // Pins that `write_sample` actually goes through `write_atomic` rather
+    // than truncating the target in place: `fs::write` reuses the target
+    // file's inode, `write_atomic` replaces it via `rename`. Nothing else
+    // here would notice a regression to a bare `fs::write` — the round-trip
+    // tests above read back the same bytes either way.
+    #[test]
+    #[cfg(unix)]
+    fn write_sample_replaces_the_file_rather_than_truncating_it_in_place() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_sample(dir.path(), "s", "old");
+        let first_ino = std::fs::metadata(sample_path(dir.path(), "s"))
+            .unwrap()
+            .ino();
+        write_sample(dir.path(), "s", "new, and longer");
+        let second_ino = std::fs::metadata(sample_path(dir.path(), "s"))
+            .unwrap()
+            .ino();
+        assert_ne!(
+            first_ino, second_ino,
+            "write_sample must replace the file, not truncate it in place"
+        );
     }
 }

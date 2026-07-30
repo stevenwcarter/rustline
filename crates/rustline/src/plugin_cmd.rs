@@ -9,7 +9,9 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
-use rustline_core::{Config, Context as CoreContext, Segment, Widget};
+use rustline_core::{
+    Config, Context as CoreContext, NameError, RANGE_NAME_MAX_BYTES, RangeName, Segment, Widget,
+};
 use rustline_wasm::{DenialKind, DenialObserver, PluginManifest, resolve_manifest};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
@@ -18,10 +20,6 @@ use crate::cli::{ApproveArgs, BuildArgs, NewPluginArgs, PatternCmd, PluginCmd, R
 /// The reserved widget name that a plugin must never claim (it names the
 /// built-in window-list renderer, which isn't a plugin-resolvable slot).
 pub(crate) const RESERVED_PLUGIN_NAME: &str = "window";
-
-/// `tmux`'s `range=user|X` status-range argument is byte-capped; a plugin
-/// name longer than this can never be click-toggleable (invariant #7).
-pub(crate) const MAX_PLUGIN_NAME_BYTES: usize = 15;
 
 /// The embedded `Cargo.toml`/`src/lib.rs` templates `plugin new` scaffolds,
 /// mirroring how `init.rs` embeds its starter config template.
@@ -32,6 +30,7 @@ const PLUGIN_LIB_TEMPLATE: &str = include_str!("../assets/plugin-lib.rs.tmpl");
 enum Kind {
     Url,
     Path,
+    WritePath,
     Command,
 }
 
@@ -40,6 +39,7 @@ impl Kind {
         match self {
             Kind::Url => "allowed_urls",
             Kind::Path => "allowed_paths",
+            Kind::WritePath => "allowed_write_paths",
             Kind::Command => "allowed_commands",
         }
     }
@@ -57,6 +57,7 @@ pub fn run(cmd: PluginCmd, config_path: &Path, plugin_dir: &Path) {
         } => search(config_path, plugin_dir, query.as_deref(), json, refresh),
         PluginCmd::Url(pc) => pattern_cmd(pc, Kind::Url, config_path),
         PluginCmd::Path(pc) => pattern_cmd(pc, Kind::Path, config_path),
+        PluginCmd::WritePath(pc) => pattern_cmd(pc, Kind::WritePath, config_path),
         PluginCmd::Cmd(pc) => pattern_cmd(pc, Kind::Command, config_path),
         PluginCmd::Approve(args) => approve(args, config_path, plugin_dir),
         PluginCmd::Install(args) => crate::plugin_install::install(&args, config_path, plugin_dir),
@@ -145,6 +146,16 @@ struct PluginEntryJson<'a> {
     tag: Option<&'a str>,
     allowed_urls: &'a [String],
     allowed_paths: &'a [String],
+    /// The plugin's **write** allowlist — separate from `allowed_paths`,
+    /// which is read-only. Omitting this field would let a plugin holding an
+    /// arbitrary-overwrite grant render as read-only in machine-readable
+    /// output, which is exactly the understated-grant shape this task's
+    /// human/write split exists to close.
+    allowed_write_paths: &'a [String],
+    /// Whether a symlink component in a requested path is resolved (and
+    /// matched against its target) rather than denied outright. See
+    /// `PluginConfig::resolve_symlinks`.
+    resolve_symlinks: bool,
     allowed_commands: &'a [String],
     max_state_bytes: u64,
     has_manifest: bool,
@@ -166,7 +177,7 @@ fn plugin_list_json(cfg: &Config, plugin_dir: &Path) -> String {
         .plugins
         .iter()
         .map(|(name, pc)| PluginEntryJson {
-            name,
+            name: name.as_str(),
             // Display keeps `source` a flat string for the `string|null` JSON schema; the
             // future-only Url/Path PluginSource variants would Display as "url: X"/"path: X"
             // — revisit if install-by-url/path ships.
@@ -174,12 +185,14 @@ fn plugin_list_json(cfg: &Config, plugin_dir: &Path) -> String {
             tag: pc.tag.as_deref(),
             allowed_urls: &pc.allowed_urls,
             allowed_paths: &pc.allowed_paths,
+            allowed_write_paths: &pc.allowed_write_paths,
+            resolve_symlinks: pc.resolve_symlinks,
             allowed_commands: &pc.allowed_commands,
             max_state_bytes: pc.max_state_bytes,
-            has_manifest: resolve_manifest(plugin_dir, name).is_some(),
+            has_manifest: resolve_manifest(plugin_dir, name.as_str()).is_some(),
             checksum_status: crate::plugin_checksum::status_for(
                 plugin_dir,
-                name,
+                name.as_str(),
                 pc.checksum.as_deref(),
             )
             .label(),
@@ -268,7 +281,11 @@ fn sample_context() -> CoreContext {
 /// toggles file.
 fn run_plugin(args: &RunArgs, config_path: &Path, plugin_dir: &Path) {
     let cfg = Config::load(config_path);
-    let pc = cfg.plugins.get(&args.name).cloned().unwrap_or_default();
+    let pc = cfg
+        .plugins
+        .get(args.name.as_str())
+        .cloned()
+        .unwrap_or_default();
     let observer = Arc::new(CollectingObserver::default());
     let widget = rustline_wasm::instantiate_named(plugin_dir, &args.name, &pc, observer.clone());
     let Some(widget) = widget else {
@@ -382,17 +399,20 @@ fn list(config_path: &Path, plugin_dir: &Path, json: bool) {
             }
         }
         let checksum_status =
-            crate::plugin_checksum::status_for(plugin_dir, name, pc.checksum.as_deref());
+            crate::plugin_checksum::status_for(plugin_dir, name.as_str(), pc.checksum.as_deref());
         println!("  checksum: {}", checksum_status.label());
         println!("  allowed_urls: {:?}", pc.allowed_urls);
         println!("  allowed_paths: {:?}", pc.allowed_paths);
+        println!("  allowed_write_paths: {:?}", pc.allowed_write_paths);
+        println!("  resolve_symlinks: {}", pc.resolve_symlinks);
         println!("  allowed_commands: {:?}", pc.allowed_commands);
         println!("  max_state_bytes: {}", pc.max_state_bytes);
-        if let Some(m) = resolve_manifest(plugin_dir, name) {
+        if let Some(m) = resolve_manifest(plugin_dir, name.as_str()) {
             println!(
-                "  declared capabilities: {} urls, {} paths, {} commands (run `plugin approve {name}`)",
+                "  declared capabilities: {} urls, {} paths, {} write paths, {} commands (run `plugin approve {name}`)",
                 m.requested_urls.len(),
                 m.requested_paths.len(),
+                m.requested_write_paths.len(),
                 m.requested_commands.len()
             );
         }
@@ -405,9 +425,10 @@ fn pattern_cmd(cmd: PatternCmd, kind: Kind, config_path: &Path) {
     match cmd {
         PatternCmd::List { plugin, json } => {
             let cfg = Config::load(config_path);
-            let patterns = cfg.plugins.get(&plugin).map(|p| match kind {
+            let patterns = cfg.plugins.get(plugin.as_str()).map(|p| match kind {
                 Kind::Url => &p.allowed_urls,
                 Kind::Path => &p.allowed_paths,
+                Kind::WritePath => &p.allowed_write_paths,
                 Kind::Command => &p.allowed_commands,
             });
             if json {
@@ -451,6 +472,7 @@ fn approve(args: ApproveArgs, config_path: &Path, plugin_dir: &Path) {
     print!("{}", manifest_report(&manifest));
     if manifest.requested_urls.is_empty()
         && manifest.requested_paths.is_empty()
+        && manifest.requested_write_paths.is_empty()
         && manifest.requested_commands.is_empty()
     {
         println!("manifest requests no capabilities; nothing to approve");
@@ -479,8 +501,15 @@ fn manifest_report(m: &PluginManifest) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "plugin {name} (version {version}) requests:");
     write_requests(&mut out, "allowed_urls", &m.requested_urls);
-    write_requests(&mut out, "allowed_paths", &m.requested_paths);
+    write_requests(&mut out, "allowed_paths (read-only)", &m.requested_paths);
+    write_requests(&mut out, "allowed_write_paths", &m.requested_write_paths);
     write_requests(&mut out, "allowed_commands", &m.requested_commands);
+    if !m.requested_write_paths.is_empty() {
+        out.push_str(
+            "\n  ! allowed_write_paths lets this plugin overwrite these files with\n\
+             \x20 ! any content. Approve only paths you understand.\n",
+        );
+    }
     if !m.requested_commands.is_empty() {
         out.push_str(
             "\n  ! allowed_commands runs real programs on your machine with your\n\
@@ -532,6 +561,12 @@ fn write_grants(config_path: &Path, plugin: &str, m: &PluginManifest) {
         append_unique(
             allowlist_array(table, plugin, Kind::Path.key()),
             &m.requested_paths,
+        );
+    }
+    if !m.requested_write_paths.is_empty() {
+        append_unique(
+            allowlist_array(table, plugin, Kind::WritePath.key()),
+            &m.requested_write_paths,
         );
     }
     if !m.requested_commands.is_empty() {
@@ -643,31 +678,26 @@ fn write_doc(config_path: &Path, doc: &DocumentMut) {
 /// `..`, spaces, and dots are all rejected without special-casing each), at
 /// most 15 bytes (tmux's `range=user|X` byte cap — invariant #7, so the
 /// scaffolded plugin stays click-toggleable), and not the reserved name
-/// `window`. Pure and unit-tested so the scaffold command can reject a bad
-/// name before touching disk.
+/// `window`. Rebuilt on [`RangeName::parse`] (T1) — the one place this rule
+/// is actually checked — but keeps its own pre-existing message text per
+/// variant rather than `NameError`'s `Display`, since those strings are this
+/// command's user-facing contract. Pure and unit-tested so the scaffold
+/// command can reject a bad name before touching disk.
 fn validate_plugin_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("plugin name must not be empty".to_string());
-    }
-    if name == RESERVED_PLUGIN_NAME {
-        return Err(format!("plugin name {RESERVED_PLUGIN_NAME:?} is reserved"));
-    }
-    if name.len() > MAX_PLUGIN_NAME_BYTES {
-        return Err(format!(
-            "plugin name {name:?} is {} bytes; must be at most {MAX_PLUGIN_NAME_BYTES} \
-             (tmux's range=user|X limit)",
-            name.len()
-        ));
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err(format!(
+    match RangeName::parse(name) {
+        Ok(_) => Ok(()),
+        Err(NameError::Empty) => Err("plugin name must not be empty".to_string()),
+        Err(NameError::TooLong { len }) => Err(format!(
+            "plugin name {name:?} is {len} bytes; must be at most {RANGE_NAME_MAX_BYTES} \
+             (tmux's range=user|X limit)"
+        )),
+        Err(NameError::BadChar { .. }) => Err(format!(
             "plugin name {name:?} may only contain letters, digits, `_`, and `-`"
-        ));
+        )),
+        Err(NameError::Reserved) => {
+            Err(format!("plugin name {RESERVED_PLUGIN_NAME:?} is reserved"))
+        }
     }
-    Ok(())
 }
 
 /// Whether `plugin new` must refuse to scaffold into a directory that
@@ -754,6 +784,8 @@ fn print_next_steps(name: &str, dir: &Path) {
     println!("[plugins.{name}]");
     println!("allowed_urls = []");
     println!("allowed_paths = []");
+    println!("allowed_write_paths = []");
+    println!("resolve_symlinks = false");
     println!();
     println!("[plugins.{name}.options]");
     println!("format = \"{name}: hello!\"");
@@ -927,11 +959,23 @@ mod tests {
     use super::*;
 
     fn manifest(urls: &[&str], paths: &[&str]) -> PluginManifest {
+        manifest_with_write_paths(urls, paths, &[])
+    }
+
+    /// Sibling to [`manifest`] for tests that need `requested_write_paths`
+    /// populated too, without adding a rarely-used parameter to every
+    /// existing `manifest(urls, paths)` call site.
+    fn manifest_with_write_paths(
+        urls: &[&str],
+        paths: &[&str],
+        write_paths: &[&str],
+    ) -> PluginManifest {
         PluginManifest {
             name: "w".into(),
             version: "1".into(),
             requested_urls: urls.iter().map(|s| s.to_string()).collect(),
             requested_paths: paths.iter().map(|s| s.to_string()).collect(),
+            requested_write_paths: write_paths.iter().map(|s| s.to_string()).collect(),
             requested_commands: Vec::new(),
         }
     }
@@ -1024,9 +1068,113 @@ mod tests {
         assert_eq!(list_of(&text, "w", "allowed_commands"), ["git status*"]);
     }
 
+    /// The load-bearing regression test for this task: a manifest requesting
+    /// only a *read* path must never grant a write. Before the split,
+    /// `requested_paths` was written straight into the single `allowed_paths`
+    /// list that both `perform_file_read` and `perform_file_write` gated on;
+    /// this pins that `write_grants` now writes `requested_paths` into
+    /// `allowed_paths` ONLY, never touching `allowed_write_paths`.
+    #[test]
+    fn write_grants_a_read_only_manifest_never_populates_the_write_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(&cfg, "[plugins.w]\n").unwrap();
+
+        write_grants(&cfg, "w", &manifest(&[], &["/home/u/.bashrc"]));
+
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(list_of(&text, "w", "allowed_paths"), ["/home/u/.bashrc"]);
+        assert!(
+            list_of(&text, "w", "allowed_write_paths").is_empty(),
+            "a read-only request must not grant a write: {text}"
+        );
+        assert!(!text.contains("allowed_write_paths"), "{text}");
+    }
+
+    #[test]
+    fn write_grants_writes_requested_write_paths_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(&cfg, "[plugins.w]\n").unwrap();
+
+        write_grants(
+            &cfg,
+            "w",
+            &manifest_with_write_paths(&[], &[], &["/home/u/notes/*"]),
+        );
+
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(
+            list_of(&text, "w", "allowed_write_paths"),
+            ["/home/u/notes/*"]
+        );
+        // Nothing was widened beyond what was requested.
+        assert!(list_of(&text, "w", "allowed_paths").is_empty());
+        assert!(!text.contains("allowed_urls"), "{text}");
+    }
+
+    #[test]
+    fn approving_write_paths_twice_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(&cfg, "[plugins.w]\n").unwrap();
+        let m = manifest_with_write_paths(&[], &[], &["/home/u/notes/*"]);
+        write_grants(&cfg, "w", &m);
+        write_grants(&cfg, "w", &m);
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(
+            list_of(&text, "w", "allowed_write_paths"),
+            ["/home/u/notes/*"]
+        );
+    }
+
+    /// End-to-end coverage for `approve` itself (not just `write_grants`): a
+    /// manifest requesting *only* `requested_write_paths` — no urls, read
+    /// paths, or commands — must still be approved. `approve`'s "nothing to
+    /// approve" guard checks all four requested-capability lists; dropping
+    /// the `requested_write_paths.is_empty()` term makes a write-only
+    /// manifest look like it requests nothing, so `approve` would print
+    /// "manifest requests no capabilities; nothing to approve" and return
+    /// before ever calling `write_grants` — silently failing closed for the
+    /// one manifest shape this task introduces.
+    #[test]
+    fn approve_grants_a_write_only_manifest() {
+        let plugin_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            plugin_dir.path().join("w.toml"),
+            "name = \"w\"\nversion = \"1\"\nrequested_write_paths = [\"/home/u/notes/*\"]\n",
+        )
+        .unwrap();
+
+        let config_dir = tempfile::tempdir().unwrap();
+        let cfg = config_dir.path().join("config.toml");
+        std::fs::write(&cfg, "[plugins.w]\n").unwrap();
+
+        approve(
+            ApproveArgs {
+                plugin: "w".to_string(),
+                yes: true,
+            },
+            &cfg,
+            plugin_dir.path(),
+        );
+
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(
+            list_of(&text, "w", "allowed_write_paths"),
+            ["/home/u/notes/*"],
+            "a write-only manifest must be approved, not silently skipped: {text}"
+        );
+    }
+
     #[test]
     fn the_command_kind_maps_to_the_allowed_commands_key() {
         assert_eq!(Kind::Command.key(), "allowed_commands");
+    }
+
+    #[test]
+    fn the_write_path_kind_maps_to_the_allowed_write_paths_key() {
+        assert_eq!(Kind::WritePath.key(), "allowed_write_paths");
     }
 
     #[test]
@@ -1050,6 +1198,32 @@ mod tests {
             !text.to_lowercase().contains("runs real programs"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_manifest_requesting_write_paths_prints_the_overwrite_warning() {
+        let m = manifest_with_write_paths(&[], &[], &["/home/u/notes/*"]);
+        let text = manifest_report(&m);
+        assert!(text.contains("allowed_write_paths"), "{text}");
+        assert!(text.contains("/home/u/notes/*"), "{text}");
+        assert!(
+            text.to_lowercase().contains("overwrite"),
+            "the overwrite warning is shown: {text}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_without_write_paths_prints_no_overwrite_warning() {
+        let m = manifest(&["https://a/*"], &["/tmp/x"]);
+        let text = manifest_report(&m);
+        assert!(!text.to_lowercase().contains("overwrite"), "{text}");
+    }
+
+    #[test]
+    fn a_manifest_report_labels_the_read_only_path_line() {
+        let m = manifest(&[], &["/tmp/x"]);
+        let text = manifest_report(&m);
+        assert!(text.contains("allowed_paths (read-only)"), "{text}");
     }
 
     #[test]
@@ -1242,6 +1416,31 @@ mod tests {
         assert_eq!(v[1]["kind"], "path");
     }
 
+    /// A plugin holding a write grant must not render as read-only in
+    /// machine-readable output — the same understated-grant shape D3 exists
+    /// to close, reproduced one layer down at the `--json` audit surface.
+    #[test]
+    fn plugin_list_json_surfaces_a_write_grant() {
+        let mut cfg = Config::default();
+        let pc = rustline_core::PluginConfig {
+            allowed_write_paths: vec!["/home/u/.bashrc".to_string()],
+            resolve_symlinks: true,
+            ..Default::default()
+        };
+        cfg.plugins.insert("evil".into(), pc);
+
+        let json = plugin_list_json(&cfg, std::path::Path::new("/nonexistent-plugin-dir"));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let e = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "evil")
+            .unwrap();
+        assert_eq!(e["allowed_write_paths"][0], "/home/u/.bashrc", "{json}");
+        assert_eq!(e["resolve_symlinks"], true, "{json}");
+    }
+
     #[test]
     fn plugin_list_json_has_expected_fields() {
         let mut cfg = Config::default();
@@ -1249,7 +1448,7 @@ mod tests {
             allowed_urls: vec!["https://wttr.in/*".to_string()],
             ..Default::default()
         };
-        cfg.plugins.insert("weather".to_string(), pc);
+        cfg.plugins.insert("weather".into(), pc);
         // A path with no manifest sidecar → has_manifest false.
         let json = plugin_list_json(&cfg, std::path::Path::new("/nonexistent-plugin-dir"));
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1278,7 +1477,7 @@ mod tests {
             checksum: Some(rustline_wasm::sha256_hex(bytes)),
             ..Default::default()
         };
-        cfg.plugins.insert("weather".to_string(), pc);
+        cfg.plugins.insert("weather".into(), pc);
 
         let json = plugin_list_json(&cfg, dir.path());
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1301,7 +1500,7 @@ mod tests {
             checksum: Some(rustline_wasm::sha256_hex(b"different bytes")),
             ..Default::default()
         };
-        cfg.plugins.insert("weather".to_string(), pc);
+        cfg.plugins.insert("weather".into(), pc);
 
         let json = plugin_list_json(&cfg, dir.path());
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();

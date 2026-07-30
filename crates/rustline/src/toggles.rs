@@ -5,6 +5,8 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use rustline_core::WidgetName;
+
 /// Path to the toggles state file (reuses the wasm crate's XDG data-root resolver
 /// so there is one base dir: `$XDG_DATA_HOME/rustline`, fallback
 /// `~/.local/share/rustline`).
@@ -14,54 +16,52 @@ pub fn toggles_path() -> PathBuf {
 
 /// Parse newline-delimited names into a set. Total: trims each line, drops
 /// blanks; any malformed/partial content simply yields fewer names.
-pub fn parse_toggles(contents: &str) -> BTreeSet<String> {
+pub fn parse_toggles(contents: &str) -> BTreeSet<WidgetName> {
     contents
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
-        .map(str::to_string)
+        .map(WidgetName::from)
         .collect()
 }
 
 /// Serialize a set to sorted, newline-delimited text (trailing newline).
-pub fn serialize_toggles(set: &BTreeSet<String>) -> String {
+pub fn serialize_toggles(set: &BTreeSet<WidgetName>) -> String {
     let mut s = String::new();
     for name in set {
-        s.push_str(name);
+        s.push_str(name.as_str());
         s.push('\n');
     }
     s
 }
 
 /// Flip `name`'s membership.
-pub fn apply_toggle(set: &mut BTreeSet<String>, name: &str) {
+pub fn apply_toggle(set: &mut BTreeSet<WidgetName>, name: &str) {
     if !set.remove(name) {
-        set.insert(name.to_string());
+        set.insert(WidgetName::from(name));
     }
 }
 
 /// Read the toggle set; a missing/unreadable file yields an empty set.
-pub fn read_toggles() -> BTreeSet<String> {
+pub fn read_toggles() -> BTreeSet<WidgetName> {
     match std::fs::read_to_string(toggles_path()) {
         Ok(text) => parse_toggles(&text),
         Err(_) => BTreeSet::new(),
     }
 }
 
-/// Best-effort atomic write (temp file + rename); logs a warning on failure and
-/// never panics — a broken toggle must never break the bar.
-pub fn write_toggles(set: &BTreeSet<String>) {
+/// Best-effort atomic write (via `rustline_core::atomic_write::write_atomic`);
+/// logs a warning on failure and never panics — a broken toggle must never
+/// break the bar.
+pub fn write_toggles(set: &BTreeSet<WidgetName>) {
     let path = toggles_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let tmp = path.with_extension("tmp");
-    if let Err(error) = std::fs::write(&tmp, serialize_toggles(set)) {
-        tracing::warn!(%error, "failed to write toggles temp file");
-        return;
-    }
-    if let Err(error) = std::fs::rename(&tmp, &path) {
-        tracing::warn!(%error, "failed to rename toggles file");
+    if let Err(error) =
+        rustline_core::atomic_write::write_atomic(&path, serialize_toggles(set).as_bytes())
+    {
+        tracing::warn!(%error, "failed to write toggles file");
     }
 }
 
@@ -74,14 +74,14 @@ mod tests {
         let set = parse_toggles("cpu\n\n  memory  \n\n");
         assert_eq!(
             set,
-            BTreeSet::from(["cpu".to_string(), "memory".to_string()])
+            BTreeSet::from([WidgetName::from("cpu"), WidgetName::from("memory")])
         );
         assert!(parse_toggles("").is_empty());
     }
 
     #[test]
     fn parse_serialize_round_trips() {
-        let set = BTreeSet::from(["battery".to_string(), "cpu".to_string()]);
+        let set = BTreeSet::from([WidgetName::from("battery"), WidgetName::from("cpu")]);
         assert_eq!(parse_toggles(&serialize_toggles(&set)), set);
     }
 
