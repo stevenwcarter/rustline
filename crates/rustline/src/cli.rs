@@ -312,9 +312,11 @@ pub struct NewPluginArgs {
 pub struct InstallArgs {
     /// The plugin's GitHub `owner/repo` (e.g. `steve/rustline-weather`).
     pub repo: String,
-    /// Override the installed plugin name (default: the repo name). This
-    /// becomes the `.wasm` stem and the `[plugins.<name>]` key, so it must
-    /// match the plugin's exported `name()` for discovery to find it.
+    /// Override the installed plugin name (default: the release's `.wasm`
+    /// asset stem, e.g. `weather` for a `weather.wasm` asset — NOT the repo
+    /// name). This becomes the `.wasm` stem and the `[plugins.<name>]` key,
+    /// so it must match the plugin's exported `name()` for discovery to find
+    /// it.
     #[arg(long)]
     pub name: Option<String>,
     /// Install a specific release tag instead of the latest release.
