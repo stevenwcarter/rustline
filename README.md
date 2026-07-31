@@ -1277,8 +1277,10 @@ The short version: `rustline plugin new <name>` (≤ 15 bytes, the name is the
 `.wasm` stem AND the exported `name()` — name the *repo* `rustline-<name>`,
 not the plugin), swap the SDK path dep for
 `rustline-plugin-sdk = { git = "https://github.com/stevenwcarter/rustline", tag = "v0.1.0" }`,
-embed your `manifest.toml` with
-`#[unsafe(link_section = "rustline-manifest")]` (see any repo above), release
+embed your `manifest.toml` as a `#[used]` static with
+`#[unsafe(link_section = "rustline-manifest")]` (both attributes — `#[used]`
+alone keeps the static from being optimized away as dead code; see any repo
+above for the exact form), release
 a `<name>.wasm` asset from a `v*` tag, and open a PR adding your plugin to
 `registry/index.json` so `rustline plugin search` finds it.
 

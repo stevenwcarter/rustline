@@ -174,6 +174,22 @@ fn do_install<D: Downloader>(
     let (owner, repo) = parse_owner_repo(repo_spec)
         .ok_or_else(|| anyhow!("invalid owner/repo {repo_spec:?}; expected \"owner/repo\""))?;
 
+    // An explicit `--name` is validated before any network call: a bad
+    // override is a caller typo, not something the release asset caused, so
+    // it's reported without the asset-attributing wording below and without
+    // paying for a fetch just to say so.
+    if let Some(n) = name_override {
+        let clickable =
+            validate_install_name(n).map_err(|e| anyhow!("invalid plugin name {n:?}: {e}"))?;
+        if !clickable {
+            tracing::warn!(
+                "plugin name {n:?} is {} bytes (> {RANGE_NAME_MAX_BYTES}); it will install \
+                but won't be click-toggleable",
+                n.len()
+            );
+        }
+    }
+
     let url = release_api_url(&owner, &repo, tag);
     let release = dl
         .get_json(&url)
@@ -185,24 +201,29 @@ fn do_install<D: Downloader>(
     // installed `.wasm` stem must equal the plugin's exported `name()` or
     // `register_plugins` skips it at load, and a repo following the
     // `rustline-<name>` convention (asset `<name>.wasm`) would otherwise
-    // install under a stem that can never match.
+    // install under a stem that can never match. An explicit `--name` was
+    // already validated above, before the fetch; only the derived name needs
+    // checking here.
     let name = match name_override {
         Some(n) => n.to_string(),
-        None => asset_name.trim_end_matches(".wasm").to_string(),
+        None => {
+            let derived = asset_name.trim_end_matches(".wasm").to_string();
+            let clickable = validate_install_name(&derived).map_err(|e| {
+                anyhow!(
+                    "invalid plugin name {derived:?} (from release asset {asset_name:?}): {e}; \
+                     pass --name to override"
+                )
+            })?;
+            if !clickable {
+                tracing::warn!(
+                    "plugin name {derived:?} is {} bytes (> {RANGE_NAME_MAX_BYTES}); it will \
+                    install but won't be click-toggleable — pass --name to shorten it",
+                    derived.len()
+                );
+            }
+            derived
+        }
     };
-    let clickable = validate_install_name(&name).map_err(|e| {
-        anyhow!(
-            "invalid plugin name {name:?} (from release asset {asset_name:?}): {e}; \
-             pass --name to override"
-        )
-    })?;
-    if !clickable {
-        tracing::warn!(
-            "plugin name {name:?} is {} bytes (> {RANGE_NAME_MAX_BYTES}); it will install \
-             but won't be click-toggleable — pass --name to shorten it",
-            name.len()
-        );
-    }
 
     let bytes = dl
         .get_bytes(&asset_url)
@@ -685,6 +706,40 @@ mod tests {
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("--name"), "error should suggest --name: {msg}");
+    }
+
+    #[test]
+    fn install_rejects_invalid_name_override_before_any_network_call() {
+        // An invalid `--name` is a caller typo, not the release asset's
+        // fault, and must be reported without ever consulting the
+        // downloader — this fake panics if either method is called, so the
+        // test fails loudly (not just silently passes) if that regresses.
+        struct PanicDownloader;
+        impl Downloader for PanicDownloader {
+            fn get_json(&self, _url: &str) -> anyhow::Result<Value> {
+                panic!("get_json must not be called for an invalid --name override");
+            }
+            fn get_bytes(&self, _url: &str) -> anyhow::Result<Vec<u8>> {
+                panic!("get_bytes must not be called for an invalid --name override");
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = do_install(
+            &PanicDownloader,
+            "steve/rustline-weather",
+            Some("has/slash"), // charset violation
+            None,
+            &dir.path().join("plugins"),
+            &dir.path().join("config.toml"),
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.contains("release asset"),
+            "an override's error must not blame the release asset: {msg}"
+        );
+        assert!(msg.contains("has/slash"), "{msg}");
     }
 
     #[test]
