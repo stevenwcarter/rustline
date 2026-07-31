@@ -35,6 +35,34 @@
       "source": "stevenwcarter/rustline",
       "bundled": true,
       "capabilities": ["exec", "exec_cached"]
+    },
+    {
+      "name": "pubip",
+      "description": "Your public/WAN IP via a TTL-cached HTTP GET (api.ipify.org by default)",
+      "source": "stevenwcarter/rustline-pubip",
+      "bundled": false,
+      "capabilities": ["http_cached"]
+    },
+    {
+      "name": "ticker",
+      "description": "A coin price via CoinGecko's keyless simple-price API, TTL-cached",
+      "source": "stevenwcarter/rustline-ticker",
+      "bundled": false,
+      "capabilities": ["http_cached"]
+    },
+    {
+      "name": "kube",
+      "description": "Current Kubernetes context and namespace from your kubeconfig",
+      "source": "stevenwcarter/rustline-kube",
+      "bundled": false,
+      "capabilities": ["file_read"]
+    },
+    {
+      "name": "updates",
+      "description": "Count of pending package updates (checkupdates/apt/dnf/brew), exec + state TTL",
+      "source": "stevenwcarter/rustline-updates",
+      "bundled": false,
+      "capabilities": ["exec", "state"]
     }
   ]
 }
