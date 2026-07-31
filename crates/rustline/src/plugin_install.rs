@@ -154,6 +154,12 @@ fn validate_install_name(name: &str) -> Result<bool, String> {
 /// over [`Downloader`] so tests drive it with a fake — no network. Returns the
 /// installed plugin name.
 ///
+/// Absent `name_override`, the installed name defaults to the release's
+/// selected `.wasm` asset's own stem — NOT the repo name — since the stem
+/// must equal the plugin's exported `name()` for `register_plugins` to find
+/// it at load time; a repo following the `rustline-<name>` convention (asset
+/// `<name>.wasm`) would otherwise install under a stem that can never match.
+///
 /// Records provenance ONLY: it never writes any `allowed_urls`/`allowed_paths`,
 /// so an installed plugin starts with zero capabilities (deny-by-default holds
 /// until the user runs `plugin approve` or hand-edits an allowlist).
@@ -168,15 +174,20 @@ fn do_install<D: Downloader>(
     let (owner, repo) = parse_owner_repo(repo_spec)
         .ok_or_else(|| anyhow!("invalid owner/repo {repo_spec:?}; expected \"owner/repo\""))?;
 
-    let name = name_override.map_or_else(|| repo.clone(), str::to_string);
-    let clickable =
-        validate_install_name(&name).map_err(|e| anyhow!("invalid plugin name: {e}"))?;
-    if !clickable {
-        tracing::warn!(
-            "plugin name {name:?} is {} bytes (> {RANGE_NAME_MAX_BYTES}); it will install \
-             but won't be click-toggleable — pass --name to shorten it",
-            name.len()
-        );
+    // An explicit `--name` is validated before any network call: a bad
+    // override is a caller typo, not something the release asset caused, so
+    // it's reported without the asset-attributing wording below and without
+    // paying for a fetch just to say so.
+    if let Some(n) = name_override {
+        let clickable =
+            validate_install_name(n).map_err(|e| anyhow!("invalid plugin name {n:?}: {e}"))?;
+        if !clickable {
+            tracing::warn!(
+                "plugin name {n:?} is {} bytes (> {RANGE_NAME_MAX_BYTES}); it will install \
+                but won't be click-toggleable",
+                n.len()
+            );
+        }
     }
 
     let url = release_api_url(&owner, &repo, tag);
@@ -185,6 +196,35 @@ fn do_install<D: Downloader>(
         .with_context(|| format!("fetch release metadata for {owner}/{repo}"))?;
     let (asset_name, asset_url) = select_wasm_asset(&release)
         .ok_or_else(|| anyhow!("no .wasm asset in the release for {owner}/{repo}"))?;
+
+    // The default name is the release asset's stem, NOT the repo name: the
+    // installed `.wasm` stem must equal the plugin's exported `name()` or
+    // `register_plugins` skips it at load, and a repo following the
+    // `rustline-<name>` convention (asset `<name>.wasm`) would otherwise
+    // install under a stem that can never match. An explicit `--name` was
+    // already validated above, before the fetch; only the derived name needs
+    // checking here.
+    let name = match name_override {
+        Some(n) => n.to_string(),
+        None => {
+            let derived = asset_name.trim_end_matches(".wasm").to_string();
+            let clickable = validate_install_name(&derived).map_err(|e| {
+                anyhow!(
+                    "invalid plugin name {derived:?} (from release asset {asset_name:?}): {e}; \
+                     pass --name to override"
+                )
+            })?;
+            if !clickable {
+                tracing::warn!(
+                    "plugin name {derived:?} is {} bytes (> {RANGE_NAME_MAX_BYTES}); it will \
+                    install but won't be click-toggleable — pass --name to shorten it",
+                    derived.len()
+                );
+            }
+            derived
+        }
+    };
+
     let bytes = dl
         .get_bytes(&asset_url)
         .with_context(|| format!("download asset {asset_name}"))?;
@@ -576,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn install_default_name_is_repo_and_preserves_existing_config() {
+    fn install_default_name_preserves_existing_config() {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path().join("plugins");
         let config_path = tmp.path().join("config.toml");
@@ -585,13 +625,13 @@ mod tests {
         let name = do_install(
             &fake(b"bytes"),
             "steve/rustline-weather",
-            None, // default name = repo
+            None, // default name = asset stem, not the repo
             None,
             &plugin_dir,
             &config_path,
         )
         .unwrap();
-        assert_eq!(name, "rustline-weather");
+        assert_eq!(name, "weather");
 
         let text = std::fs::read_to_string(&config_path).unwrap();
         assert!(text.contains("# my config"), "comment preserved: {text}");
@@ -600,7 +640,106 @@ mod tests {
             "layout preserved: {text}"
         );
         let cfg: Config = toml::from_str(&text).unwrap();
-        assert!(cfg.plugins.contains_key("rustline-weather"));
+        assert!(cfg.plugins.contains_key("weather"));
+    }
+
+    #[test]
+    fn install_default_name_comes_from_asset_stem_not_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("plugins");
+        let config = dir.path().join("config.toml");
+        // Repo follows the rustline-<name> convention; the asset is weather.wasm.
+        let name = do_install(
+            &fake(b"wasm-bytes"),
+            "steve/rustline-weather",
+            None,
+            None,
+            &plugin_dir,
+            &config,
+        )
+        .unwrap();
+        assert_eq!(name, "weather");
+        assert!(plugin_dir.join("weather.wasm").exists());
+        let cfg = std::fs::read_to_string(&config).unwrap();
+        assert!(cfg.contains("[plugins.weather]"), "{cfg}");
+    }
+
+    #[test]
+    fn install_name_override_still_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("plugins");
+        let config = dir.path().join("config.toml");
+        let name = do_install(
+            &fake(b"wasm-bytes"),
+            "steve/rustline-weather",
+            Some("wx"),
+            None,
+            &plugin_dir,
+            &config,
+        )
+        .unwrap();
+        assert_eq!(name, "wx");
+        assert!(plugin_dir.join("wx.wasm").exists());
+    }
+
+    #[test]
+    fn install_rejects_invalid_asset_stem_suggesting_name_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        // An asset stem that fails name validation (space = charset violation).
+        let json = serde_json::json!({
+            "tag_name": "v1",
+            "assets": [{ "name": "my plugin.wasm",
+                         "browser_download_url": "https://x/my plugin.wasm" }]
+        });
+        let dl = FakeDownloader {
+            json,
+            bytes: b"wasm".to_vec(),
+        };
+        let err = do_install(
+            &dl,
+            "steve/rustline-weather",
+            None,
+            None,
+            &dir.path().join("plugins"),
+            &dir.path().join("config.toml"),
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("--name"), "error should suggest --name: {msg}");
+    }
+
+    #[test]
+    fn install_rejects_invalid_name_override_before_any_network_call() {
+        // An invalid `--name` is a caller typo, not the release asset's
+        // fault, and must be reported without ever consulting the
+        // downloader — this fake panics if either method is called, so the
+        // test fails loudly (not just silently passes) if that regresses.
+        struct PanicDownloader;
+        impl Downloader for PanicDownloader {
+            fn get_json(&self, _url: &str) -> anyhow::Result<Value> {
+                panic!("get_json must not be called for an invalid --name override");
+            }
+            fn get_bytes(&self, _url: &str) -> anyhow::Result<Vec<u8>> {
+                panic!("get_bytes must not be called for an invalid --name override");
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = do_install(
+            &PanicDownloader,
+            "steve/rustline-weather",
+            Some("has/slash"), // charset violation
+            None,
+            &dir.path().join("plugins"),
+            &dir.path().join("config.toml"),
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.contains("release asset"),
+            "an override's error must not blame the release asset: {msg}"
+        );
+        assert!(msg.contains("has/slash"), "{msg}");
     }
 
     #[test]

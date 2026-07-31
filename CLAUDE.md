@@ -1258,12 +1258,25 @@ failure path via `rl_log` (W7) rather than staying silent:
   dir and records `source`/`tag`/`checksum` — granting **no** capabilities
   (TOFU at write time: it records the hash of what it downloaded, doesn't
   verify against an external pin; that recorded digest IS verified later, at
-  load time, by `register_plugins` — see `integrity.rs`/Config below).
+  load time, by `register_plugins` — see `integrity.rs`/Config below). Absent
+  `--name`, `do_install`'s default installed name is the selected release
+  **asset's own stem**, NOT the repo name (branch
+  `feat/2026-07-30-standalone-plugin-repos`): the installed `.wasm` stem must
+  equal the plugin's exported `name()` for `register_plugins` to find it at
+  load time, so a repo following the `rustline-<name>` convention (repo
+  `rustline-<name>`, release asset `<name>.wasm`) now installs under `<name>`
+  correctly instead of the un-findable `rustline-<name>` the old repo-name
+  default produced.
 - `plugin_index.rs` — the curated plugin index (W49) backing `rustline
   plugin search`: the wire types (`PluginIndex { schema_version, plugins:
   Vec<IndexEntry> }`, `IndexEntry { name, description, source, bundled,
   capabilities }` — `capabilities` is advertising copy only, consulted by
-  nothing in the host and granting nothing), `parse_index_value`/`validate`
+  nothing in the host and granting nothing — the committed
+  `registry/index.json` now also lists the four standalone `rustline-*`
+  repos — `pubip`, `ticker`, `kube`, `updates` — each with `bundled: false`
+  and its own `source: "stevenwcarter/rustline-<name>"`, alongside the five
+  `bundled: true` in-repo examples, branch
+  `feat/2026-07-30-standalone-plugin-repos`), `parse_index_value`/`validate`
   (rejects a `schema_version` this build doesn't understand rather than
   misreading it; checked identically on both the fresh-fetch path and the
   cache-read path, so a cache written by a different-schema build can never
@@ -3346,6 +3359,35 @@ branch on platform.
     binary to emit completions. Gated on `github.ref_type == 'tag'`, because a
     `workflow_dispatch` dry run is on a *branch* whose name is not a version
     and would otherwise fail every time.
+- Done (branch `feat/2026-07-30-standalone-plugin-repos` — see the
+  [design spec](docs/superpowers/specs/2026-07-30-standalone-plugin-repos-design.md)
+  / [plan](docs/superpowers/plans/2026-07-30-standalone-plugin-repos.md)):
+  **Four standalone `rustline-*` plugin repos as the out-of-tree exemplar** —
+  `rustline-updates` (pending package updates, exec + state TTL),
+  `rustline-pubip` (public/WAN IP, TTL-cached HTTP), `rustline-kube`
+  (Kubernetes context/namespace, gated file read), and `rustline-ticker`
+  (CoinGecko coin price, TTL-cached HTTP), each its own repo (scaffolded via
+  `rustline plugin new`, `rustline-plugin-sdk` pulled as a git dependency
+  pinned to a `v0.1.0` tag rather than a workspace path dep, its own CI, and
+  a tag-triggered release publishing the installable `<name>.wasm`) —
+  released as real `v0.1.0` GitHub releases and installed/exercised
+  end-to-end against this repo's own `plugin install`/`approve`/`run`. Three
+  small fixes in this repo made the pattern actually work: `plugin_install.rs`'s
+  `do_install` now defaults the installed name to the release **asset's own
+  stem** rather than the repo name (so a `rustline-<name>` repo releasing
+  `<name>.wasm` installs findably under `<name>`, matching the plugin's
+  exported `name()` — see `plugin_install.rs` above); each example embeds its
+  `manifest.toml` in the `.wasm` via `#[unsafe(link_section =
+  "rustline-manifest")]` rather than shipping a sidecar file, since a sidecar
+  doesn't survive `plugin install`'s single-asset download (`manifest.rs`'s
+  embedded-section fallback path, previously untested against a real
+  standalone repo, is now exercised for real); and `plugin new`'s scaffolded
+  `Cargo.toml` template gained a commented-out git-dependency line showing the
+  out-of-tree form (`rustline-plugin-sdk = { git = "…", tag = "v0.1.0" }`)
+  alongside the default in-workspace path dep. `registry/index.json` gained
+  the four as `bundled: false` entries (see `plugin_index.rs` above), and
+  README gained a "Writing an out-of-tree plugin" section pointing at all
+  four as worked examples.
 - Per-widget richer customization; naming the widget in the panic-guard `warn!`.
 - Range-on-binding — today a `run`/`open_url` click binding only fires on a
   widget that already emits a clickable range (i.e. has a non-empty
