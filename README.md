@@ -1255,6 +1255,33 @@ and the [plugin integrity + registry design
 spec](docs/superpowers/specs/2026-07-25-rustline-plugin-integrity-registry-ci-design.md)
 for the checksum-verification policy and the curated-index schema.
 
+### Writing an out-of-tree plugin
+
+The bundled `plugins/*` live inside this repo; a real third-party plugin is
+its own repo. Four worked examples demonstrate the full shape — scaffolded
+with `rustline plugin new`, SDK via a git dependency pinned to a rustline
+release tag, capability manifest embedded in the `.wasm` (a sidecar file
+doesn't survive `plugin install`), CI plus a tag-triggered release that
+publishes the installable `<name>.wasm`:
+
+- [rustline-updates](https://github.com/stevenwcarter/rustline-updates) —
+  pending package updates (exec + state TTL)
+- [rustline-pubip](https://github.com/stevenwcarter/rustline-pubip) —
+  public/WAN IP (TTL-cached HTTP)
+- [rustline-kube](https://github.com/stevenwcarter/rustline-kube) —
+  Kubernetes context/namespace (gated file read)
+- [rustline-ticker](https://github.com/stevenwcarter/rustline-ticker) —
+  CoinGecko coin price (TTL-cached HTTP)
+
+The short version: `rustline plugin new <name>` (≤ 15 bytes, the name is the
+`.wasm` stem AND the exported `name()` — name the *repo* `rustline-<name>`,
+not the plugin), swap the SDK path dep for
+`rustline-plugin-sdk = { git = "https://github.com/stevenwcarter/rustline", tag = "v0.1.0" }`,
+embed your `manifest.toml` with
+`#[unsafe(link_section = "rustline-manifest")]` (see any repo above), release
+a `<name>.wasm` asset from a `v*` tag, and open a PR adding your plugin to
+`registry/index.json` so `rustline plugin search` finds it.
+
 [extism-pdk]: https://github.com/extism/rust-pdk
 
 ## Design
