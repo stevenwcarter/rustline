@@ -14,6 +14,10 @@ pub struct MemoryWidget {
     pub alt_format: String,
     pub down_format: String,
     pub bar_width: usize,
+    /// Rendered cell count for `{spark}`. Fixed rather than derived from the
+    /// history length, so the widget is the same width on the first tick as on
+    /// the hundredth — the ring starts empty and fills one entry per refresh.
+    pub spark_width: usize,
     pub warn_percent: f64,
     pub crit_percent: f64,
     /// Overrides `{icon}` with a fixed glyph instead of [`MEMORY_ICON`].
@@ -60,7 +64,10 @@ impl Widget for MemoryWidget {
                     .replace("{avail}", &format_bytes(m.available_bytes))
                     .replace("{percent}", &crate::widgets::pad_percent(percent))
                     .replace("{bar}", &bar::gauge_bar(fraction, self.bar_width))
-                    .replace("{spark}", &sparkline(&ctx.mem_history, 100.0))
+                    .replace(
+                        "{spark}",
+                        &sparkline(&ctx.mem_history, 100.0, self.spark_width),
+                    )
                     .replace("{icon}", self.icon.as_deref().unwrap_or(MEMORY_ICON));
                 let kind = crate::widgets::alert_over(
                     fraction * 100.0,
@@ -150,6 +157,7 @@ mod tests {
             alt_format: String::new(),
             down_format: down.into(),
             bar_width: 8,
+            spark_width: 8,
             warn_percent: 80.0,
             crit_percent: 92.0,
             icon: None,
@@ -211,6 +219,7 @@ mod tests {
             alt_format: "{icon} {bar}".into(),
             down_format: String::new(),
             bar_width: 8,
+            spark_width: 8,
             warn_percent: 80.0,
             crit_percent: 92.0,
             icon: None,
@@ -227,6 +236,7 @@ mod tests {
             alt_format: String::new(),
             down_format: String::new(),
             bar_width: 8,
+            spark_width: 8,
             warn_percent: 80.0,
             crit_percent: 92.0,
             icon: None,
@@ -238,6 +248,7 @@ mod tests {
             format: "x".into(),
             down_format: String::new(),
             bar_width: 8,
+            spark_width: 8,
             warn_percent: 80.0,
             crit_percent: 92.0,
             icon: None,
@@ -287,14 +298,37 @@ mod tests {
         let mut c = ctx(mem(16 * g, 8 * g, 8 * g));
         c.mem_history = vec![0.0, 50.0, 100.0];
         let out = w("{spark}", "").render(&c);
-        assert_eq!(out[0].text, "▁▅█");
+        // 3 readings in an 8-cell spark: left-padded, newest at the right.
+        assert_eq!(out[0].text, "     ▁▅█");
     }
 
     #[test]
-    fn spark_placeholder_empty_history_is_empty_string() {
+    fn spark_placeholder_empty_history_renders_full_width_padding() {
+        // Same reasoning as cpu.rs: full-width spaces on the first tick, not
+        // "" (which would grow a cell per refresh) and not ▁ (which would
+        // claim a 0% reading that was never taken, invariant #6).
         let g = 1024u64.pow(3);
         let out = w("{spark}", "").render(&ctx(mem(16 * g, 8 * g, 8 * g)));
-        assert_eq!(out[0].text, "");
+        assert_eq!(out[0].text, "        ");
+    }
+
+    /// The seam this change exists for: constant rendered width as the ring
+    /// fills, asserted on the segment text rather than on `sparkline` alone.
+    #[test]
+    fn rendered_spark_width_is_constant_while_the_ring_fills() {
+        let g = 1024u64.pow(3);
+        let widths: Vec<usize> = (0..=8)
+            .map(|n| {
+                let mut c = ctx(mem(16 * g, 8 * g, 8 * g));
+                c.mem_history = vec![42.0; n];
+                w("{spark}", "").render(&c)[0].text.chars().count()
+            })
+            .collect();
+        assert!(
+            widths.windows(2).all(|p| p[0] == p[1]),
+            "memory spark width jitters as the ring fills: {widths:?}"
+        );
+        assert_eq!(widths[0], 8);
     }
 
     #[test]

@@ -14,6 +14,10 @@ pub struct CpuWidget {
     pub alt_format: String,
     pub down_format: String,
     pub bar_width: usize,
+    /// Rendered cell count for `{spark}`. Fixed rather than derived from the
+    /// history length, so the widget is the same width on the first tick as on
+    /// the hundredth — the ring starts empty and fills one entry per refresh.
+    pub spark_width: usize,
     pub warn_percent: f64,
     pub crit_percent: f64,
     /// Overrides `{icon}` with a fixed glyph instead of [`CPU_ICON`]. `None`
@@ -34,7 +38,10 @@ impl Widget for CpuWidget {
                         "{bar}",
                         &bar::gauge_bar(c.percent as f64 / 100.0, self.bar_width),
                     )
-                    .replace("{spark}", &sparkline(&ctx.cpu_history, 100.0))
+                    .replace(
+                        "{spark}",
+                        &sparkline(&ctx.cpu_history, 100.0, self.spark_width),
+                    )
                     .replace("{icon}", self.icon.as_deref().unwrap_or(CPU_ICON));
                 let kind = crate::widgets::alert_over(
                     c.percent as f64,
@@ -113,6 +120,7 @@ mod tests {
             alt_format: String::new(),
             down_format: down.into(),
             bar_width: 8,
+            spark_width: 8,
             warn_percent: 80.0,
             crit_percent: 95.0,
             icon: None,
@@ -126,6 +134,7 @@ mod tests {
             alt_format: alt.into(),
             down_format: down.into(),
             bar_width: 8,
+            spark_width: 8,
             warn_percent: 80.0,
             crit_percent: 95.0,
             icon: None,
@@ -237,15 +246,39 @@ mod tests {
         let mut c = ctx(Some(CpuUsage { percent: 50.0 }));
         c.cpu_history = vec![0.0, 50.0, 100.0];
         let out = w("{spark}", "").render(&c);
-        assert_eq!(out[0].text, "▁▅█");
+        // 3 readings in an 8-cell spark: left-padded, newest at the right.
+        assert_eq!(out[0].text, "     ▁▅█");
     }
 
     #[test]
-    fn spark_placeholder_empty_history_is_empty_string() {
-        // No history populated (e.g. the bin never did the {spark}-gated
-        // read) -> {spark} collapses to empty, not a panic or placeholder.
+    fn spark_placeholder_empty_history_renders_full_width_padding() {
+        // The ring starts empty and gains one entry per refresh, so on the
+        // first tick {spark} has nothing to draw. It still occupies its full
+        // spark_width in spaces rather than collapsing to "" -- otherwise the
+        // widget grows a cell per tick and shifts every segment beside it.
+        // Spaces, not ▁, because a zero glyph would claim a 0% reading
+        // that was never taken (invariant #6).
         let out = w("{spark}", "").render(&ctx(Some(CpuUsage { percent: 50.0 })));
-        assert_eq!(out[0].text, "");
+        assert_eq!(out[0].text, "        ");
+    }
+
+    /// The seam this change exists for: the rendered segment is the same
+    /// width on tick 1 as on tick 8, measured on the segment text rather than
+    /// on `sparkline` alone.
+    #[test]
+    fn rendered_spark_width_is_constant_while_the_ring_fills() {
+        let widths: Vec<usize> = (0..=8)
+            .map(|n| {
+                let mut c = ctx(Some(CpuUsage { percent: 50.0 }));
+                c.cpu_history = vec![42.0; n];
+                w("{spark}", "").render(&c)[0].text.chars().count()
+            })
+            .collect();
+        assert!(
+            widths.windows(2).all(|p| p[0] == p[1]),
+            "cpu spark width jitters as the ring fills: {widths:?}"
+        );
+        assert_eq!(widths[0], 8);
     }
 
     #[test]

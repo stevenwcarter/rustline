@@ -37,8 +37,11 @@
   `plugin install` (W38). `WidgetOpts` gains a `throughput: ThroughputOpts`
   (W47 — `format`/`alt_format`/`down_format`/`interface`/color/click, mirroring
   the other opt-in widgets), and `CpuOpts`/`MemoryOpts` each gain a
-  `spark_width` (W45, default 8 — the `{spark}` history ring length, consulted
-  when `format` **or** `alt_format` references `{spark}`, W56). `Config` also
+  `spark_width` (W45, default 8 — both the `{spark}` history ring length and
+  the rendered cell count, consulted when `format` **or** `alt_format`
+  references `{spark}`, W56; the ring is sized at the bin's build edge while
+  `CpuWidget`/`MemoryWidget` carry the same value to left-pad a partly-filled
+  ring with spaces, so the widget never changes width as it fills). `Config` also
   gains `pub
   instances: HashMap<WidgetName, Value>` (`#[serde(default)]`, W46) — one
   raw `[instances.<name>]` table per named widget instance; the entry's

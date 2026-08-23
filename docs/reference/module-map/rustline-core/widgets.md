@@ -79,9 +79,16 @@
   the clamp has to live in the renderer, where it holds for every caller
   regardless of how the value arrived. The `spark_width` clamp additionally
   bounds a *file*, since the ring is persisted on every render. `spark.rs` is `pub(crate) fn sparkline(samples:
-  &[f32], max: f32) -> String` (W45), a shared pure Unicode block-eighths
-  sparkline (one glyph per historical reading, clamped `0..=1` of `max`) backing
-  the `{spark}` placeholder in both `cpu.rs` and `memory.rs`; the history itself
+  &[f32], max: f32, width: usize) -> String` (W45), a shared pure Unicode
+  block-eighths sparkline (one glyph per historical reading, clamped `0..=1` of
+  `max`) backing the `{spark}` placeholder in both `cpu.rs` and `memory.rs`. It
+  emits exactly `width` cells — a partly-filled ring is left-padded with
+  spaces, newest reading at the right edge, so the widget doesn't grow a cell
+  per refresh while the ring fills; the padding is blank rather than a `▁`
+  glyph because a zero block would claim a reading that was never taken
+  (invariant #6). `width` clamps to `MAX_SPARK_WIDTH` (256), mirroring
+  `bar.rs`'s `MAX_BAR_WIDTH`, since `spark_width` is unbounded user config that
+  now sizes a `String` allocation as well as the ring; the history itself
   rides `Context.cpu_history`/`mem_history`, populated at the bin's build edge
   only when a widget's `format` **or** `alt_format` references `{spark}` (W56;
   see `history.rs`/`cpu.rs`/
