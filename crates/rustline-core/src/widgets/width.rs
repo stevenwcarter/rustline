@@ -63,6 +63,20 @@ pub(crate) fn format_rate(bytes_per_sec: u64) -> String {
     format!("{numeral:>w$}{suffix}", w = RATE_DIGITS)
 }
 
+/// Width of the numeral field in [`pad_percent`], in characters.
+const PERCENT_DIGITS: usize = 3;
+
+/// An integer percentage right-aligned in [`PERCENT_DIGITS`] characters:
+/// `"  7"`, `" 42"`, `"100"`. Keeps `cpu`/`memory`/`battery`/`disk` from
+/// shifting two characters wide as a reading crosses 10% and 100%.
+///
+/// The width is a minimum, never a truncation: `memory` and `disk` derive
+/// the percentage from an unclamped `used / total`, so a pathological
+/// over-100 reading must render itself rather than be cut to fit.
+pub(crate) fn pad_percent(percent: u64) -> String {
+    format!("{percent:>w$}", w = PERCENT_DIGITS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +123,21 @@ mod tests {
             let out = format_rate(n);
             assert_eq!(out.chars().count(), 5, "format_rate({n}) = {out:?}");
         }
+    }
+
+    #[test]
+    fn pad_percent_right_aligns_to_three() {
+        assert_eq!(pad_percent(0), "  0");
+        assert_eq!(pad_percent(7), "  7");
+        assert_eq!(pad_percent(42), " 42");
+        assert_eq!(pad_percent(100), "100");
+    }
+
+    /// The width is a floor, not a field to clip into: `memory`/`disk`
+    /// compute their percentage from an unclamped `used / total`.
+    #[test]
+    fn pad_percent_never_truncates() {
+        assert_eq!(pad_percent(105), "105");
+        assert_eq!(pad_percent(1000), "1000");
     }
 }

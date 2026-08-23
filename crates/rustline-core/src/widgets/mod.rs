@@ -46,7 +46,7 @@ pub use windows::Windows;
 pub(crate) use alert::{AlertKind, alert_over, alert_style, alert_under};
 // Re-exported for the numeric widgets: constant-width numerals so the bar
 // doesn't shift sideways on every status-interval tick.
-pub(crate) use width::format_rate;
+pub(crate) use width::{format_rate, pad_percent};
 
 use crate::config::{
     BatteryOpts, CpuOpts, DateTimeOpts, DiskOpts, GitOpts, InstanceParse, InstanceSpec, LanIpOpts,
@@ -618,7 +618,7 @@ mod tests {
             .map(|s| s.text)
             .collect();
         // default format "{icon} {percent}%", 73% discharging -> md-battery-70.
-        assert_eq!(texts, vec!["\u{f0080} 73%".to_string()]);
+        assert_eq!(texts, vec!["\u{f0080}  73%".to_string()]);
 
         // No battery + default (empty) down_format -> widget skipped.
         let mut c0 = ctx(Vec::new());
@@ -657,7 +657,7 @@ mod tests {
         assert_eq!(
             texts,
             vec![
-                "\u{f061a} 50%".to_string(),
+                "\u{f061a}  50%".to_string(),
                 "\u{f035b} 8.0G/16G".to_string()
             ]
         );

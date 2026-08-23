@@ -39,7 +39,7 @@ impl Widget for DiskWidget {
                     .replace("{used}", &format_bytes(d.used_bytes))
                     .replace("{total}", &format_bytes(d.total_bytes))
                     .replace("{avail}", &format_bytes(d.available_bytes))
-                    .replace("{percent}", &percent.to_string())
+                    .replace("{percent}", &crate::widgets::pad_percent(percent))
                     .replace("{bar}", &bar::gauge_bar(fraction, self.bar_width))
                     .replace("{mount}", &self.mount);
                 let kind = crate::widgets::alert_over(
@@ -150,7 +150,7 @@ mod tests {
         let g = 1024u64.pow(3);
         let out =
             w("{used}/{total} {avail} {percent}%", "").render(&ctx(disk(16 * g, 6 * g, 10 * g)));
-        assert_eq!(out[0].text, "6.0G/16G 10G 38%"); // 6/16 = 37.5 -> 38
+        assert_eq!(out[0].text, "6.0G/16G 10G  38%"); // 6/16 = 37.5 -> 38
     }
 
     #[test]
@@ -180,13 +180,13 @@ mod tests {
             },
         );
         let out = widget.render(&c);
-        assert_eq!(out[0].text, "/home: 50%");
+        assert_eq!(out[0].text, "/home:  50%");
     }
 
     #[test]
     fn zero_total_does_not_divide_by_zero() {
         let out = w("{percent}% {bar}", "").render(&ctx(disk(0, 0, 0)));
-        assert_eq!(out[0].text, "0% ░░░░░░░░");
+        assert_eq!(out[0].text, "  0% ░░░░░░░░");
     }
 
     #[test]
@@ -284,5 +284,23 @@ mod tests {
         let out = w("{percent}%", "").render(&c);
         assert_eq!(out[0].style.bg, Some(crate::Color::Indexed(214)));
         assert!(out[0].style.bold);
+    }
+
+    #[test]
+    fn rendered_percent_width_is_constant() {
+        let g = 1024u64.pow(3);
+        let widths: Vec<usize> = [0u64, 7, 42, 100]
+            .iter()
+            .map(|&pct| {
+                let used = g * pct;
+                let out = w("{percent}%", "").render(&ctx(disk(100 * g, used, 100 * g - used)));
+                out[0].text.chars().count()
+            })
+            .collect();
+        assert!(
+            widths.windows(2).all(|p| p[0] == p[1]),
+            "disk render width jitters: {widths:?}"
+        );
+        assert_eq!(widths[0], 4);
     }
 }
