@@ -58,7 +58,7 @@ impl Widget for MemoryWidget {
                     .replace("{used}", &format_bytes(m.used_bytes))
                     .replace("{total}", &format_bytes(m.total_bytes))
                     .replace("{avail}", &format_bytes(m.available_bytes))
-                    .replace("{percent}", &percent.to_string())
+                    .replace("{percent}", &crate::widgets::pad_percent(percent))
                     .replace("{bar}", &bar::gauge_bar(fraction, self.bar_width))
                     .replace("{spark}", &sparkline(&ctx.mem_history, 100.0))
                     .replace("{icon}", self.icon.as_deref().unwrap_or(MEMORY_ICON));
@@ -172,7 +172,7 @@ mod tests {
         let g = 1024u64.pow(3);
         let out =
             w("{used}/{total} {avail} {percent}%", "").render(&ctx(mem(16 * g, 6 * g, 10 * g)));
-        assert_eq!(out[0].text, "6.0G/16G 10G 38%"); // avail 10 GiB -> "10G"; 6/16 = 37.5 -> 38
+        assert_eq!(out[0].text, "6.0G/16G 10G  38%"); // avail 10 GiB -> "10G"; 6/16 = 37.5 -> 38
     }
 
     #[test]
@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn zero_total_does_not_divide_by_zero() {
         let out = w("{percent}% {bar}", "").render(&ctx(mem(0, 0, 0)));
-        assert_eq!(out[0].text, "0% ░░░░░░░░");
+        assert_eq!(out[0].text, "  0% ░░░░░░░░");
     }
 
     #[test]
@@ -251,7 +251,7 @@ mod tests {
         let mut widget = w("{icon} {percent}%", "");
         widget.icon = Some("M".into());
         let out = widget.render(&ctx(mem(16 * g, 8 * g, 8 * g)));
-        assert_eq!(out[0].text, "M 50%");
+        assert_eq!(out[0].text, "M  50%");
     }
 
     #[test]
@@ -259,7 +259,7 @@ mod tests {
         // Characterization: an unset icon renders the built-in glyph unchanged.
         let g = 1024u64.pow(3);
         let out = w("{icon} {percent}%", "").render(&ctx(mem(16 * g, 8 * g, 8 * g)));
-        assert_eq!(out[0].text, "\u{f035b} 50%");
+        assert_eq!(out[0].text, "\u{f035b}  50%");
     }
 
     #[test]
@@ -309,6 +309,24 @@ mod tests {
         c.mem_history = vec![10.0, 20.0, 30.0];
         let with_history = w("{used}/{total} {percent}%", "").render(&c);
         assert_eq!(without_history[0].text, with_history[0].text);
-        assert_eq!(with_history[0].text, "6.0G/16G 38%");
+        assert_eq!(with_history[0].text, "6.0G/16G  38%");
+    }
+
+    #[test]
+    fn rendered_percent_width_is_constant() {
+        let g = 1024u64.pow(3);
+        let widths: Vec<usize> = [0u64, 7, 42, 100]
+            .iter()
+            .map(|&pct| {
+                let used = g * pct;
+                let out = w("{percent}%", "").render(&ctx(mem(100 * g, used, 100 * g - used)));
+                out[0].text.chars().count()
+            })
+            .collect();
+        assert!(
+            widths.windows(2).all(|p| p[0] == p[1]),
+            "memory render width jitters: {widths:?}"
+        );
+        assert_eq!(widths[0], 4);
     }
 }

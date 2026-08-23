@@ -29,7 +29,7 @@ impl Widget for CpuWidget {
                 let fmt =
                     crate::widgets::active_format(ctx, &self.name, &self.format, &self.alt_format);
                 let text = fmt
-                    .replace("{percent}", &percent.to_string())
+                    .replace("{percent}", &crate::widgets::pad_percent(percent))
                     .replace(
                         "{bar}",
                         &bar::gauge_bar(c.percent as f64 / 100.0, self.bar_width),
@@ -137,11 +137,11 @@ mod tests {
         let mut c = ctx(Some(CpuUsage { percent: 50.0 }));
         c.toggled.insert(WidgetName::from("cpu"));
         let out = w2("{percent}%", "{icon} {bar} {percent}%", "").render(&c);
-        assert_eq!(out[0].text, "\u{f061a} ████░░░░ 50%");
+        assert_eq!(out[0].text, "\u{f061a} ████░░░░  50%");
         // untoggled -> normal format
         let out = w2("{percent}%", "{icon} {bar} {percent}%", "")
             .render(&ctx(Some(CpuUsage { percent: 50.0 })));
-        assert_eq!(out[0].text, "50%");
+        assert_eq!(out[0].text, " 50%");
     }
 
     #[test]
@@ -156,9 +156,9 @@ mod tests {
     #[test]
     fn renders_percent_rounded() {
         let out = w("{percent}%", "").render(&ctx(Some(CpuUsage { percent: 37.4 })));
-        assert_eq!(out[0].text, "37%");
+        assert_eq!(out[0].text, " 37%");
         let out = w("{percent}%", "").render(&ctx(Some(CpuUsage { percent: 37.6 })));
-        assert_eq!(out[0].text, "38%");
+        assert_eq!(out[0].text, " 38%");
     }
 
     #[test]
@@ -183,7 +183,7 @@ mod tests {
     fn below_threshold_is_plain_segment() {
         // Characterization: no alert -> default (unstyled) segment, as before.
         let out = w("{percent}%", "").render(&ctx(Some(CpuUsage { percent: 50.0 })));
-        assert_eq!(out[0].text, "50%");
+        assert_eq!(out[0].text, " 50%");
         assert_eq!(out[0].style, crate::Style::default());
     }
 
@@ -211,14 +211,14 @@ mod tests {
         let mut widget = w("{icon} {percent}%", "");
         widget.icon = Some("C".into());
         let out = widget.render(&ctx(Some(CpuUsage { percent: 50.0 })));
-        assert_eq!(out[0].text, "C 50%");
+        assert_eq!(out[0].text, "C  50%");
     }
 
     #[test]
     fn cpu_icon_none_uses_default() {
         // Characterization: an unset icon renders the built-in glyph unchanged.
         let out = w("{icon} {percent}%", "").render(&ctx(Some(CpuUsage { percent: 50.0 })));
-        assert_eq!(out[0].text, "\u{f061a} 50%");
+        assert_eq!(out[0].text, "\u{f061a}  50%");
     }
 
     #[test]
@@ -259,6 +259,26 @@ mod tests {
         c.cpu_history = vec![10.0, 20.0, 30.0];
         let with_history = w("{icon} {percent}%", "").render(&c);
         assert_eq!(without_history[0].text, with_history[0].text);
-        assert_eq!(with_history[0].text, "\u{f061a} 37%");
+        assert_eq!(with_history[0].text, "\u{f061a}  37%");
+    }
+
+    /// Constant rendered width across the 1-, 2-, and 3-digit percentages,
+    /// asserted on the segment text so a future render-pipeline change that
+    /// trimmed padding would fail here rather than silently reintroduce the
+    /// jitter.
+    #[test]
+    fn rendered_percent_width_is_constant() {
+        let widths: Vec<usize> = [0.0f32, 7.0, 42.0, 100.0]
+            .iter()
+            .map(|&percent| {
+                let out = w("{percent}%", "").render(&ctx(Some(CpuUsage { percent })));
+                out[0].text.chars().count()
+            })
+            .collect();
+        assert!(
+            widths.windows(2).all(|p| p[0] == p[1]),
+            "cpu render width jitters: {widths:?}"
+        );
+        assert_eq!(widths[0], 4); // 3-wide numeral + "%"
     }
 }

@@ -56,7 +56,10 @@ impl Widget for BatteryWidget {
                 let icon = self.icon.as_deref().unwrap_or_else(|| battery_icon(&b));
                 let text = fmt
                     .replace("{icon}", icon)
-                    .replace("{percent}", &b.percent.to_string())
+                    .replace(
+                        "{percent}",
+                        &crate::widgets::pad_percent(u64::from(b.percent)),
+                    )
                     .replace("{state}", state_word(b.state));
                 let kind = if b.state == BatteryState::Discharging {
                     crate::widgets::alert_under(
@@ -160,7 +163,7 @@ mod tests {
             icon: None,
         };
         let out = widget.render(&ctx(bat(73, BatteryState::Discharging)));
-        assert_eq!(out[0].text, "\u{f0080} 73% discharging");
+        assert_eq!(out[0].text, "\u{f0080}  73% discharging");
     }
 
     #[test]
@@ -279,7 +282,7 @@ mod tests {
             icon: None,
         }
         .render(&c);
-        assert_eq!(out[0].text, "\u{f0080} 73% discharging");
+        assert_eq!(out[0].text, "\u{f0080}  73% discharging");
     }
 
     #[test]
@@ -318,7 +321,7 @@ mod tests {
         widget.icon = Some("B".into());
         // 73% discharging would normally bucket to \u{f0080}; the override wins.
         let out = widget.render(&ctx(bat(73, BatteryState::Discharging)));
-        assert_eq!(out[0].text, "B 73%");
+        assert_eq!(out[0].text, "B  73%");
     }
 
     #[test]
@@ -326,7 +329,7 @@ mod tests {
         // Characterization: an unset icon renders the computed bucketed glyph
         // unchanged.
         let out = w().render(&ctx(bat(73, BatteryState::Discharging)));
-        assert_eq!(out[0].text, "\u{f0080} 73%");
+        assert_eq!(out[0].text, "\u{f0080}  73%");
     }
 
     #[test]
@@ -350,5 +353,30 @@ mod tests {
         c3.colors = c.colors.clone();
         let out = w().render(&c3); // 8% <= crit(10) -> crit
         assert_eq!(out[0].style.bg, Some(crate::Color::Indexed(196)));
+    }
+
+    #[test]
+    fn rendered_percent_width_is_constant() {
+        let widths: Vec<usize> = [0u8, 7, 42, 100]
+            .iter()
+            .map(|&percent| {
+                let widget = BatteryWidget {
+                    name: "battery".into(),
+                    format: "{icon} {percent}%".into(),
+                    alt_format: String::new(),
+                    down_format: String::new(),
+                    warn_percent: 20.0,
+                    crit_percent: 10.0,
+                    icon: Some("B".into()),
+                };
+                let out = widget.render(&ctx(bat(percent, BatteryState::Discharging)));
+                out[0].text.chars().count()
+            })
+            .collect();
+        assert!(
+            widths.windows(2).all(|p| p[0] == p[1]),
+            "battery render width jitters: {widths:?}"
+        );
+        assert_eq!(widths[0], 6); // "B" + " " + 3-wide numeral + "%"
     }
 }

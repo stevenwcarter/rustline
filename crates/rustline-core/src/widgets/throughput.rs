@@ -1,12 +1,14 @@
-use crate::widgets::memory::format_bytes;
+use crate::widgets::format_rate;
 use crate::{Context, RangeName, Segment, Widget, WidgetName};
 
 /// Renders network throughput (download/upload bytes-per-second), read from
 /// `Context.throughputs` keyed by this instance's own `iface_key` (W46 —
 /// multiple `throughput` widget instances pinned to different interfaces
 /// each read their own entry rather than sharing `Context.throughput`).
-/// Pure — reads only that map. `{down}`/`{up}` are human-readable binary
-/// sizes (via `memory.rs`'s `format_bytes`) suffixed `/s`, e.g. `1.2M/s`.
+/// Pure — reads only that map. `{down}`/`{up}` are constant-width binary
+/// rates (via `width.rs`'s `format_rate`) suffixed `/s` — always exactly
+/// seven characters, e.g. ` 1.2M/s`, so the segment never shifts width
+/// between ticks.
 /// Not threshold-aware (no `alert.rs` use, unlike
 /// `cpu`/`memory`/`battery`/`loadavg`/`disk`) — a throughput rate has no
 /// universally "unhealthy" ceiling the way a percentage does.
@@ -36,9 +38,9 @@ impl Widget for ThroughputWidget {
                 let text = fmt
                     .replace(
                         "{down}",
-                        &format!("{}/s", format_bytes(t.down_bytes_per_sec)),
+                        &format!("{}/s", format_rate(t.down_bytes_per_sec)),
                     )
-                    .replace("{up}", &format!("{}/s", format_bytes(t.up_bytes_per_sec)));
+                    .replace("{up}", &format!("{}/s", format_rate(t.up_bytes_per_sec)));
                 vec![Segment::new(text)]
             }
             None => {
@@ -130,13 +132,13 @@ mod tests {
     fn renders_down_and_up_as_human_readable_rates() {
         let g = 1024u64.pow(3);
         let out = w("{down} {up}", "").render(&ctx(rate(g, 512 * 1024 * 1024)));
-        assert_eq!(out[0].text, "1.0G/s 512M/s");
+        assert_eq!(out[0].text, " 1.0G/s  512M/s");
     }
 
     #[test]
     fn renders_small_rates_in_bytes() {
         let out = w("down={down}", "").render(&ctx(rate(0, 42)));
-        assert_eq!(out[0].text, "down=0B/s");
+        assert_eq!(out[0].text, "down=   0B/s");
     }
 
     #[test]
@@ -162,7 +164,7 @@ mod tests {
             iface_key: String::new(),
         }
         .render(&c);
-        assert_eq!(out[0].text, "1.0K/s/2.0K/s");
+        assert_eq!(out[0].text, " 1.0K/s/ 2.0K/s");
     }
 
     #[test]
@@ -180,7 +182,7 @@ mod tests {
             ..w("{down} {up}", "")
         };
         let out = widget.render(&c);
-        assert_eq!(out[0].text, "1.0K/s 2.0K/s");
+        assert_eq!(out[0].text, " 1.0K/s  2.0K/s");
         // A different-keyed instance sees nothing for "eth0"'s data.
         let other = ThroughputWidget {
             iface_key: "wlan0".into(),
@@ -199,5 +201,40 @@ mod tests {
             alt.range_name(),
             Some(RangeName::parse("throughput").unwrap())
         );
+    }
+
+    /// The seam the feature actually crosses is the rendered segment text,
+    /// not the formatter in isolation. This pins that nothing between
+    /// `format_rate` and `Segment::text` trims or collapses the padding — a
+    /// future render-pipeline change that started trimming would otherwise
+    /// kill constant width silently, with every other test still green.
+    #[test]
+    fn rendered_rate_width_is_constant_across_every_magnitude() {
+        let k = 1024u64;
+        let rates = [
+            (0, 0),
+            (1, 42),
+            (1023, 999),
+            (k, 2 * k),
+            (13_000, 102_360),
+            (126_000, 512 * k),
+            (k.pow(2), k.pow(2) * 3 / 2),
+            (512 * k.pow(2), k.pow(3)),
+            (k.pow(3), 42 * k.pow(3)),
+            (k.pow(4), 1023 * k.pow(3)),
+        ];
+        let widths: Vec<usize> = rates
+            .iter()
+            .map(|&(down, up)| {
+                let out = w(" {down} {up}", "").render(&ctx(rate(down, up)));
+                out[0].text.chars().count()
+            })
+            .collect();
+        assert!(
+            widths.windows(2).all(|p| p[0] == p[1]),
+            "throughput render width jitters across magnitudes: {widths:?}"
+        );
+        // " " + 7-char rate + " " + 7-char rate.
+        assert_eq!(widths[0], 16);
     }
 }
