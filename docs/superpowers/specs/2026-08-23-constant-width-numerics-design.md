@@ -98,8 +98,8 @@ Two properties worth stating explicitly because they are easy to get wrong:
 - The width is a **minimum, never a truncation**. Values are never clipped to
   fit. The unit ladder caps at `T` with a scaled value `< 1024`, so the field
   overflows only above 1024 TiB/s, which is not reachable from a NIC counter
-  diff; if it ever were, the render would be 6 characters wide rather than
-  wrong.
+  diff; if it ever were, the render would grow wider rather than wrong —
+  `u64::MAX` renders `"16777216T"`, 9 characters, not 6.
 
 #### `pub(crate) fn pad_percent(percent: u64) -> String`
 

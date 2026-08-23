@@ -390,7 +390,8 @@ level-bucketed, charging-aware Nerd-Font icon. It works on Linux (sysfs) and
 macOS (`pmset`); on any other platform, or a host with no battery, it renders
 nothing by default.
 
-Takes a `format` where `{icon}`, `{percent}`, and `{state}` are replaced, and
+Takes a `format` where `{icon}`, `{percent}` (right-aligned to 3 characters —
+`  7`, ` 42`, `100`), and `{state}` are replaced, and
 a `down_format` shown when there's no battery reading (default empty — same
 collapse-to-nothing behavior as the IP widgets' `down_format`), plus an
 `alt_format` for [click-to-toggle](#click-to-toggle-widget-views). It's also
@@ -424,7 +425,9 @@ a `format` (default `"{icon} {used}/{total}"`) with `{icon}` (nf-md-memory),
 `{percent}`, `{bar}`, and `{spark}` placeholders. `{bar}` is a `bar_width`-cell
 (default 8) Unicode block-eighths gauge shared by both widgets; `{spark}` is a
 Unicode sparkline of the last `spark_width` readings (default 8), persisted
-across refreshes. Both also take a
+across refreshes. `{percent}` on both renders right-aligned in a 3-character
+field (`  7`, ` 42`, `100`), so the widget's width doesn't jitter as the
+reading crosses 10%/100%. Both also take a
 `down_format` (default empty) shown on an unsupported platform or a failed
 read — same collapse-to-nothing behavior as the `battery` widget's
 `down_format` — and an `alt_format` for
@@ -511,7 +514,8 @@ nothing by default.
 
 Takes a `mount` (default `/`), a `format` (default `" {used}/{total}"`, no
 icon) with `{used}`/`{total}`/`{avail}` (human-readable binary sizes, e.g.
-`6.2G`), `{percent}`, `{bar}` (a `bar_width`-cell, default 8, Unicode
+`6.2G`), `{percent}` (right-aligned to 3 characters — `  7`, ` 42`, `100`),
+`{bar}` (a `bar_width`-cell, default 8, Unicode
 gauge — the same one `cpu`/`memory` use), and `{mount}` (the configured mount
 string itself) placeholders, a `down_format` shown when there's no disk
 reading (default empty — same collapse-to-nothing behavior as the other
@@ -569,10 +573,15 @@ nothing on the **first** refresh (nothing yet to diff against), and nothing on
 a non-Linux platform or a failed read — never a fake `0`.
 
 Takes a `format` (default `" {down} {up}"`, no icon) with `{down}`/`{up}`
-placeholders (human-readable binary sizes suffixed `/s`, e.g. `1.2M/s`), an
-optional `interface` (pin to a single NIC; omit to aggregate every non-loopback
-interface), a `down_format` (default empty), and an `alt_format` for
-[click-to-toggle](#click-to-toggle-widget-views).
+placeholders, an optional `interface` (pin to a single NIC; omit to aggregate
+every non-loopback interface), a `down_format` (default empty), and an
+`alt_format` for [click-to-toggle](#click-to-toggle-widget-views).
+`{down}`/`{up}` render as constant-width binary rates suffixed `/s` — a
+4-character right-aligned numeral plus a one-character unit, always exactly
+seven characters (` 1.2K/s`, `12.7K/s`, ` 123K/s`, `   0B/s`). The decimal is
+kept only where it fits, so the widget's width never changes between
+refreshes. This is `width.rs`'s `format_rate`, not `memory`'s `format_bytes`
+— `{used}`/`{total}` keep the latter's variable-width output.
 
 ```toml
 [layout]

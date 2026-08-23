@@ -65,8 +65,9 @@ down_format = "TS off"
 
 **Battery widget:** `battery` is opt-in — not in the default layout. It takes
 a `format` (default `"{icon} {percent}%"`) with `{icon}` (level-bucketed,
-charging-aware Nerd-Font glyph, or the `icon` override below), `{percent}`,
-and `{state}` placeholders, and a `down_format` (default `""`, i.e. render
+charging-aware Nerd-Font glyph, or the `icon` override below), `{percent}`
+(right-aligned to 3 characters — `  7`, ` 42`, `100`), and `{state}`
+placeholders, and a `down_format` (default `""`, i.e. render
 nothing) shown when `Context.battery` is `None` (no battery, unsupported
 platform, or a failed read) — same collapse-placeholders-to-empty behavior as
 the IP widgets' `down_format`. It's also **threshold-aware** (see Themes
@@ -94,7 +95,9 @@ placeholders. `memory` takes a `format`
 (default `"{icon} {used}/{total}"`) with `{icon}` (nf-md-memory, or its own
 `icon` override), `{used}`/`{total}`/`{avail}` (human-readable binary sizes,
 e.g. `6.2G`), `{percent}`, `{bar}` (`bar_width`, default 8), and `{spark}`
-(`spark_width`, default 8) placeholders.
+(`spark_width`, default 8) placeholders. `{percent}` on both renders
+right-aligned in a 3-character field (`  7`, ` 42`, `100`), so the widget's
+width doesn't jitter as the reading crosses 10%/100%.
 Both take a `down_format` (default `""`, i.e. render nothing) shown when the
 platform read failed or is unsupported — same collapse-placeholders-to-empty
 behavior as `battery`'s `down_format`. Both are also **threshold-aware** (see

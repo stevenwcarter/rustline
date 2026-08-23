@@ -49,7 +49,8 @@ renders nothing/`down_format`) when the mount can't be `statvfs`'d — never a
 fabricated `0` reading (invariant #6). Takes a `format` (default
 `" {used}/{total}"`, no icon placeholder — out of scope for this widget) with
 `{used}`/`{total}`/`{avail}` (human-readable binary sizes, reusing `memory`'s
-`format_bytes`), `{percent}`, `{bar}` (a `bar_width`-cell gauge, default 8,
+`format_bytes`), `{percent}` (right-aligned to 3 characters via `width.rs`'s
+`pad_percent` — `  7`, ` 42`, `100`), `{bar}` (a `bar_width`-cell gauge, default 8,
 reusing the same shared bar as `cpu`/`memory`), and a static `{mount}` (the
 configured mount string itself, not a live reading) placeholders, and a
 `down_format` (default `""`, i.e. render nothing) — same
@@ -102,12 +103,17 @@ prior sample persisted under the state dir to compute down/up rates.
 on the **first invocation** (a rate is a delta — nothing yet to diff against),
 on a non-Linux platform, or when the read fails — never a fabricated `0` rate
 (invariant #6). Takes a `format` (default `" {down} {up}"`, no icon
-placeholder) with `{down}`/`{up}` (human-readable binary sizes suffixed `/s`,
-reusing `memory`'s `format_bytes`, e.g. `1.2M/s`) placeholders, an optional
-`interface` (pin to one named interface; `None`, the default, aggregates every
-non-loopback interface), and a `down_format` (default `""`) — same
-collapse-placeholders-to-empty behavior as the other widgets' `down_format`.
-NOT threshold-aware (a rate has no universal ceiling).
+placeholder) with `{down}`/`{up}`, an optional `interface` (pin to one named
+interface; `None`, the default, aggregates every non-loopback interface),
+and a `down_format` (default `""`) — same collapse-placeholders-to-empty
+behavior as the other widgets' `down_format`. `{down}`/`{up}` render as
+constant-width binary rates suffixed `/s` — a 4-character right-aligned
+numeral plus a one-character unit, always exactly seven characters
+(` 1.2K/s`, `12.7K/s`, ` 123K/s`, `   0B/s`). The decimal is kept only where
+it fits, so the widget's width never changes between refreshes. This is
+`width.rs`'s `format_rate`, not `memory`'s `format_bytes` — `{used}`/`{total}`
+keep the latter's variable-width output. NOT threshold-aware (a rate has no
+universal ceiling).
 
 ```toml
 [widgets.throughput]

@@ -85,7 +85,17 @@
   rides `Context.cpu_history`/`mem_history`, populated at the bin's build edge
   only when a widget's `format` **or** `alt_format` references `{spark}` (W56;
   see `history.rs`/`cpu.rs`/
-  `memory.rs` in the bin). `cpu.rs` is the `cpu` widget: pure over
+  `memory.rs` in the bin). `width.rs` (**Read when:** changing how a
+  byte-rate or a percentage renders, or adding a numeric placeholder that
+  must not jitter) is the shared constant-width numeric formatter:
+  `format_rate(bytes_per_sec: u64) -> String` (a 4-character right-aligned
+  numeral plus a one-character unit, always 5 characters —
+  `throughput.rs` appends `/s` for 7) and `pad_percent(percent: u64) ->
+  String` (right-aligned in 3 characters), used by `cpu`/`memory`/`battery`/
+  `disk`'s `{percent}`. Both functions are pure and take no `Context`;
+  deliberately separate from `memory.rs`'s `format_bytes`, which `memory`/
+  `disk` still use for `{used}`/`{total}`/`{avail}` and which keeps its
+  variable-width output. `cpu.rs` is the `cpu` widget: pure over
   `Context.cpu`, with an nf-md-chip `{icon}`, `{percent}`, `{bar}`, and
   `{spark}` (over `Context.cpu_history`, `spark_width` ring length)
   placeholders, plus `warn_percent`(80)/`crit_percent`(95) threshold config
@@ -139,8 +149,9 @@
   widget's/instance's own configured `interface`, or `""` to aggregate; the
   base widget reads `[widgets.throughput].interface` the same way), with
   `{down}`/`{up}` placeholders (down/up
-  bytes-per-sec as human-readable `format_bytes` sizes suffixed `/s`, e.g.
-  `1.2M/s`), plus `alt_format`/`down_format`; NOT threshold-aware (a rate has
+  bytes-per-sec via `width.rs`'s `format_rate`, a constant-width numeral+unit
+  suffixed `/s`, always exactly 7 characters, e.g. ` 1.2K/s`), plus
+  `alt_format`/`down_format`; NOT threshold-aware (a rate has
   no universal ceiling) and NOT in the default layout.
   `toggle.rs` holds the shared click-toggle helpers
   `active_format(ctx, name: &WidgetName, format, alt) -> &str`
