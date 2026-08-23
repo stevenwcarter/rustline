@@ -700,6 +700,41 @@ mod tests {
         assert_eq!(sanitize_text(glyphs), glyphs);
     }
 
+    /// `sanitize_text` guards `#` and control characters (invariant #8). It
+    /// must leave ASCII space alone, because the numeric widgets encode
+    /// constant width as leading spaces — see `widgets/width.rs`.
+    #[test]
+    fn sanitize_preserves_padding_spaces() {
+        for s in ["   0B/s", " 1.2K/s", "12.7K/s", "  7%", "100%"] {
+            assert_eq!(sanitize_text(s), s, "padding altered in {s:?}");
+            assert!(
+                matches!(sanitize_text(s), std::borrow::Cow::Borrowed(_)),
+                "padding forced an allocation in {s:?}"
+            );
+        }
+    }
+
+    /// The full markup path preserves constant width: two equal-width
+    /// segment texts must produce equal-length markup. If a future change
+    /// added trimming anywhere between `Segment` and the emitted string,
+    /// every widget-level width test would still pass and only this one
+    /// would fail.
+    #[test]
+    fn render_region_preserves_constant_segment_width() {
+        let lens: Vec<usize> = ["   0B/s", " 1.2K/s", "12.7K/s", " 123K/s"]
+            .iter()
+            .map(|t| {
+                render_region(Direction::Left, &[seg(t, 31)], &theme())
+                    .chars()
+                    .count()
+            })
+            .collect();
+        assert!(
+            lens.windows(2).all(|p| p[0] == p[1]),
+            "markup width jitters for equal-width segment texts: {lens:?}"
+        );
+    }
+
     /// The inner content of every REAL (non-escaped) `#[...]` directive in
     /// `s`, walking bytes the same way `count_real_directives` does: an
     /// escaped `##` collapses to one literal `#` and is never the start of a

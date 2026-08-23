@@ -18,6 +18,7 @@ pub mod tailscale_ip;
 pub mod throughput;
 mod toggle;
 pub mod uptime;
+mod width;
 pub mod windows;
 
 pub use battery::BatteryWidget;
@@ -43,6 +44,9 @@ pub use windows::Windows;
 // Re-exported for the numeric widgets (cpu/memory/battery/loadavg, Tasks
 // 7-10) to render a threshold-alert badge.
 pub(crate) use alert::{AlertKind, alert_over, alert_style, alert_under};
+// Re-exported for the numeric widgets: constant-width numerals so the bar
+// doesn't shift sideways on every status-interval tick.
+pub(crate) use width::format_rate;
 
 use crate::config::{
     BatteryOpts, CpuOpts, DateTimeOpts, DiskOpts, GitOpts, InstanceParse, InstanceSpec, LanIpOpts,
@@ -823,7 +827,7 @@ mod tests {
             .map(|s| s.text)
             .collect();
         // default format " {down} {up}".
-        assert_eq!(texts, vec![" 1.0K/s 2.0K/s".to_string()]);
+        assert_eq!(texts, vec!["  1.0K/s  2.0K/s".to_string()]);
 
         // No entry for the configured interface key + default (empty)
         // down_format -> widget skipped.
