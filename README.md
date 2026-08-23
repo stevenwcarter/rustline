@@ -190,7 +190,7 @@ With no config file, `rustline` renders:
 - **Left:** pane id · hostname — e.g. `0:0.0` · `myhost`
 - **Center:** window list, active window emphasized — e.g. `0* zsh  1 vim`
 - **Right:** current directory (`$HOME` abbreviated to `~`) · cpu · memory ·
-  load average · date/time — e.g. `~/src/rustline` · `󰘚 37%` · `󰍛 6.2G/16G` ·
+  load average · date/time — e.g. `~/src/rustline` · `󰘚  37%` · `󰍛 6.2G/16G` ·
   `0.31 0.44 0.42` · `Mon < 2026-07-20 < 19:04`
 
 ## Configuration
