@@ -425,7 +425,11 @@ a `format` (default `"{icon} {used}/{total}"`) with `{icon}` (nf-md-memory),
 `{percent}`, `{bar}`, and `{spark}` placeholders. `{bar}` is a `bar_width`-cell
 (default 8) Unicode block-eighths gauge shared by both widgets; `{spark}` is a
 Unicode sparkline of the last `spark_width` readings (default 8), persisted
-across refreshes. `{percent}` on both renders right-aligned in a 3-character
+across refreshes. `{spark}` always occupies exactly `spark_width` cells: the
+history ring starts empty and gains one reading per refresh, so until it fills
+the sparkline is left-padded with **spaces** and the newest reading sits at the
+right edge. The padding is blank rather than a `▁` glyph because a zero block
+would claim a 0% reading that was never taken. `{percent}` on both renders right-aligned in a 3-character
 field (`  7`, ` 42`, `100`), so the widget's width doesn't jitter as the
 reading crosses 10%/100%. Both also take a
 `down_format` (default empty) shown on an unsupported platform or a failed
